@@ -87,12 +87,16 @@ class SearchGateway:
                 continue
             try:
                 result = self._call(provider, query.strip(), max_results, arguments, api_key, timeout)
-                return {
+                response: dict[str, Any] = {
                     "provider": provider_id,
                     "query": query.strip(),
                     "results": result,
                     "provider_failures": [{"provider": item.provider, "reason": item.reason} for item in failures],
                 }
+                warning = self._format_warning(failures)
+                if warning:
+                    response["warning"] = warning
+                return response
             except SearchError as exc:
                 self.logger.warning("Provider %s failed: %s", provider_id, exc)
                 failures.append(ProviderFailure(provider_id, str(exc)))
@@ -100,7 +104,39 @@ class SearchGateway:
                     self.cooldowns.set(self._cooldown_id(provider_id), cooldown_seconds)
 
         detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "No provider enabled"
-        raise SearchError(f"No search provider was available ({detail})", retryable=False)
+        auth_warning = self._format_warning(failures)
+        extra = f" {auth_warning}" if auth_warning else ""
+        raise SearchError(f"No search provider was available ({detail}).{extra}", retryable=False)
+
+    # =========================================================================
+    # 【功能块：格式化后端服务故障前端警告（认证 + 配额/限流）】
+    # - 输入：failures（列表，包含本次调用过程中出现故障的 ProviderFailure 对象）
+    # - 功能：将故障分为两大类别进行识别：
+    #         1) 认证类错误（401未授权、403拒绝、未配置API Key、Token无效等）
+    #         2) 配额/限流类错误（402额度耗尽、429请求过多、含"quota/额度"关键词等）
+    #         对每个类别生成独立的警告行，动态插入实际出问题的服务名与错误信息。
+    # - 输出：若存在上述任何错误则返回格式化后的多行警告文本（字符串）；否则返回 None。
+    # =========================================================================
+    @staticmethod
+    def _format_warning(failures: list[ProviderFailure]) -> str | None:
+        auth_tokens = ("401", "api key is not configured", "unauthorized", "invalid token", "invalid api key", "未授权", "认证失败")
+        quota_tokens = ("402", "429", "quota", "rate limit", "too many", "额度", "余额不足", "频率", "cooldown")
+        auth_issues: list[str] = []
+        quota_issues: list[str] = []
+        for item in failures:
+            r = item.reason.lower()
+            if any(token in r for token in auth_tokens) or ("403" in r and not any(qt in r for qt in quota_tokens)):
+                auth_issues.append(f"{item.provider} ({item.reason})")
+            elif any(token in r for token in quota_tokens):
+                quota_issues.append(f"{item.provider} ({item.reason})")
+        lines: list[str] = []
+        if auth_issues:
+            joined = "、".join(auth_issues)
+            lines.append(f"⚠️ 警告：检测到后端服务认证失败 [{joined}]。请检查 config/.env 中的 API Key 配置，或联系MCP提供商。")
+        if quota_issues:
+            joined = "、".join(quota_issues)
+            lines.append(f"⚠️ 警告：检测到后端服务配额耗尽或请求限流 [{joined}]。请稍后重试，或联系MCP提供商。")
+        return "\n".join(lines) if lines else None
 
     def _cooldown_id(self, provider_id: str) -> str:
         return f"web_search:{provider_id}"
@@ -194,7 +230,7 @@ class SearchGateway:
             # AnySearch may return newly generated credentials in a 402 body. Never
             # put provider response bodies into logs or MCP output.
             retryable = exc.code in (402, 408, 429) or 500 <= exc.code <= 599 or (exc.code == 403 and self._is_quota_message(body))
-            message = "HTTP 402: quota exhausted" if exc.code == 402 else f"HTTP {exc.code}"
+            message = f"HTTP {exc.code}: quota exhausted" if (exc.code == 402 or (exc.code == 403 and retryable)) else f"HTTP {exc.code}"
             raise SearchError(message, retryable=retryable, status=exc.code) from exc
         except (URLError, socket.timeout, TimeoutError) as exc:
             raise SearchError(f"Network error: {exc}", retryable=True) from exc
@@ -270,11 +306,15 @@ class ExtractGateway(SearchGateway):
             pending -= returned_urls
 
         ordered = sorted(extracted, key=lambda item: unique_urls.index(item["url"]))
-        return {
+        response: dict[str, Any] = {
             "results": ordered,
             "unresolved_urls": [url for url in unique_urls if url in pending],
             "failures": [{"provider": item.provider, "reason": item.reason} for item in failures],
         }
+        warning = self._format_warning(failures)
+        if warning:
+            response["warning"] = warning
+        return response
 
     def _cooldown_id(self, provider_id: str) -> str:
         return f"web_extract:{provider_id}"

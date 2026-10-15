@@ -29,6 +29,9 @@ class SearchGatewayTest(unittest.TestCase):
         self.assertEqual("exa", result["provider"])
         self.assertEqual(2, call.call_count)
         self.assertFalse(gateway.cooldowns.is_available("web_search:tavily-search"))
+        self.assertIn("warning", result)
+        self.assertIn("tavily-search (HTTP 429)", result["warning"])
+        self.assertIn("配额耗尽或请求限流", result["warning"])
 
     @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
     def test_auth_error_falls_back_and_is_reported(self):
@@ -37,7 +40,37 @@ class SearchGatewayTest(unittest.TestCase):
             result = gateway.search({"query": "test"})
         self.assertEqual("exa", result["provider"])
         self.assertEqual("HTTP 401", result["provider_failures"][0]["reason"])
+        self.assertIn("warning", result)
+        self.assertIn("tavily-search (HTTP 401)", result["warning"])
+        self.assertIn("或联系MCP提供商", result["warning"])
         self.assertEqual(2, call.call_count)
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_all_providers_auth_error_includes_warning_advice(self):
+        gateway = self.make_gateway()
+        with patch.object(gateway, "_call", side_effect=SearchError("HTTP 401", retryable=False)):
+            with self.assertRaises(SearchError) as ctx:
+                gateway.search({"query": "test"})
+        self.assertIn("或联系MCP提供商", str(ctx.exception))
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_custom_auth_message_triggers_warning(self):
+        gateway = self.make_gateway()
+        with patch.object(gateway, "_call", side_effect=[SearchError("Unauthorized: invalid token", retryable=False), [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]]) as call:
+            result = gateway.search({"query": "test"})
+        self.assertIn("warning", result)
+        self.assertIn("Unauthorized: invalid token", result["warning"])
+        self.assertIn("或联系MCP提供商", result["warning"])
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_quota_exhausted_warning(self):
+        gateway = self.make_gateway()
+        with patch.object(gateway, "_call", side_effect=[SearchError("HTTP 402: quota exhausted", retryable=True), [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]]) as call:
+            result = gateway.search({"query": "test"})
+        self.assertIn("warning", result)
+        self.assertIn("tavily-search (HTTP 402: quota exhausted)", result["warning"])
+        self.assertIn("配额耗尽或请求限流", result["warning"])
+        self.assertIn("或联系MCP提供商", result["warning"])
 
     def test_anysearch_uses_general_search_and_normalizes_response(self):
         gateway = self.make_gateway()
@@ -54,6 +87,7 @@ class McpServerTest(unittest.TestCase):
         server = McpServer(None, None, FakeLogger())
         initialized = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual("local-search-fallback-gateway", initialized["result"]["serverInfo"]["name"])
+        self.assertEqual("1.2.0", initialized["result"]["serverInfo"]["version"])
         tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual("fallback_web_search", tools["result"]["tools"][0]["name"])
         self.assertEqual("fallback_web_extract", tools["result"]["tools"][1]["name"])
@@ -79,6 +113,9 @@ class ExtractGatewayTest(unittest.TestCase):
         with patch.dict(os.environ, {"EXA_API_KEY": "b"}, clear=False), patch.object(gateway, "_validate_public_url"), patch.object(gateway, "_extract", side_effect=[SearchError("HTTP 429", retryable=True), [{"url": "https://example.com", "title": "ok", "content": "body", "truncated": False}]]) as extract:
             result = gateway.extract({"urls": ["https://example.com"]})
         self.assertEqual("exa", result["results"][0]["provider"])
+        self.assertIn("warning", result)
+        self.assertIn("tavily-search (HTTP 429)", result["warning"])
+        self.assertIn("配额耗尽或请求限流", result["warning"])
     @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
     def test_extract_auth_error_falls_back_and_is_reported(self):
         """Backend auth/param rejection must not terminate the extract fallback chain.
@@ -101,6 +138,9 @@ class ExtractGatewayTest(unittest.TestCase):
         self.assertEqual(1, len(result["failures"]))
         self.assertEqual("tavily-search", result["failures"][0]["provider"])
         self.assertEqual("HTTP 401", result["failures"][0]["reason"])
+        self.assertIn("warning", result)
+        self.assertIn("tavily-search (HTTP 401)", result["warning"])
+        self.assertIn("或联系MCP提供商", result["warning"])
         self.assertEqual(2, extract.call_count)
 
 

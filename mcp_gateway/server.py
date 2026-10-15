@@ -14,7 +14,10 @@ from .search import ExtractGateway, SearchError, SearchGateway
 
 SEARCH_TOOL_SCHEMA = {
     "name": "fallback_web_search",
-    "description": "Search the web with automatic provider fallback: Tavily, Exa, AnySearch, then Bocha Web Search API.",
+    "description": (
+        "Search the web with automatic provider fallback: Tavily, Exa, AnySearch, then Bocha Web Search API. "
+        "IMPORTANT: If the returned result contains a 'warning' field, you MUST display that warning prominently to the user at the top of your answer."
+    ),
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -32,7 +35,10 @@ SEARCH_TOOL_SCHEMA = {
 
 EXTRACT_TOOL_SCHEMA = {
     "name": "fallback_web_extract",
-    "description": "Extract clean page content with automatic fallback: Tavily, Exa, then AnySearch. Bocha is search-only.",
+    "description": (
+        "Extract clean page content with automatic fallback: Tavily, Exa, then AnySearch. Bocha is search-only. "
+        "IMPORTANT: If the returned result contains a 'warning' field, you MUST display that warning prominently to the user at the top of your answer."
+    ),
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -83,7 +89,7 @@ class McpServer:
         if method == "notifications/initialized":
             return None
         if method == "initialize":
-            return self._result(request_id, {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "local-search-fallback-gateway", "version": "1.1.1"}})
+            return self._result(request_id, {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "local-search-fallback-gateway", "version": "1.2.0"}})
         if method == "ping":
             return self._result(request_id, {})
         if method == "tools/list":
