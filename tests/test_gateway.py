@@ -31,12 +31,13 @@ class SearchGatewayTest(unittest.TestCase):
         self.assertFalse(gateway.cooldowns.is_available("web_search:tavily-search"))
 
     @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
-    def test_auth_error_does_not_fall_back(self):
+    def test_auth_error_falls_back_and_is_reported(self):
         gateway = self.make_gateway()
-        with patch.object(gateway, "_call", side_effect=SearchError("HTTP 401", retryable=False)) as call:
-            with self.assertRaises(SearchError):
-                gateway.search({"query": "test"})
-        self.assertEqual(1, call.call_count)
+        with patch.object(gateway, "_call", side_effect=[SearchError("HTTP 401", retryable=False), [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]]) as call:
+            result = gateway.search({"query": "test"})
+        self.assertEqual("exa", result["provider"])
+        self.assertEqual("HTTP 401", result["provider_failures"][0]["reason"])
+        self.assertEqual(2, call.call_count)
 
     def test_anysearch_uses_general_search_and_normalizes_response(self):
         gateway = self.make_gateway()

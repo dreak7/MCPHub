@@ -87,13 +87,17 @@ class SearchGateway:
                 continue
             try:
                 result = self._call(provider, query.strip(), max_results, arguments, api_key, timeout)
-                return {"provider": provider_id, "query": query.strip(), "results": result}
+                return {
+                    "provider": provider_id,
+                    "query": query.strip(),
+                    "results": result,
+                    "provider_failures": [{"provider": item.provider, "reason": item.reason} for item in failures],
+                }
             except SearchError as exc:
                 self.logger.warning("Provider %s failed: %s", provider_id, exc)
                 failures.append(ProviderFailure(provider_id, str(exc)))
-                if not exc.retryable:
-                    raise
-                self.cooldowns.set(self._cooldown_id(provider_id), cooldown_seconds)
+                if exc.retryable:
+                    self.cooldowns.set(self._cooldown_id(provider_id), cooldown_seconds)
 
         detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "No provider enabled"
         raise SearchError(f"No search provider was available ({detail})", retryable=False)
@@ -254,11 +258,9 @@ class ExtractGateway(SearchGateway):
                 failures.append(ProviderFailure(provider_id, str(exc)))
                 if exc.retryable:
                     self.cooldowns.set(self._cooldown_id(provider_id), cooldown_seconds)
-                    continue
-                if exc.status == 422:
-                    # A provider cannot parse a page; another provider may succeed.
-                    continue
-                raise
+                # Authentication, provider-side validation, and URL parsing failures
+                # are provider-specific: preserve the reason and try the next service.
+                continue
             returned_urls = set()
             for result in results:
                 url = result["url"]
