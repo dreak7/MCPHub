@@ -124,7 +124,7 @@ class SearchGateway:
     @classmethod
     def _format_warning(cls, failures: list[ProviderFailure], all_exhausted: bool = False) -> str | None:
         auth_tokens = ("401", "api key is not configured", "unauthorized", "invalid token", "invalid api key", "未授权", "认证失败")
-        quota_tokens = ("402", "429", "quota", "rate limit", "too many", "额度", "余额不足", "频率", "cooldown")
+        quota_tokens = ("402", "429", "432", "quota", "rate limit", "usage limit", "exceed", "too many", "额度", "余额不足", "频率", "cooldown")
         auth_issues: list[str] = []
         quota_issues: list[str] = []
         for item in failures:
@@ -156,7 +156,7 @@ class SearchGateway:
         if not failures:
             return False
         auth_tokens = ("401", "api key is not configured", "unauthorized", "invalid token", "invalid api key", "未授权", "认证失败")
-        quota_tokens = ("402", "429", "quota", "rate limit", "too many", "额度", "余额不足", "频率", "cooldown")
+        quota_tokens = ("402", "429", "432", "quota", "rate limit", "usage limit", "exceed", "too many", "额度", "余额不足", "频率", "cooldown")
         for item in failures:
             r = item.reason.lower()
             if any(token in r for token in auth_tokens) or ("403" in r and not any(qt in r for qt in quota_tokens)):
@@ -256,8 +256,8 @@ class SearchGateway:
             body = exc.read().decode("utf-8", errors="replace")
             # AnySearch may return newly generated credentials in a 402 body. Never
             # put provider response bodies into logs or MCP output.
-            retryable = exc.code in (402, 408, 429) or 500 <= exc.code <= 599 or (exc.code == 403 and self._is_quota_message(body))
-            message = f"HTTP {exc.code}: quota exhausted" if (exc.code == 402 or (exc.code == 403 and retryable)) else f"HTTP {exc.code}"
+            retryable = exc.code in (402, 408, 429, 432) or 500 <= exc.code <= 599 or ((exc.code in (403, 432)) and self._is_quota_message(body)) or self._is_quota_message(body)
+            message = f"HTTP {exc.code}: quota exhausted" if (exc.code in (402, 432) or (exc.code == 403 and retryable) or self._is_quota_message(body)) else f"HTTP {exc.code}"
             raise SearchError(message, retryable=retryable, status=exc.code) from exc
         except (URLError, socket.timeout, TimeoutError) as exc:
             raise SearchError(f"Network error: {exc}", retryable=True) from exc
@@ -272,7 +272,7 @@ class SearchGateway:
     @staticmethod
     def _is_quota_message(message: str) -> bool:
         lowered = message.lower()
-        return any(token in lowered for token in ("quota", "rate limit", "too many", "not enough money", "insufficient balance", "额度", "余额不足", "频率"))
+        return any(token in lowered for token in ("quota", "rate limit", "usage limit", "exceed", "too many", "not enough money", "insufficient balance", "额度", "余额不足", "频率"))
 
 
 class ExtractGateway(SearchGateway):

@@ -83,6 +83,21 @@ class SearchGatewayTest(unittest.TestCase):
             result["warning"],
         )
 
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_http_432_usage_limit_treated_as_quota_warning(self):
+        gateway = self.make_gateway()
+        with patch.object(gateway, "_call", side_effect=[
+            SearchError("HTTP 432: quota exhausted", retryable=True),
+            [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}],
+        ]) as call:
+            result = gateway.search({"query": "test"})
+        self.assertEqual("exa", result["provider"])
+        self.assertIn("warning", result)
+        self.assertEqual(
+            "⚠️ 警告：检测到后端服务配额耗尽或请求限流 [tavily-search (HTTP 432: quota exhausted)]。请耐心等待配额重置稍后重试或联系MCP提供商。",
+            result["warning"],
+        )
+
     def test_anysearch_uses_general_search_and_normalizes_response(self):
         gateway = self.make_gateway()
         provider = {"id": "anysearch", "endpoint": "https://example.test/anysearch"}
