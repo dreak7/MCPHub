@@ -88,3 +88,22 @@ AnySearch 的上游 API 单次最多返回 10 条；当统一工具请求超过 
 它返回每个页面的 `url`、`title`、清洗后的 `content`、`truncated` 和实际处理它的
 `provider`。不可提取的 URL 会列在 `unresolved_urls`，不影响同一批其他 URL 的结果。
 为避免 SSRF，网关拒绝 localhost、私有/保留地址、含用户信息的 URL 与非 80/443 端口。
+
+## 更新记录
+
+### v1.1.0 — 搜索工具隔离与网页正文提取
+
+- **破坏性变更**：原 `web_search` 重命名为 `fallback_web_search`，避免与 Hermes 内置
+  `web_search` 混淆。请更新任何提示词、工作流或手动工具调用。
+- 新增 `fallback_web_extract`：支持最多 5 个公开 URL 的批量正文提取。
+- 提取服务按 Tavily → Exa → AnySearch 递补；Bocha Web Search API 仅用于搜索，不参与
+  URL 正文提取。
+- 搜索和提取拥有独立的失败冷却状态；新增 URL 公网校验以降低 SSRF 风险。
+
+### 从 v1.0.0 升级
+
+1. 用新版本覆盖项目文件，但保留自己的 `config/.env`。
+2. 确认 `config/providers/search.json` 同时包含 `web_search` 与 `web_extract` 两个能力组。
+3. 在 Hermes 中断开并重新连接该 MCP 服务，使工具列表刷新。
+4. 将旧名称 `web_search` 替换为 `fallback_web_search`；需要读取正文时调用
+   `fallback_web_extract`。
