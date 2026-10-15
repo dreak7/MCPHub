@@ -79,7 +79,64 @@ class ExtractGatewayTest(unittest.TestCase):
         with patch.dict(os.environ, {"EXA_API_KEY": "b"}, clear=False), patch.object(gateway, "_validate_public_url"), patch.object(gateway, "_extract", side_effect=[SearchError("HTTP 429", retryable=True), [{"url": "https://example.com", "title": "ok", "content": "body", "truncated": False}]]) as extract:
             result = gateway.extract({"urls": ["https://example.com"]})
         self.assertEqual("exa", result["results"][0]["provider"])
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_extract_auth_error_falls_back_and_is_reported(self):
+        """Backend auth/param rejection must not terminate the extract fallback chain.
+
+        When the first extract provider returns a non-retryable error (e.g. 401),
+        the gateway should record the failure reason and continue to the next
+        provider.  The successful result must carry the prior failure details.
+        """
+        gateway = ExtractGateway({"cooldown_seconds": 60, "providers": [
+            {"id": "tavily-search", "enabled": True, "priority": 10, "api_key_env": "TAVILY_API_KEY", "endpoint": "https://example.test/tavily"},
+            {"id": "exa", "enabled": True, "priority": 20, "api_key_env": "EXA_API_KEY", "endpoint": "https://example.test/exa"},
+        ]}, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        with patch.object(gateway, "_validate_public_url"), \
+             patch.object(gateway, "_extract", side_effect=[
+                 SearchError("HTTP 401", retryable=False),
+                 [{"url": "https://example.com", "title": "ok", "content": "body", "truncated": False}],
+             ]) as extract:
+            result = gateway.extract({"urls": ["https://example.com"]})
+        self.assertEqual("exa", result["results"][0]["provider"])
+        self.assertEqual(1, len(result["failures"]))
+        self.assertEqual("tavily-search", result["failures"][0]["provider"])
+        self.assertEqual("HTTP 401", result["failures"][0]["reason"])
         self.assertEqual(2, extract.call_count)
+
+
+class SearchCooldownTest(unittest.TestCase):
+    """Verify that non-retryable (auth/param) errors do NOT set cooldown."""
+
+    def make_gateway(self):
+        return SearchGateway({"cooldown_seconds": 60, "providers": [
+            {"id": "tavily-search", "enabled": True, "priority": 10, "api_key_env": "TAVILY_API_KEY", "endpoint": "https://example.test/tavily"},
+            {"id": "exa", "enabled": True, "priority": 20, "api_key_env": "EXA_API_KEY", "endpoint": "https://example.test/exa"},
+        ]}, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_non_retryable_error_does_not_set_cooldown(self):
+        """Auth (401) or bad-request (400) errors should not put the provider
+        into cooldown — those problems won't self-heal with time, so the next
+        request should still attempt the provider."""
+        gateway = self.make_gateway()
+        with patch.object(gateway, "_call", side_effect=[
+            SearchError("HTTP 401", retryable=False),
+            [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}],
+        ]):
+            gateway.search({"query": "test"})
+        # tavily-search should NOT be in cooldown after a non-retryable error
+        self.assertTrue(gateway.cooldowns.is_available("web_search:tavily-search"))
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_retryable_error_sets_cooldown(self):
+        """Contrast: a retryable error (429) SHOULD put the provider into cooldown."""
+        gateway = self.make_gateway()
+        with patch.object(gateway, "_call", side_effect=[
+            SearchError("HTTP 429", retryable=True),
+            [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}],
+        ]):
+            gateway.search({"query": "test"})
+        self.assertFalse(gateway.cooldowns.is_available("web_search:tavily-search"))
 
 
 if __name__ == "__main__":
