@@ -1,0 +1,38 @@
+{
+  "capabilities": {
+    "web_search": {
+      "timeout_seconds": 25,
+      "cooldown_seconds": 3600,
+      "providers": [
+        {
+          "id": "tavily-search",
+          "enabled": true,
+          "priority": 10,
+          "api_key_env": "TAVILY_API_KEY",
+          "endpoint": "https://api.tavily.com/search"
+        },
+        {
+          "id": "exa",
+          "enabled": true,
+          "priority": 20,
+          "api_key_env": "EXA_API_KEY",
+          "endpoint": "https://api.exa.ai/search"
+        },
+        {
+          "id": "anysearch",
+          "enabled": true,
+          "priority": 30,
+          "api_key_env": "ANYSEARCH_API_KEY",
+          "endpoint": "https://api.anysearch.com/v1/search"
+        },
+        {
+          "id": "bocha-search",
+          "enabled": true,
+          "priority": 40,
+          "api_key_env": "BOCHA_API_KEY",
+          "endpoint": "https://api.bocha.cn/v1/web-search"
+        }
+      ]
+    }
+  }
+}
