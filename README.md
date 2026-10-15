@@ -47,9 +47,10 @@
 5. 编辑 `config\providers\search.json`，按需要启用服务或调整优先级。
 6. 在 Hermes Desktop 的 MCP 设置中添加本地命令服务：
 
-   - Command：`C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python311\python.exe`
+   - Command：`C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python313\python.exe`
      （请改为 `where python` 输出的实际路径）
-   - Arguments：`-m mcp_gateway --config C:\MCP\mcp-search-fallback-gateway\config\gateway.json`
+   - Arguments：`C:\MCP\mcp-search-fallback-gateway\run_gateway.py --config C:\MCP\mcp-search-fallback-gateway\config\gateway.json`
+     （推荐直接指向 `run_gateway.py`，避免客户端未配置工作目录时引发的模块导入问题；亦支持 `-m mcp_gateway`）
    - Working directory：`C:\MCP\mcp-search-fallback-gateway`
 
    如果 Hermes 没有单独的工作目录字段，可将完整项目路径放在命令参数中的 `--config` 后；程序会据此定位 `.env`、状态和日志。
