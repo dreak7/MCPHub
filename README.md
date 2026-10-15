@@ -45,18 +45,34 @@
    仅填写你已开通的密钥；未填写密钥的服务会被跳过。AnySearch 可以按其匿名额度运行，因此其密钥可留空。
 
 5. 编辑 `config\providers\search.json`，按需要启用服务或调整优先级。
-6. 在 Hermes Desktop 的 MCP 设置中添加本地命令服务：
+6. 在 Hermes Desktop 的 MCP 设置中添加本地命令服务（Type 选 **`stdio`**）：
 
-   - Command：`C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python313\python.exe`
-     （请改为 `where python` 输出的实际路径）
-   - Arguments：`C:\MCP\mcp-search-fallback-gateway\mcp_gateway --config C:\MCP\mcp-search-fallback-gateway\config\gateway.json`
-     （支持直接指向 `mcp_gateway` 目录或 `mcp_gateway\__main__.py`，内置自适应路径注入，无视外部工作目录；亦支持 `-m mcp_gateway`）
-   - Working directory：`C:\MCP\mcp-search-fallback-gateway`
+   **方式 A：一键粘贴（在「Paste a command or a snippet」中直接填入）**：
+   ```bash
+   "C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python313\python.exe" "C:\MCP\mcp-search-fallback-gateway\mcp_gateway" --config "C:\MCP\mcp-search-fallback-gateway\config\gateway.json"
+   ```
 
-   如果 Hermes 没有单独的工作目录字段，可将完整项目路径放在命令参数中的 `--config` 后；程序会据此定位 `.env`、状态和日志。
+   **方式 B：分项表单填写**：
+   - **Type**：`stdio`
+   - **Command**：`C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python313\python.exe`
+     （请替换为命令行中执行 `where.exe python` 输出的实际绝对路径）
+   - **Arguments**：`"C:\MCP\mcp-search-fallback-gateway\mcp_gateway" --config "C:\MCP\mcp-search-fallback-gateway\config\gateway.json"`
+     （支持直接指向 `mcp_gateway` 目录或 `mcp_gateway\__main__.py`，已内置环境自适应注入，无视外部工作目录）
+   - **Working directory**：`C:\MCP\mcp-search-fallback-gateway`（选填）
 
-7. 重新连接 Hermes 中的该 MCP。工具列表应显示 `fallback_web_search` 与
-   `fallback_web_extract`。
+   **方式 C：JSON 配置片段**：
+   ```json
+   {
+     "command": "C:\\Users\\<你的用户名>\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+     "args": [
+       "C:\\MCP\\mcp-search-fallback-gateway\\mcp_gateway",
+       "--config",
+       "C:\\MCP\\mcp-search-fallback-gateway\\config\\gateway.json"
+     ]
+   }
+   ```
+
+7. 重新连接 Hermes 中的该 MCP 服务。工具列表应成功亮起 `fallback_web_search` 与 `fallback_web_extract`。
 
 聚合器与 Hermes 只在本机经标准输入输出通信，不监听网络端口；但 Tavily、Exa、AnySearch 与 Bocha 本身是在线 API，因此目标电脑必须能访问互联网。
 
