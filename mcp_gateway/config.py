@@ -64,8 +64,9 @@ def load_config(path: str | Path) -> dict[str, Any]:
             if name in merged["capabilities"]:
                 raise ConfigError(f"Duplicate capability {name!r}")
             merged["capabilities"][name] = definition
-    if "web_search" not in merged["capabilities"]:
-        raise ConfigError("No web_search capability configured")
+    for required in ("web_search", "web_extract"):
+        if required not in merged["capabilities"]:
+            raise ConfigError(f"No {required} capability configured")
     return merged
 
 

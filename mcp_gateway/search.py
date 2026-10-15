@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import logging
 import os
 import socket
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -80,7 +82,7 @@ class SearchGateway:
             if not api_key and provider_id != "anysearch":
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
-            if not self.cooldowns.is_available(provider_id):
+            if not self.cooldowns.is_available(self._cooldown_id(provider_id)):
                 failures.append(ProviderFailure(provider_id, "provider is in cooldown"))
                 continue
             try:
@@ -91,10 +93,13 @@ class SearchGateway:
                 failures.append(ProviderFailure(provider_id, str(exc)))
                 if not exc.retryable:
                     raise
-                self.cooldowns.set(provider_id, cooldown_seconds)
+                self.cooldowns.set(self._cooldown_id(provider_id), cooldown_seconds)
 
         detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "No provider enabled"
         raise SearchError(f"No search provider was available ({detail})", retryable=False)
+
+    def _cooldown_id(self, provider_id: str) -> str:
+        return f"web_search:{provider_id}"
 
     def _call(self, provider: dict[str, Any], query: str, max_results: int, arguments: dict[str, Any], api_key: str, timeout: Any) -> list[dict[str, Any]]:
         provider_id = provider["id"]
@@ -201,3 +206,123 @@ class SearchGateway:
     def _is_quota_message(message: str) -> bool:
         lowered = message.lower()
         return any(token in lowered for token in ("quota", "rate limit", "too many", "not enough money", "insufficient balance", "额度", "余额不足", "频率"))
+
+
+class ExtractGateway(SearchGateway):
+    """Quota-aware web page extraction with public-URL validation."""
+
+    def extract(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        urls = arguments.get("urls")
+        if not isinstance(urls, list) or not 1 <= len(urls) <= 5 or not all(isinstance(url, str) for url in urls):
+            raise SearchError("urls must contain between 1 and 5 URL strings", retryable=False)
+        unique_urls = list(dict.fromkeys(url.strip() for url in urls))
+        for url in unique_urls:
+            self._validate_public_url(url)
+        max_characters = arguments.get("max_characters", 10000)
+        if isinstance(max_characters, bool) or not isinstance(max_characters, int) or not 1000 <= max_characters <= 100000:
+            raise SearchError("max_characters must be an integer between 1000 and 100000", retryable=False)
+        depth = arguments.get("extract_depth", "basic")
+        if depth not in ("basic", "advanced"):
+            raise SearchError("extract_depth must be basic or advanced", retryable=False)
+
+        providers = self.definition.get("providers", [])
+        if not isinstance(providers, list):
+            raise SearchError("Invalid extract providers configuration", retryable=False)
+        pending = set(unique_urls)
+        extracted: list[dict[str, Any]] = []
+        failures: list[ProviderFailure] = []
+        cooldown_seconds = self.definition.get("cooldown_seconds", 3600)
+        timeout = self.definition.get("timeout_seconds", 30)
+        for provider in sorted(providers, key=lambda item: item.get("priority", 1000)):
+            if not pending:
+                break
+            provider_id = provider.get("id", "unknown")
+            if not provider.get("enabled", False):
+                continue
+            key_name = provider.get("api_key_env")
+            api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
+            if not api_key and provider_id != "anysearch":
+                failures.append(ProviderFailure(provider_id, "API key is not configured"))
+                continue
+            if not self.cooldowns.is_available(self._cooldown_id(provider_id)):
+                failures.append(ProviderFailure(provider_id, "provider is in cooldown"))
+                continue
+            try:
+                results = self._extract(provider, list(pending), depth, max_characters, api_key, timeout)
+            except SearchError as exc:
+                self.logger.warning("Extract provider %s failed: %s", provider_id, exc)
+                failures.append(ProviderFailure(provider_id, str(exc)))
+                if exc.retryable:
+                    self.cooldowns.set(self._cooldown_id(provider_id), cooldown_seconds)
+                    continue
+                if exc.status == 422:
+                    # A provider cannot parse a page; another provider may succeed.
+                    continue
+                raise
+            returned_urls = set()
+            for result in results:
+                url = result["url"]
+                if url in pending and result["content"]:
+                    returned_urls.add(url)
+                    extracted.append({**result, "provider": provider_id})
+            pending -= returned_urls
+
+        ordered = sorted(extracted, key=lambda item: unique_urls.index(item["url"]))
+        return {
+            "results": ordered,
+            "unresolved_urls": [url for url in unique_urls if url in pending],
+            "failures": [{"provider": item.provider, "reason": item.reason} for item in failures],
+        }
+
+    def _cooldown_id(self, provider_id: str) -> str:
+        return f"web_extract:{provider_id}"
+
+    def _extract(self, provider: dict[str, Any], urls: list[str], depth: str, max_characters: int, api_key: str, timeout: Any) -> list[dict[str, Any]]:
+        provider_id = provider["id"]
+        endpoint = provider.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
+            raise SearchError(f"{provider_id}: endpoint must be an HTTPS URL", retryable=False)
+        if provider_id == "tavily-search":
+            data = self._post(endpoint, {"Authorization": f"Bearer {api_key}"}, {"urls": urls, "extract_depth": depth, "format": "markdown"}, timeout)
+            items = data.get("results", [])
+            return [self._extract_result(item.get("url"), item.get("title"), item.get("raw_content") or item.get("content"), max_characters) for item in items if isinstance(item, dict)]
+        if provider_id == "exa":
+            data = self._post(endpoint, {"x-api-key": api_key}, {"ids": urls, "text": {"maxCharacters": max_characters}}, timeout)
+            items = data.get("results", [])
+            return [self._extract_result(item.get("url"), item.get("title"), item.get("text") or item.get("content"), max_characters) for item in items if isinstance(item, dict)]
+        if provider_id == "anysearch":
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            results: list[dict[str, Any]] = []
+            for url in urls:
+                try:
+                    data = self._post(endpoint, headers, {"url": url}, timeout)
+                except SearchError as exc:
+                    if exc.status == 422:
+                        continue
+                    raise
+                if isinstance(data.get("code"), int) and data["code"] != 0:
+                    continue
+                item = data.get("data", data)
+                if isinstance(item, dict):
+                    results.append(self._extract_result(item.get("url", url), item.get("title"), item.get("content"), max_characters))
+            return results
+        raise SearchError(f"Unsupported extract provider id: {provider_id}", retryable=False)
+
+    @staticmethod
+    def _extract_result(url: Any, title: Any, content: Any, maximum: int) -> dict[str, Any]:
+        body = str(content or "")
+        return {"url": str(url or ""), "title": str(title or ""), "content": body[:maximum], "truncated": len(body) > maximum}
+
+    @staticmethod
+    def _validate_public_url(url: str) -> None:
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+            raise SearchError(f"URL is not a permitted public HTTP(S) URL: {url}", retryable=False)
+        if parsed.port not in (None, 80, 443):
+            raise SearchError(f"URL uses a non-standard port: {url}", retryable=False)
+        try:
+            addresses = {record[4][0] for record in socket.getaddrinfo(parsed.hostname, None, type=socket.SOCK_STREAM)}
+        except socket.gaierror as exc:
+            raise SearchError(f"URL hostname cannot be resolved: {parsed.hostname}", retryable=False) from exc
+        if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+            raise SearchError(f"URL hostname resolves to a non-public address: {parsed.hostname}", retryable=False)

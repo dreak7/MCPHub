@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .config import ConfigError, load_config, resolve_project_path
-from .search import SearchError, SearchGateway
+from .search import ExtractGateway, SearchError, SearchGateway
 
-TOOL_SCHEMA = {
-    "name": "web_search",
+SEARCH_TOOL_SCHEMA = {
+    "name": "fallback_web_search",
     "description": "Search the web with automatic provider fallback: Tavily, Exa, AnySearch, then Bocha Web Search API.",
     "inputSchema": {
         "type": "object",
@@ -26,6 +26,21 @@ TOOL_SCHEMA = {
             "exclude_domains": {"type": "array", "items": {"type": "string"}}
         },
         "required": ["query"],
+        "additionalProperties": False
+    }
+}
+
+EXTRACT_TOOL_SCHEMA = {
+    "name": "fallback_web_extract",
+    "description": "Extract clean page content with automatic fallback: Tavily, Exa, then AnySearch. Bocha is search-only.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "urls": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string", "format": "uri"}},
+            "extract_depth": {"type": "string", "enum": ["basic", "advanced"], "default": "basic"},
+            "max_characters": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 10000}
+        },
+        "required": ["urls"],
         "additionalProperties": False
     }
 }
@@ -43,8 +58,9 @@ def _logger(path: Path) -> logging.Logger:
 
 
 class McpServer:
-    def __init__(self, gateway: SearchGateway, logger: logging.Logger):
-        self.gateway = gateway
+    def __init__(self, search_gateway: SearchGateway, extract_gateway: ExtractGateway, logger: logging.Logger):
+        self.search_gateway = search_gateway
+        self.extract_gateway = extract_gateway
         self.logger = logger
 
     def run(self) -> None:
@@ -71,23 +87,26 @@ class McpServer:
         if method == "ping":
             return self._result(request_id, {})
         if method == "tools/list":
-            return self._result(request_id, {"tools": [TOOL_SCHEMA]})
+            return self._result(request_id, {"tools": [SEARCH_TOOL_SCHEMA, EXTRACT_TOOL_SCHEMA]})
         if method == "tools/call":
             return self._tool_call(request_id, message.get("params"))
         return self._error(request_id, -32601, f"Method not found: {method}") if "id" in message else None
 
     def _tool_call(self, request_id: Any, params: Any) -> dict[str, Any]:
-        if not isinstance(params, dict) or params.get("name") != "web_search":
-            return self._error(request_id, -32602, "Only the web_search tool is available")
+        if not isinstance(params, dict) or params.get("name") not in ("fallback_web_search", "fallback_web_extract"):
+            return self._error(request_id, -32602, "Only fallback_web_search and fallback_web_extract are available")
         arguments = params.get("arguments", {})
         if not isinstance(arguments, dict):
             return self._error(request_id, -32602, "arguments must be an object")
         try:
-            payload = self.gateway.search(arguments)
+            if params["name"] == "fallback_web_search":
+                payload = self.search_gateway.search(arguments)
+            else:
+                payload = self.extract_gateway.extract(arguments)
             encoded = json.dumps(payload, ensure_ascii=False)
             return self._result(request_id, {"content": [{"type": "text", "text": encoded}], "structuredContent": payload, "isError": False})
         except SearchError as exc:
-            self.logger.warning("Search request failed: %s", exc)
+            self.logger.warning("Gateway request failed: %s", exc)
             return self._result(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
 
     @staticmethod
@@ -112,8 +131,9 @@ def main() -> None:
         config = load_config(args.config)
         logger = _logger(resolve_project_path(config, "log_file", "../logs/gateway.log"))
         state_path = resolve_project_path(config, "state_file", "../state/provider-state.json")
-        gateway = SearchGateway(config["capabilities"]["web_search"], state_path, logger)
+        search_gateway = SearchGateway(config["capabilities"]["web_search"], state_path, logger)
+        extract_gateway = ExtractGateway(config["capabilities"]["web_extract"], state_path, logger)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
-    McpServer(gateway, logger).run()
+    McpServer(search_gateway, extract_gateway, logger).run()
