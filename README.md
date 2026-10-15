@@ -49,8 +49,8 @@
 
    - Command：`C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python313\python.exe`
      （请改为 `where python` 输出的实际路径）
-   - Arguments：`C:\MCP\mcp-search-fallback-gateway\run_gateway.py --config C:\MCP\mcp-search-fallback-gateway\config\gateway.json`
-     （推荐直接指向 `run_gateway.py`，避免客户端未配置工作目录时引发的模块导入问题；亦支持 `-m mcp_gateway`）
+   - Arguments：`C:\MCP\mcp-search-fallback-gateway\mcp_gateway --config C:\MCP\mcp-search-fallback-gateway\config\gateway.json`
+     （支持直接指向 `mcp_gateway` 目录或 `mcp_gateway\__main__.py`，内置自适应路径注入，无视外部工作目录；亦支持 `-m mcp_gateway`）
    - Working directory：`C:\MCP\mcp-search-fallback-gateway`
 
    如果 Hermes 没有单独的工作目录字段，可将完整项目路径放在命令参数中的 `--config` 后；程序会据此定位 `.env`、状态和日志。
@@ -106,16 +106,17 @@ AnySearch 的上游 API 单次最多返回 10 条；当统一工具请求超过 
 
 ### v1.2.0 — 后端故障前端告警、配额状态分流与环境自适应启动
 
-- **新增独立直启入口 `run_gateway.py`**：
-  - 内置路径自适应注入机制，自动将项目根目录加入 `sys.path`。
-  - 彻底解决 Hermes Desktop 等 MCP 客户端跨目录启动、未配置工作目录或参数传递产生合并时容易引发的 `ModuleNotFoundError: No module named 'mcp_gateway'` 错误，大幅提升客户端兼容性。
+- **原生模块自适应启动升级（无需额外启动脚本）**：
+  - 在原生 `mcp_gateway/__main__.py` 中内置路径自适应注入机制与绝对/相对导入双模兼容。
+  - 既完全兼容传统的 `python -m mcp_gateway` 启动，又支持直接指定目录 `python path/to/mcp_gateway` 或脚本 `python path/to/mcp_gateway/__main__.py` 启动。
+  - 彻底免除外部工作目录或 `PYTHONPATH` 环境变量依赖，完美解决 Hermes Desktop 等 MCP 客户端跨目录调用时可能发生的 `ModuleNotFoundError` 问题。
 - **后端故障精准分流与格式化告警**：
   - **认证类异常（401/403/未配置 Key）**：即使后续服务递补成功，亦在返回结果中附加显式 `warning`，提示检查 `config/.env` 或联系 MCP 提供商。
   - **部分服务配额/限流（402/429/额度耗尽）**：动态捕获具体受限的服务名与错误原因，提示用户耐心等待配额重置稍后重试或联系 MCP 提供商。
   - **全部服务均耗尽**：当所有可用后端服务的配额均耗尽时，直接向前端输出全局告警 `⚠️  警告：检测到后端服务配额均耗尽，请耐心等待相关配额重置或联系MCP提供商。`
 - **动态错误上下文**：`warning` 中的服务名与错误原因均为动态捕获值，精准反映实际发生故障的上游服务，杜绝固定模板混淆。
 - **前端强提示约束**：在工具描述（Schema Description）中加入强约束指令，要求 Agent 必须将该告警显式展示在回答开头，保障用户第一时间感知。
-- **测试用例扩充与全链路验证**：测试套件扩充至 16 项，全面覆盖部分限流递补、全部耗尽阻断、认证异常捕获及直启脚本调用。
+- **测试用例扩充与全链路验证**：测试套件扩充至 17 项，全面覆盖部分限流递补、全部耗尽阻断、认证异常捕获、目录直启与 `__main__.py` 独立入口调用。
 
 ### v1.1.1 — 后端拒绝不断链校正
 

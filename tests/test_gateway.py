@@ -204,13 +204,22 @@ class SearchCooldownTest(unittest.TestCase):
         self.assertFalse(gateway.cooldowns.is_available("web_search:tavily-search"))
 
 
-class RunGatewayScriptTest(unittest.TestCase):
-    def test_run_gateway_entry_point_help(self):
+class MainEntryPointTest(unittest.TestCase):
+    def test_mcp_gateway_directory_execution(self):
         import subprocess
         import sys
-        script_path = Path(__file__).resolve().parent.parent / "run_gateway.py"
-        self.assertTrue(script_path.exists(), "run_gateway.py must exist")
-        proc = subprocess.run([sys.executable, str(script_path), "--help"], capture_output=True, text=True)
+        pkg_path = Path(__file__).resolve().parent.parent / "mcp_gateway"
+        self.assertTrue(pkg_path.exists(), "mcp_gateway directory must exist")
+        proc = subprocess.run([sys.executable, str(pkg_path), "--help"], capture_output=True, text=True)
+        self.assertEqual(0, proc.returncode)
+        self.assertIn("Local MCP search fallback gateway", proc.stdout)
+
+    def test_mcp_gateway_main_py_execution(self):
+        import subprocess
+        import sys
+        main_path = Path(__file__).resolve().parent.parent / "mcp_gateway" / "__main__.py"
+        self.assertTrue(main_path.exists(), "__main__.py must exist")
+        proc = subprocess.run([sys.executable, str(main_path), "--help"], capture_output=True, text=True)
         self.assertEqual(0, proc.returncode)
         self.assertIn("Local MCP search fallback gateway", proc.stdout)
 
