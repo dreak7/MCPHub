@@ -25,42 +25,57 @@
 
 每个 provider 的 `priority` 决定递补顺序；`enabled: false` 可临时停用服务。某服务因可递补错误失败时，网关会在 `cooldown_seconds` 内跳过它。冷却状态保存在 `state/provider-state.json`，重启 Hermes 后也会保留。
 
-## Windows 安装
+## Windows 安装与配置
 
-1. 在目标电脑安装 **Python 3.11+**，安装器中勾选 **Add Python to PATH**。
-2. 将整个项目目录复制到稳定位置，例如 `C:\MCP\mcp-search-fallback-gateway`。
-3. 在该目录打开 PowerShell，验证：
+1. 在目标电脑安装 **Python 3.11+**（推荐 3.11 或 3.13），安装器中务必勾选 **Add Python to PATH**。
+2. 将整个项目目录复制到稳定位置，例如 `C:\MCP\mcp-search-fallback-gateway`（或 `D:\MCP\MCPHub-V1.2`）。
+3. 在该目录打开 PowerShell，验证 Python 环境并获取真实路径：
 
    ```powershell
    python --version
+   where.exe python
    ```
 
-4. 创建密钥文件：
+4. 创建并编辑密钥文件：
 
    ```powershell
    Copy-Item config\.env.example config\.env
    notepad config\.env
    ```
 
-   仅填写你已开通的密钥；未填写密钥的服务会被跳过。AnySearch 可以按其匿名额度运行，因此其密钥可留空。
+   填写你已开通服务的 API Key。各 Key 直接填写密钥值即可，无需引号包裹（例如 `TAVILY_API_KEY=tvly-xxxx`；程序内部已做单双引号自动剥离容错）。未填写的服务会在运行时安全跳过。
 
 5. 编辑 `config\providers\search.json`，按需要启用服务或调整优先级。
-6. 在 Hermes Desktop 的 MCP 设置中添加本地命令服务（Type 选 **`stdio`**）：
+6. 在 Hermes 中添加本地 MCP 服务（以下任选一种最适合你的配置方式）：
 
-   **方式 A：一键粘贴（在「Paste a command or a snippet」中直接填入）**：
+   **方式 A：Hermes 桌面端快捷一键粘贴（Paste a command or a snippet）**：
    ```bash
    "C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python313\python.exe" "C:\MCP\mcp-search-fallback-gateway\mcp_gateway" --config "C:\MCP\mcp-search-fallback-gateway\config\gateway.json"
    ```
 
-   **方式 B：分项表单填写**：
-   - **Type**：`stdio`
+   **方式 B：Hermes 桌面端分项表单填写**：
+   - **Type**：选择 `stdio`
    - **Command**：`C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python313\python.exe`
-     （请替换为命令行中执行 `where.exe python` 输出的实际绝对路径）
-   - **Arguments**：`"C:\MCP\mcp-search-fallback-gateway\mcp_gateway" --config "C:\MCP\mcp-search-fallback-gateway\config\gateway.json"`
-     （支持直接指向 `mcp_gateway` 目录或 `mcp_gateway\__main__.py`，已内置环境自适应注入，无视外部工作目录）
+     （请替换为步骤 3 中 `where.exe python` 输出的实际绝对路径）
+   - **Arguments**：
+     - 若为单行普通文本框填入：`C:\MCP\mcp-search-fallback-gateway\mcp_gateway --config C:\MCP\mcp-search-fallback-gateway\config\gateway.json`（路径无空格时无需引号；若路径包含空格则给对应路径加双引号）
+     - 若为多行列表逐项添加：第 1 项填 `C:\MCP\mcp-search-fallback-gateway\mcp_gateway`，第 2 项填 `--config`，第 3 项填 `C:\MCP\mcp-search-fallback-gateway\config\gateway.json`（各项均无需加引号）
    - **Working directory**：`C:\MCP\mcp-search-fallback-gateway`（选填）
 
-   **方式 C：JSON 配置片段**：
+   **方式 C：Hermes 配置文件直接写入（config.yaml，推荐）**：
+   ```yaml
+   MCPHub:
+     command: C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python313\python.exe
+     args:
+       - C:\MCP\mcp-search-fallback-gateway\mcp_gateway
+       - --config
+       - C:\MCP\mcp-search-fallback-gateway\config\gateway.json
+     cwd: C:\MCP\mcp-search-fallback-gateway
+     enabled: true
+   ```
+   *(注：亦支持标准包调用方式，即将前两项 args 写作 `- -m` 与 `- mcp_gateway`)*
+
+   **方式 D：标准 JSON 配置片段**：
    ```json
    {
      "command": "C:\\Users\\<你的用户名>\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
@@ -72,7 +87,13 @@
    }
    ```
 
-7. 重新连接 Hermes 中的该 MCP 服务。工具列表应成功亮起 `fallback_web_search` 与 `fallback_web_extract`。
+7. 连接与验证：
+   - 在 Hermes 桌面端重新连接服务，工具列表应成功亮起 `fallback_web_search` 与 `fallback_web_extract`。
+   - 亦可直接在命令行运行测试命令：
+     ```powershell
+     hermes mcp test MCPHub
+     ```
+     看到 `✓ Connected` 并列出 2 个可用工具即表示部署大功告成！
 
 聚合器与 Hermes 只在本机经标准输入输出通信，不监听网络端口；但 Tavily、Exa、AnySearch 与 Bocha 本身是在线 API，因此目标电脑必须能访问互联网。
 
