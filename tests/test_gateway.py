@@ -30,8 +30,10 @@ class SearchGatewayTest(unittest.TestCase):
         self.assertEqual(2, call.call_count)
         self.assertFalse(gateway.cooldowns.is_available("web_search:tavily-search"))
         self.assertIn("warning", result)
-        self.assertIn("tavily-search (HTTP 429)", result["warning"])
-        self.assertIn("配额耗尽或请求限流", result["warning"])
+        self.assertEqual(
+            "⚠️ 警告：检测到后端服务配额耗尽或请求限流 [tavily-search (HTTP 429)]。请耐心等待配额重置稍后重试或联系MCP提供商。",
+            result["warning"],
+        )
 
     @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
     def test_auth_error_falls_back_and_is_reported(self):
@@ -54,6 +56,14 @@ class SearchGatewayTest(unittest.TestCase):
         self.assertIn("或联系MCP提供商", str(ctx.exception))
 
     @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_all_providers_quota_exhausted_warning(self):
+        gateway = self.make_gateway()
+        with patch.object(gateway, "_call", side_effect=SearchError("HTTP 429", retryable=True)):
+            with self.assertRaises(SearchError) as ctx:
+                gateway.search({"query": "test"})
+        self.assertIn("⚠️  警告：检测到后端服务配额均耗尽，请耐心等待相关配额重置或联系MCP提供商。", str(ctx.exception))
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
     def test_custom_auth_message_triggers_warning(self):
         gateway = self.make_gateway()
         with patch.object(gateway, "_call", side_effect=[SearchError("Unauthorized: invalid token", retryable=False), [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]]) as call:
@@ -68,9 +78,10 @@ class SearchGatewayTest(unittest.TestCase):
         with patch.object(gateway, "_call", side_effect=[SearchError("HTTP 402: quota exhausted", retryable=True), [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]]) as call:
             result = gateway.search({"query": "test"})
         self.assertIn("warning", result)
-        self.assertIn("tavily-search (HTTP 402: quota exhausted)", result["warning"])
-        self.assertIn("配额耗尽或请求限流", result["warning"])
-        self.assertIn("或联系MCP提供商", result["warning"])
+        self.assertEqual(
+            "⚠️ 警告：检测到后端服务配额耗尽或请求限流 [tavily-search (HTTP 402: quota exhausted)]。请耐心等待配额重置稍后重试或联系MCP提供商。",
+            result["warning"],
+        )
 
     def test_anysearch_uses_general_search_and_normalizes_response(self):
         gateway = self.make_gateway()
@@ -114,8 +125,22 @@ class ExtractGatewayTest(unittest.TestCase):
             result = gateway.extract({"urls": ["https://example.com"]})
         self.assertEqual("exa", result["results"][0]["provider"])
         self.assertIn("warning", result)
-        self.assertIn("tavily-search (HTTP 429)", result["warning"])
-        self.assertIn("配额耗尽或请求限流", result["warning"])
+        self.assertEqual(
+            "⚠️ 警告：检测到后端服务配额耗尽或请求限流 [tavily-search (HTTP 429)]。请耐心等待配额重置稍后重试或联系MCP提供商。",
+            result["warning"],
+        )
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_extract_all_providers_quota_exhausted_warning(self):
+        gateway = ExtractGateway({"cooldown_seconds": 60, "providers": [
+            {"id": "tavily-search", "enabled": True, "priority": 10, "api_key_env": "TAVILY_API_KEY", "endpoint": "https://example.test/tavily"},
+            {"id": "exa", "enabled": True, "priority": 20, "api_key_env": "EXA_API_KEY", "endpoint": "https://example.test/exa"},
+        ]}, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        with patch.object(gateway, "_validate_public_url"), patch.object(gateway, "_extract", side_effect=SearchError("HTTP 429", retryable=True)):
+            result = gateway.extract({"urls": ["https://example.com"]})
+        self.assertIn("warning", result)
+        self.assertEqual("⚠️  警告：检测到后端服务配额均耗尽，请耐心等待相关配额重置或联系MCP提供商。", result["warning"])
+
     @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
     def test_extract_auth_error_falls_back_and_is_reported(self):
         """Backend auth/param rejection must not terminate the extract fallback chain.

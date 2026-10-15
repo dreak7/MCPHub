@@ -69,6 +69,7 @@ class SearchGateway:
         providers = self.definition.get("providers", [])
         if not isinstance(providers, list):
             raise SearchError("Invalid providers configuration", retryable=False)
+        enabled_count = sum(1 for p in providers if isinstance(p, dict) and p.get("enabled", False))
         cooldown_seconds = self.definition.get("cooldown_seconds", 3600)
         timeout = self.definition.get("timeout_seconds", 25)
         failures: list[ProviderFailure] = []
@@ -93,7 +94,7 @@ class SearchGateway:
                     "results": result,
                     "provider_failures": [{"provider": item.provider, "reason": item.reason} for item in failures],
                 }
-                warning = self._format_warning(failures)
+                warning = self._format_warning(failures, all_exhausted=False)
                 if warning:
                     response["warning"] = warning
                 return response
@@ -104,21 +105,24 @@ class SearchGateway:
                     self.cooldowns.set(self._cooldown_id(provider_id), cooldown_seconds)
 
         detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "No provider enabled"
-        auth_warning = self._format_warning(failures)
+        all_quota = (len(failures) >= enabled_count and enabled_count > 0 and self._is_all_quota(failures))
+        auth_warning = self._format_warning(failures, all_exhausted=all_quota)
         extra = f" {auth_warning}" if auth_warning else ""
         raise SearchError(f"No search provider was available ({detail}).{extra}", retryable=False)
 
     # =========================================================================
     # 【功能块：格式化后端服务故障前端警告（认证 + 配额/限流）】
     # - 输入：failures（列表，包含本次调用过程中出现故障的 ProviderFailure 对象）
+    #         all_exhausted（布尔值，是否所有可用后端服务的配额均已耗尽，默认为 False）
     # - 功能：将故障分为两大类别进行识别：
     #         1) 认证类错误（401未授权、403拒绝、未配置API Key、Token无效等）
     #         2) 配额/限流类错误（402额度耗尽、429请求过多、含"quota/额度"关键词等）
-    #         对每个类别生成独立的警告行，动态插入实际出问题的服务名与错误信息。
+    #         当所有服务配额均耗尽时，输出全局耗尽提示；
+    #         当部分服务受限或处于递补中时，动态插入实际出问题的服务名与错误信息。
     # - 输出：若存在上述任何错误则返回格式化后的多行警告文本（字符串）；否则返回 None。
     # =========================================================================
-    @staticmethod
-    def _format_warning(failures: list[ProviderFailure]) -> str | None:
+    @classmethod
+    def _format_warning(cls, failures: list[ProviderFailure], all_exhausted: bool = False) -> str | None:
         auth_tokens = ("401", "api key is not configured", "unauthorized", "invalid token", "invalid api key", "未授权", "认证失败")
         quota_tokens = ("402", "429", "quota", "rate limit", "too many", "额度", "余额不足", "频率", "cooldown")
         auth_issues: list[str] = []
@@ -134,9 +138,32 @@ class SearchGateway:
             joined = "、".join(auth_issues)
             lines.append(f"⚠️ 警告：检测到后端服务认证失败 [{joined}]。请检查 config/.env 中的 API Key 配置，或联系MCP提供商。")
         if quota_issues:
-            joined = "、".join(quota_issues)
-            lines.append(f"⚠️ 警告：检测到后端服务配额耗尽或请求限流 [{joined}]。请稍后重试，或联系MCP提供商。")
+            if all_exhausted:
+                lines.append("⚠️  警告：检测到后端服务配额均耗尽，请耐心等待相关配额重置或联系MCP提供商。")
+            else:
+                joined = "、".join(quota_issues)
+                lines.append(f"⚠️ 警告：检测到后端服务配额耗尽或请求限流 [{joined}]。请耐心等待配额重置稍后重试或联系MCP提供商。")
         return "\n".join(lines) if lines else None
+
+    # =========================================================================
+    # 【功能块：检查是否所有故障记录均属于配额/限流类错误】
+    # - 输入：failures（列表，包含 ProviderFailure 对象）
+    # - 功能：遍历所有故障项，校验是否全部为配额超限、频率限制或冷却状态，且无认证错误。
+    # - 输出：全部属于配额/限流故障时返回 True，否则返回 False。
+    # =========================================================================
+    @classmethod
+    def _is_all_quota(cls, failures: list[ProviderFailure]) -> bool:
+        if not failures:
+            return False
+        auth_tokens = ("401", "api key is not configured", "unauthorized", "invalid token", "invalid api key", "未授权", "认证失败")
+        quota_tokens = ("402", "429", "quota", "rate limit", "too many", "额度", "余额不足", "频率", "cooldown")
+        for item in failures:
+            r = item.reason.lower()
+            if any(token in r for token in auth_tokens) or ("403" in r and not any(qt in r for qt in quota_tokens)):
+                return False
+            if not any(token in r for token in quota_tokens):
+                return False
+        return True
 
     def _cooldown_id(self, provider_id: str) -> str:
         return f"web_search:{provider_id}"
@@ -268,6 +295,7 @@ class ExtractGateway(SearchGateway):
         providers = self.definition.get("providers", [])
         if not isinstance(providers, list):
             raise SearchError("Invalid extract providers configuration", retryable=False)
+        enabled_count = sum(1 for p in providers if isinstance(p, dict) and p.get("enabled", False))
         pending = set(unique_urls)
         extracted: list[dict[str, Any]] = []
         failures: list[ProviderFailure] = []
@@ -311,7 +339,13 @@ class ExtractGateway(SearchGateway):
             "unresolved_urls": [url for url in unique_urls if url in pending],
             "failures": [{"provider": item.provider, "reason": item.reason} for item in failures],
         }
-        warning = self._format_warning(failures)
+        all_quota = (
+            not extracted
+            and len(failures) >= enabled_count
+            and enabled_count > 0
+            and self._is_all_quota(failures)
+        )
+        warning = self._format_warning(failures, all_exhausted=all_quota)
         if warning:
             response["warning"] = warning
         return response
