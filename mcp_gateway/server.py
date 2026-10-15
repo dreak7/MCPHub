@@ -52,6 +52,12 @@ EXTRACT_TOOL_SCHEMA = {
 }
 
 
+# =========================================================================
+# 【功能块：配置并初始化文件日志记录器】
+# - 输入：path (Path): 日志文件的完整路径
+# - 功能：创建日志目录并初始化以 UTF-8 编码写入的全局日志记录器
+# - 输出：logging.Logger 实例
+# =========================================================================
 def _logger(path: Path) -> logging.Logger:
     path.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("mcp_gateway")
@@ -63,6 +69,29 @@ def _logger(path: Path) -> logging.Logger:
     return logger
 
 
+# =========================================================================
+# 【功能块：配置标准输入输出流编码】
+# - 输入：sys.stdin, sys.stdout, sys.stderr
+# - 功能：将标准输入、标准输出、标准错误流重新配置为 UTF-8 编码并替换非法字节，
+#         避免在 Windows 简体中文系统（默认 GBK 编码）下输出 Unicode 字符
+#         （如医学符号 ☤、音标 ˈ、Emoji 等）时触发 UnicodeEncodeError 导致程序崩溃或超时。
+# - 输出：无（原地重配标准流）
+# =========================================================================
+def _configure_stdio() -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+# =========================================================================
+# 【功能块：MCP 服务端核心类】
+# - 输入：search_gateway, extract_gateway, logger 实例
+# - 功能：遵循 MCP JSON-RPC 协议规范，通过 stdio 监听并响应客户端指令（initialize, tools/list, tools/call 等）
+# - 输出：McpServer 实例
+# =========================================================================
 class McpServer:
     def __init__(self, search_gateway: SearchGateway, extract_gateway: ExtractGateway, logger: logging.Logger):
         self.search_gateway = search_gateway
@@ -70,7 +99,9 @@ class McpServer:
         self.logger = logger
 
     def run(self) -> None:
+        _configure_stdio()
         for raw in sys.stdin:
+            message = None
             try:
                 message = json.loads(raw)
                 if isinstance(message, dict):
@@ -79,7 +110,8 @@ class McpServer:
                         self._write(response)
             except Exception as exc:  # Keep protocol alive after a malformed request.
                 self.logger.exception("Unhandled MCP request failure")
-                self._write(self._error(None, -32603, f"Internal server error: {exc}"))
+                request_id = message.get("id") if isinstance(message, dict) else None
+                self._write(self._error(request_id, -32603, f"Internal server error: {exc}"))
 
     def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         request_id = message.get("id")
@@ -125,11 +157,27 @@ class McpServer:
 
     @staticmethod
     def _write(message: dict[str, Any]) -> None:
-        sys.stdout.write(json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n")
-        sys.stdout.flush()
+        if hasattr(sys.stdout, "reconfigure") and getattr(sys.stdout, "encoding", "").lower() != "utf-8":
+            try:
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+        try:
+            sys.stdout.write(json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+        except UnicodeEncodeError:
+            sys.stdout.write(json.dumps(message, ensure_ascii=True, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
 
 
+# =========================================================================
+# 【功能块：服务主函数启动入口】
+# - 输入：命令行参数（--config 配置文件路径）
+# - 功能：初始化标准流 UTF-8 编码，加载配置文件与状态持久化模块，启动 MCP JSON-RPC 监听服务
+# - 输出：无（持续运行 stdio 通信服务直到退出）
+# =========================================================================
 def main() -> None:
+    _configure_stdio()
     parser = argparse.ArgumentParser(description="Local MCP search fallback gateway")
     parser.add_argument("--config", required=True, help="Path to config/gateway.json")
     args = parser.parse_args()

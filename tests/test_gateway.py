@@ -13,6 +13,12 @@ class FakeLogger:
     def warning(self, *args):
         pass
 
+    def exception(self, *args):
+        pass
+
+    def info(self, *args):
+        pass
+
 
 class SearchGatewayTest(unittest.TestCase):
     def make_gateway(self):
@@ -122,6 +128,47 @@ class McpServerTest(unittest.TestCase):
         server = McpServer(None, None, FakeLogger())
         response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "fallback_web_search", "arguments": "not-an-object"}})
         self.assertEqual(-32602, response["error"]["code"])
+
+    def test_server_write_handles_non_gbk_unicode(self):
+        import io
+        fake_stdout = io.StringIO()
+        with patch("sys.stdout", fake_stdout):
+            McpServer._write({"jsonrpc": "2.0", "id": 1, "result": {"snippet": "Caduceus \u2624 phonetic \u02c8 warning ⚠️"}})
+        output = fake_stdout.getvalue()
+        self.assertIn("Caduceus \u2624 phonetic \u02c8 warning ⚠️", output)
+
+    def test_server_write_fallbacks_to_ascii_on_encode_error(self):
+        written = []
+        call_count = 0
+
+        def fake_write(data):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise UnicodeEncodeError("gbk", "\u2624", 0, 1, "illegal multibyte sequence")
+            written.append(data)
+
+        with patch("sys.stdout.write", side_effect=fake_write), patch("sys.stdout.flush"):
+            McpServer._write({"jsonrpc": "2.0", "id": 1, "result": {"symbol": "\u2624"}})
+
+        self.assertEqual(2, call_count)
+        self.assertEqual(1, len(written))
+        self.assertIn("\\u2624", written[0])
+
+    def test_server_run_preserves_request_id_on_unhandled_failure(self):
+        import io
+        fake_stdout = io.StringIO()
+        fake_stdin = io.StringIO('{"jsonrpc":"2.0","id":999,"method":"tools/call","params":{"name":"fallback_web_search","arguments":{"query":"test"}}}\n')
+        server = McpServer(None, None, FakeLogger())
+        with patch.object(server, "handle", side_effect=RuntimeError("simulated crash")), \
+             patch("sys.stdin", fake_stdin), \
+             patch("sys.stdout", fake_stdout):
+            server.run()
+        output = fake_stdout.getvalue()
+        response = json.loads(output.strip())
+        self.assertEqual(999, response.get("id"))
+        self.assertEqual(-32603, response["error"]["code"])
+        self.assertIn("simulated crash", response["error"]["message"])
 
 
 class ExtractGatewayTest(unittest.TestCase):

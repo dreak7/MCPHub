@@ -57,6 +57,8 @@
        - C:\MCP\mcp-search-fallback-gateway\mcp_gateway
        - --config
        - C:\MCP\mcp-search-fallback-gateway\config\gateway.json
+     env:
+       PYTHONUTF8: "1"  # 可选但推荐：显式通知 Python 启用 UTF-8（网关代码内部也已做自动 UTF-8 重配与 ASCII 兜底）
      enabled: true  # 必须为 true，否则服务默认 disabled
    ```
    *(注：args 必须是逐项拆分的数组。亦支持标准包调用方式：将前两项写作 `- -m` 与 `- mcp_gateway` 并配置 `cwd`)*
@@ -156,7 +158,11 @@ AnySearch 的上游 API 单次最多返回 10 条；当统一工具请求超过 
   - **全部服务均耗尽**：当所有可用后端服务的配额均耗尽时，直接向前端输出全局告警 `⚠️  警告：检测到后端服务配额均耗尽，请耐心等待相关配额重置或联系MCP提供商。`
 - **动态错误上下文**：`warning` 中的服务名与错误原因均为动态捕获值，精准反映实际发生故障的上游服务，杜绝固定模板混淆。
 - **前端强提示约束**：在工具描述（Schema Description）中加入强约束指令，要求 Agent 必须将该告警显式展示在回答开头，保障用户第一时间感知。
-- **测试用例扩充与全链路验证**：测试套件扩充至 18 项，全面覆盖部分限流递补、HTTP 432 用量超限告警、全部耗尽阻断、认证异常捕获、目录直启与 `__main__.py` 独立入口调用。
+- **Windows UTF-8 编码鲁棒性与防超时保障（彻底杜绝 UnicodeEncodeError）**：
+  - 启动时自动将 `sys.stdin`、`sys.stdout`、`sys.stderr` 强制重配为 UTF-8（`errors="replace"`），彻底免疫 Windows 默认 GBK（cp936）在输出医学符号（如 ☤）、特殊音标（如 ˈ）或 Emoji 字符时触发的 `UnicodeEncodeError` 导致服务静默超时。
+  - 在底层 `_write` 通信层内置双重兜底防护：即使底层流无法承载特殊字符，自动回退转义为标准 ASCII（`\uXXXX`）输出，确保 JSON-RPC 消息永不中断。
+  - 全局未捕获异常处理关联原始 `request_id`，杜绝未配对 ID 导致的客户端 300 秒死等超时。
+- **测试用例扩充与全链路验证**：测试套件扩充至 21 项，全面覆盖部分限流递补、HTTP 432 用量超限告警、全部耗尽阻断、认证异常捕获、非 GBK Unicode 字符输出、编码异常降级兜底、目录直启与 `__main__.py` 独立入口调用。
 
 ### v1.1.1 — 后端拒绝不断链校正
 
