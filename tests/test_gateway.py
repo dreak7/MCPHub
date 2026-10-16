@@ -125,16 +125,97 @@ class SearchGatewayTest(unittest.TestCase):
         self.assertEqual("Bearer fake-key", post.call_args.args[1]["Authorization"])
         self.assertEqual("application/json", post.call_args.args[1]["Accept"])
 
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_multi_search_success_aggregates_and_deduplicates(self):
+        """测试多源并发聚合搜索：多家引擎同时返回结果，智能去重、合并摘要并置顶多源高信度条目"""
+        gateway = self.make_gateway()
+
+        def fake_call(provider, query, max_results, arguments, api_key, timeout):
+            if provider["id"] == "tavily-search":
+                return [
+                    {"title": "Shared Short", "url": "https://example.com/shared?utm_source=twitter", "snippet": "Tavily short text", "published_date": ""},
+                    {"title": "Tavily Only", "url": "https://example.com/tavily", "snippet": "Tavily unique article", "published_date": "2026-01-01"},
+                ]
+            if provider["id"] == "exa":
+                return [
+                    {"title": "Shared Better Title", "url": "https://example.com/shared/", "snippet": "Exa much longer and detailed text", "published_date": "2026-03-01"},
+                    {"title": "Exa Only", "url": "https://example.com/exa", "snippet": "Exa unique article", "published_date": "2026-02-01"},
+                ]
+            return []
+
+        with patch.object(gateway, "_call", side_effect=fake_call):
+            result = gateway.multi_search({"query": "test"})
+
+        self.assertEqual("multi_web_search", result["tool"])
+        self.assertIn("tavily-search", result["active_providers"])
+        self.assertIn("exa", result["active_providers"])
+        self.assertEqual(2, result["total_sources_queried"])
+        
+        # 结果应去重（从 4 条去重为 3 条）
+        results = result["results"]
+        self.assertEqual(3, len(results))
+
+        # 多源交叉验证的条目应置顶在第一条
+        top_item = results[0]
+        self.assertIn(top_item["url"], ("https://example.com/shared?utm_source=twitter", "https://example.com/shared/"))
+        self.assertIn("tavily-search", top_item["sources"])
+        self.assertIn("exa", top_item["sources"])
+        self.assertEqual(2, len(top_item["sources"]))
+        # 保留了更详尽的标题和摘要以及发布时间
+        self.assertEqual("Shared Better Title", top_item["title"])
+        self.assertEqual("Exa much longer and detailed text", top_item["snippet"])
+        self.assertEqual("2026-03-01", top_item["published_date"])
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_multi_search_one_provider_fails_others_succeed(self):
+        """测试多源并发容错：某一家引擎限流或故障，不影响其他引擎成功聚合，并附带故障警告"""
+        gateway = self.make_gateway()
+
+        def fake_call(provider, query, max_results, arguments, api_key, timeout):
+            if provider["id"] == "tavily-search":
+                raise SearchError("HTTP 429", retryable=True)
+            if provider["id"] == "exa":
+                return [{"title": "Exa Title", "url": "https://example.com/exa", "snippet": "Exa content", "published_date": ""}]
+            return []
+
+        with patch.object(gateway, "_call", side_effect=fake_call):
+            result = gateway.multi_search({"query": "test"})
+
+        self.assertEqual("multi_web_search", result["tool"])
+        self.assertEqual(["exa"], result["active_providers"])
+        self.assertEqual(1, len(result["results"]))
+        self.assertEqual("https://example.com/exa", result["results"][0]["url"])
+        self.assertIn("warning", result)
+        self.assertIn("tavily-search (HTTP 429)", result["warning"])
+        # Tavily 应进入冷却
+        self.assertFalse(gateway.cooldowns.is_available("web_search:tavily-search"))
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_multi_search_all_providers_fail_raises_error(self):
+        """测试所有引擎均失败时抛出异常并附带诊断指引"""
+        gateway = self.make_gateway()
+        with patch.object(gateway, "_call", side_effect=SearchError("HTTP 401", retryable=False)):
+            with self.assertRaises(SearchError) as ctx:
+                gateway.multi_search({"query": "test"})
+        self.assertIn("No search provider succeeded", str(ctx.exception))
+        self.assertIn("或联系MCP提供商", str(ctx.exception))
+
+    def test_url_normalization(self):
+        """测试 URL 规范化清洗函数剥离参数和末尾斜杠"""
+        self.assertEqual("https://example.com/test", SearchGateway._normalize_url("https://EXAMPLE.com/test/"))
+        self.assertEqual("https://example.com/test", SearchGateway._normalize_url("https://example.com/test?utm_source=twitter&utm_medium=social"))
+        self.assertEqual("https://example.com/test?q=python", SearchGateway._normalize_url("https://example.com/test/?q=python&ref=123"))
+
 
 class McpServerTest(unittest.TestCase):
     def test_initialize_and_tools_list(self):
         server = McpServer(None, None, FakeLogger())
         initialized = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual("local-search-fallback-gateway", initialized["result"]["serverInfo"]["name"])
-        self.assertEqual("1.2.0", initialized["result"]["serverInfo"]["version"])
+        self.assertEqual("1.4.0", initialized["result"]["serverInfo"]["version"])
         tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual("fallback_web_search", tools["result"]["tools"][0]["name"])
-        self.assertEqual("fallback_web_extract", tools["result"]["tools"][1]["name"])
+        names = [t["name"] for t in tools["result"]["tools"]]
+        self.assertEqual(["fallback_web_search", "multi_web_search", "fallback_web_extract"], names)
 
     def test_invalid_tool_arguments_return_tool_error(self):
         server = McpServer(None, None, FakeLogger())
@@ -280,7 +361,7 @@ class SearchCooldownTest(unittest.TestCase):
     """Verify that non-retryable (auth/param) errors do NOT set cooldown."""
 
     def make_gateway(self):
-        return SearchGateway({"cooldown_seconds": 60, "providers": [
+        return SearchGateway({"cooldown_seconds": 60, "quota_cooldown_seconds": 259200, "providers": [
             {"id": "tavily-search", "enabled": True, "priority": 10, "api_key_env": "TAVILY_API_KEY", "endpoint": "https://example.test/tavily"},
             {"id": "exa", "enabled": True, "priority": 20, "api_key_env": "EXA_API_KEY", "endpoint": "https://example.test/exa"},
         ]}, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
@@ -309,6 +390,60 @@ class SearchCooldownTest(unittest.TestCase):
         ]):
             gateway.search({"query": "test"})
         self.assertFalse(gateway.cooldowns.is_available("web_search:tavily-search"))
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_rate_limit_sets_standard_cooldown(self):
+        """测试 429 频率超限：触发常规 short cooldown（例如 60s / 1小时）"""
+        import time
+        gateway = self.make_gateway()
+        with patch.object(gateway, "_call", side_effect=[
+            SearchError("HTTP 429", retryable=True),
+            [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}],
+        ]):
+            gateway.search({"query": "test"})
+        expire_time = gateway.cooldowns.get_until("web_search:tavily-search")
+        self.assertLess(expire_time, time.time() + 120)
+        self.assertGreater(expire_time, time.time() + 30)
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
+    def test_quota_exhausted_sets_longer_tiered_cooldown(self):
+        """测试 402/432 配额耗尽：触发分级智能长冷却（3天 / 259200秒）"""
+        import time
+        gateway = self.make_gateway()
+        with patch.object(gateway, "_call", side_effect=[
+            SearchError("HTTP 402: quota exhausted", retryable=True, status=402),
+            [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}],
+        ]):
+            gateway.search({"query": "test"})
+        expire_time = gateway.cooldowns.get_until("web_search:tavily-search")
+        self.assertGreater(expire_time, time.time() + 200000)
+
+    def test_key_change_auto_resets_cooldown(self):
+        """测试自适应特性 2：更换 API Key 时自动解冻复活服务，无需手动删文件"""
+        gateway = self.make_gateway()
+        # 模拟旧 Key 触发 3 天冷却
+        gateway.cooldowns.set("web_search:tavily-search", 259200, reason_type="quota", api_key="old-key-123")
+        # 拿着旧 Key 查，仍在冷却中
+        self.assertFalse(gateway.cooldowns.is_available("web_search:tavily-search", current_key="old-key-123"))
+        # 用户在 .env 中换了新 Key 查，自适应立刻解除冷却！
+        self.assertTrue(gateway.cooldowns.is_available("web_search:tavily-search", current_key="new-key-456"))
+        # 冷却记录已被自动抹除
+        self.assertEqual(0.0, gateway.cooldowns.get_until("web_search:tavily-search"))
+
+    def test_month_rollover_auto_resets_quota_cooldown(self):
+        """测试自适应特性 1：跨入新月份时，月初自动复活配额耗尽的服务，无需手动干预"""
+        gateway = self.make_gateway()
+        # 模拟上月 (2026-09) 记录的配额耗尽冷却
+        gateway.cooldowns._state["web_search:tavily-search"] = {
+            "until": 9999999999.0,  # 遥远的未来
+            "reason_type": "quota",
+            "month": "2026-09",
+            "key_hash": ""
+        }
+        # 当前时间（2026-10）检测到月份不一致，自适应立刻解封！
+        self.assertTrue(gateway.cooldowns.is_available("web_search:tavily-search"))
+        # 冷却记录已被自动清除
+        self.assertEqual(0.0, gateway.cooldowns.get_until("web_search:tavily-search"))
 
 
 class MainEntryPointTest(unittest.TestCase):

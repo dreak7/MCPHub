@@ -1,7 +1,8 @@
 # Local MCP Search Fallback Gateway
 
-一个给 Hermes Desktop 使用的本地 MCP 搜索聚合器。它只向 Hermes 暴露一个
-`fallback_web_search` 与 `fallback_web_extract` 两个工具，以避免和 Hermes 内置
+一个给 Hermes Desktop 使用的本地 MCP 搜索聚合器。它向 Hermes 暴露
+`fallback_web_search`（单源经济型回退搜索）、`multi_web_search`（多源并发聚合融合搜索）
+与 `fallback_web_extract`（正文提取）三个工具，以避免和 Hermes 内置
 `web_search` / `web_extract` 混淆。
 
 搜索工具按以下固定优先级尝试在线搜索提供商：
@@ -24,7 +25,12 @@
 `config\gateway.json` 是入口配置，支持通配符（如 `providers\*.json`）自适应发现所有配置。搜索服务清单在
 `config\providers\search.json`。API 密钥在 `config\.env`，密钥文件不应提交或分享。
 
-每个 provider 的 `priority` 决定递补顺序；`enabled: false` 可临时停用服务。某服务因可递补错误失败时，网关会在 `cooldown_seconds` 内跳过它。冷却状态保存在 `state\provider-state.json`，重启 Hermes 后也会保留。
+每个 provider 的 `priority` 决定递补顺序；`enabled: false` 可临时停用服务。系统采用具有自我感知能力的**分级智能冷却与双重自适应解冻机制**：
+- **短时频率限流（429 / 网络抖动）**：冷却 `cooldown_seconds`（默认 1 小时 / 3600 秒），到期自动恢复；
+- **月度配额耗尽（402 / 432 / 余额不足）**：冷却 `quota_cooldown_seconds`（默认 3 天 / 259200 秒），杜绝频繁试探骚扰；
+- **月初跨月自适应复活**：自动识别日历跨月，新自然月到来时自动解冻上月因配额耗尽沉睡的服务（月度免费额度已重置），无需任何人工干预；
+- **密钥变更自适应解冻**：在 `config\.env` 中为某个服务更换了新 API Key 后，网关自动识别并秒级清除历史冷却复活服务，无需手动删除任何状态文件。
+冷却状态持久化保存在 `state\provider-state.json`，重启 Hermes 后也会完好保留。
 
 ## Windows 安装与配置
 
@@ -109,8 +115,9 @@
      ```text
      Transport: stdio → ...\Python313\python.exe
      ✓ Connected
-     ✓ Tools discovered: 2
-         fallback_web_search   自动多引擎回退搜索
+     ✓ Tools discovered: 3
+         fallback_web_search   单源经济型回退搜索
+         multi_web_search      多源并发聚合融合搜索
          fallback_web_extract  自动回退的网页正文提取
      ```
    - 执行 `hermes mcp list` 确认状态为 `✓ enabled`。
@@ -121,37 +128,47 @@
 
 - MCP 协议数据只写到标准输出；所有运行日志在 `logs\gateway.log`，可安全查看故障原因。
 - 认证失败或参数不兼容会记录原因并继续递补下一家服务。如果所有服务都因认证失败，请检查 `config\.env` 中的变量名和 API Key。
-- 额度/频率耗尽会进入冷却。可等待 `cooldown_seconds` 到期，或在 Hermes 停止后删除 `state\provider-state.json` 以立即恢复尝试。
+- **冷却状态与自适应恢复**：额度/频率耗尽会进入分级智能冷却。系统原生支持**跨月自动解冻**与**换 Key 自动解冻**，完全无需人工维护；如需即时手动重置，可在 Hermes 停止后删除 `state\provider-state.json`。
 - 在终端直接运行程序时它会等待 MCP JSON-RPC 输入，这是正常行为；应由 Hermes 启动它。
 - **服务已启用但在当前聊天窗口搜不到新工具？**：Hermes 桌面端在会话建立时会冻结工具目录快照。修改配置或中途重新启用 MCP 服务后，旧会话渲染端可能无法即时刷新。只需在 Hermes 中点击 **`+`（新建会话 / New Chat）**，或者**彻底重启一次 Hermes Desktop 客户端**，新会话即可直接挂载最新工具。
 
 ## 暴露的工具
 
-`fallback_web_search` 接受：
+### 1. `fallback_web_search`（单源高可用回退搜索，推荐日常使用）
 
-- `query`（必填）
-- `max_results`（1–20，默认 10）
+接受参数：
+- `query`（必填）：检索关键词
+- `max_results`（1–20，默认 10）：最大返回条数
 - `search_depth`（`basic` / `advanced`，默认 `basic`）
 - `time_range`（`day` / `week` / `month` / `year`，可选）
 - `include_domains`、`exclude_domains`（字符串数组，可选）
 
-返回 JSON 文本，包含本次成功的 `provider`、原始 `query` 和统一的 `results`（`title`、`url`、`snippet`、`published_date`）。
+工作机制：按优先级从高到低依次尝试（Tavily → Exa → Jina AI → AnySearch → Bocha）。只要当前第一顺位成功即立刻返回，仅在故障时向后递补。最省 API 配额，耗时短，适合高频、常规问题。
 
-AnySearch 的上游 API 单次最多返回 10 条；当统一工具请求超过 10 条时，该提供商会自动截为 10 条，其他提供商仍可返回请求的数量。
+### 2. `multi_web_search`（多源并发聚合搜索，推荐深度研究与多方印证）
 
-`fallback_web_extract` 接受：
+接受参数与 `fallback_web_search` 完全一致。
 
+工作机制：
+- **多路并发全开**：使用 Python 内置 `concurrent.futures.ThreadPoolExecutor`，同时唤醒所有已配置 API Key 且处于就绪状态的引擎并发发起检索；
+- **智能容错隔离**：各引擎独立执行，即使其中某一家发生 429 限流或 401 认证异常，系统会自动记录警告并放入冷却，其余引擎依然顺利聚合并呈现；
+- **URL 规范化与跟踪参数清洗**：自动剥离 `utm_*`、`ref`、`spm` 等追踪冗余后缀，对域名小写与结尾斜杠统一归一化；
+- **多源置信度置顶（Hybrid Fusion）**：如果同一网页被多家搜索引擎独立召回，系统自动合并更丰富的摘要与标题，并为该条目打上 `sources: ["tavily-search", "exa"]` 多源认证标签，优先置顶展示；
+- 返回结构包含：`tool: "multi_web_search"`、`active_providers`（实际返回结果的引擎列表）、`total_sources_queried`（发起请求的总数）、`results`（融合去重后的结果清单）以及故障诊断与警告信息。
+
+### 3. `fallback_web_extract`（网页正文智能提取）
+
+接受参数：
 - `urls`（必填，1–5 个公开 HTTP/HTTPS URL）；
 - `extract_depth`（`basic` / `advanced`，默认 `basic`）；
 - `max_characters`（每页 1,000–100,000 字符，默认 10,000）。
 
-它返回每个页面的 `url`、`title`、清洗后的 `content`、`truncated` 和实际处理它的
-`provider`。不可提取的 URL 会列在 `unresolved_urls`，不影响同一批其他 URL 的结果。
+它返回每个页面的 `url`、`title`、清洗后的 `content`、`truncated` 和实际处理它的 `provider`。不可提取的 URL 会列在 `unresolved_urls`，不影响同一批其他 URL 的结果。
 为避免 SSRF，网关拒绝 localhost、私有/保留地址、含用户信息的 URL 与非 80/443 端口。
 
-两个工具都会在成功结果中附带先前被跳过或拒绝的服务及其原因：搜索工具字段为
-`provider_failures`，提取工具字段为 `failures`。当检测到后端服务故障时，结果会额外附加
-显式的 `warning` 字段，按故障类型分行显示实际出问题的服务名和错误码：
+---
+
+所有工具都会在结果中透明展示上游故障：单源搜索字段为 `provider_failures`，并发搜索字段为 `provider_failures`，提取工具字段为 `failures`。当检测到后端服务故障时，结果会额外附加显式的 `warning` 字段，按故障类型分行显示实际出问题的服务名和错误码：
 
 - **认证类**：`"⚠️ 警告：检测到后端服务认证失败 [<服务名> (<错误原因>)]。请检查 config/.env 中的 API Key 配置，或联系MCP提供商。"`
 - **配额/限流类**：`"⚠️ 警告：检测到后端服务配额耗尽或请求限流 [<服务名> (<错误原因>)]。请耐心等待配额重置稍后重试或联系MCP提供商。"`
@@ -161,6 +178,26 @@ AnySearch 的上游 API 单次最多返回 10 条；当统一工具请求超过 
 和具体的 HTTP 状态码或错误描述。工具元数据已指示 Agent 必须在前端回答中置顶向用户警示。
 
 ## 更新记录
+
+### v1.4.0 — 多源并发聚合搜索（multi_web_search）与分级智能冷却（Tiered Cooldown）
+
+- **新增多源并发检索工具（`multi_web_search`）**：
+  - 与日常经济型的 `fallback_web_search` 并行运作，向大模型同时提供“单源高可用快搜”与“全网多源深度研报搜索”双重能力。
+  - 基于 Python 原生标准库 `concurrent.futures.ThreadPoolExecutor`，一键并发唤醒全部已配置 API Key 且就绪的引擎（Tavily, Exa, Jina, Bocha, AnySearch 等），保持极速毫秒级并行响应。
+- **智能 URL 归一化与跟踪参数清洗**：
+  - 原生内置 URL 规范化清洗，精准剥离 `utm_*`、`ref`、`spm` 等冗余追踪参数并标准化路径斜杠与大小写，确保跨引擎的相同网页精准识别与聚合。
+- **多源推荐加权置顶（Hybrid Fusion）**：
+  - 自动合并相同 URL 的多源摘要与标题，为条目动态注入 `sources: [...]` 来源证明标签，并将受到多家引擎共同青睐的高信度条目优先置顶呈现给大模型。
+- **全链路独立容错隔离**：
+  - 某家引擎发生 429 限流或 401 认证异常时独立熔断并生成显式 warning，绝不影响其他引擎并发结果正常合并与返回。
+- **分级智能冷却机制（Tiered Cooldown）**：
+  - 精准区分“短时频率限流（429）”与“月度配额耗尽（402/432/余额不足）”。
+  - 频率限流维持 1 小时冷却，月度配额耗尽自动触发 **3 天（72 小时 / 259,200 秒）** 深层冷却，杜绝配额用光后的频繁重复试探与告警骚扰；支持在配置中个性化自定义。
+- **双重自适应解冻机制（Auto-Healing）**：
+  - **月初跨月自适应**：日历跨入新自然月时，系统自动识别并清零上月因配额耗尽而沉睡的服务，无需人工介入；
+  - **密钥变更自适应**：在 `config/.env` 中修改或更换某服务的 API Key 后，网关即时感知并自动秒级解冻复活该服务。
+- **测试套件扩增至 33 项**：
+  - 新增多源聚合去重、高信度条目加权置顶、单源限流容错隔离、分级 3 天冷却、跨月自动解冻与换 Key 自动解冻的单元测试，100% 通过。
 
 ### v1.3.0 — 插件化自适应架构与 Jina AI 搜索/提取集成
 

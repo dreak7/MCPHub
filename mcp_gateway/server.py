@@ -16,7 +16,30 @@ from .search import ExtractGateway, SearchError, SearchGateway
 SEARCH_TOOL_SCHEMA = {
     "name": "fallback_web_search",
     "description": (
-        "Search the web with automatic provider fallback: Tavily, Exa, AnySearch, then Bocha Web Search API. "
+        "Search the web with automatic provider fallback: Tavily, Exa, Jina, AnySearch, then Bocha Web Search API. "
+        "Best for fast, economic, single-source queries with automatic fallback on failure. "
+        "IMPORTANT: If the returned result contains a 'warning' field, you MUST display that warning prominently to the user at the top of your answer."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query."},
+            "max_results": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
+            "search_depth": {"type": "string", "enum": ["basic", "advanced"], "default": "basic"},
+            "time_range": {"type": "string", "enum": ["day", "week", "month", "year"]},
+            "include_domains": {"type": "array", "items": {"type": "string"}},
+            "exclude_domains": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["query"],
+        "additionalProperties": False
+    }
+}
+
+MULTI_SEARCH_TOOL_SCHEMA = {
+    "name": "multi_web_search",
+    "description": (
+        "Concurrently search the web across all configured providers (Tavily, Exa, Jina, Bocha, AnySearch) "
+        "and synthesize deduplicated results. Best for in-depth research, comprehensive reviews, and multi-source verification. "
         "IMPORTANT: If the returned result contains a 'warning' field, you MUST display that warning prominently to the user at the top of your answer."
     ),
     "inputSchema": {
@@ -37,7 +60,7 @@ SEARCH_TOOL_SCHEMA = {
 EXTRACT_TOOL_SCHEMA = {
     "name": "fallback_web_extract",
     "description": (
-        "Extract clean page content with automatic fallback: Tavily, Exa, then AnySearch. Bocha is search-only. "
+        "Extract clean page content with automatic fallback: Tavily, Exa, Jina, then AnySearch. Bocha is search-only. "
         "IMPORTANT: If the returned result contains a 'warning' field, you MUST display that warning prominently to the user at the top of your answer."
     ),
     "inputSchema": {
@@ -127,6 +150,8 @@ class McpServer:
             if SEARCH_TOOL_SCHEMA:
                 search_handler = (lambda args: self.search_gateway.search(args)) if self.search_gateway else None
                 self.tools["fallback_web_search"] = ToolDefinition(schema=SEARCH_TOOL_SCHEMA, handler=search_handler)
+                multi_search_handler = (lambda args: self.search_gateway.multi_search(args)) if self.search_gateway else None
+                self.tools["multi_web_search"] = ToolDefinition(schema=MULTI_SEARCH_TOOL_SCHEMA, handler=multi_search_handler)
             if EXTRACT_TOOL_SCHEMA:
                 extract_handler = (lambda args: self.extract_gateway.extract(args)) if self.extract_gateway else None
                 self.tools["fallback_web_extract"] = ToolDefinition(schema=EXTRACT_TOOL_SCHEMA, handler=extract_handler)
@@ -154,7 +179,7 @@ class McpServer:
         if method == "notifications/initialized":
             return None
         if method == "initialize":
-            return self._result(request_id, {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "local-search-fallback-gateway", "version": "1.2.0"}})
+            return self._result(request_id, {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "local-search-fallback-gateway", "version": "1.4.0"}})
         if method == "ping":
             return self._result(request_id, {})
         if method == "tools/list":
@@ -230,11 +255,12 @@ def main() -> None:
         capabilities = config.get("capabilities", {})
         tools: dict[str, ToolDefinition] = {}
 
-        # 动态自适应挂载能力：如果配置了搜索，则装载搜索工具
+        # 动态自适应挂载能力：如果配置了搜索，则装载常规单源搜索与多源并发聚合搜索工具
         search_gw = None
         if "web_search" in capabilities:
             search_gw = SearchGateway(capabilities["web_search"], state_path, logger)
             tools["fallback_web_search"] = ToolDefinition(schema=SEARCH_TOOL_SCHEMA, handler=search_gw.search)
+            tools["multi_web_search"] = ToolDefinition(schema=MULTI_SEARCH_TOOL_SCHEMA, handler=search_gw.multi_search)
 
         # 动态自适应挂载能力：如果配置了正文提取，则装载提取工具
         extract_gw = None

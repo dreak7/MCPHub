@@ -3,6 +3,7 @@
     "web_search": {
       "timeout_seconds": 25,
       "cooldown_seconds": 3600,
+      "quota_cooldown_seconds": 259200,
       "providers": [
         {
           "id": "tavily-search",
@@ -44,6 +45,7 @@
     "web_extract": {
       "timeout_seconds": 30,
       "cooldown_seconds": 3600,
+      "quota_cooldown_seconds": 259200,
       "providers": [
         {
           "id": "tavily-search",

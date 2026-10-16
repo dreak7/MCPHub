@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
+import hashlib
 import ipaddress
+import json
 import logging
 import os
 import socket
@@ -11,8 +12,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import concurrent.futures
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -29,27 +31,109 @@ class ProviderFailure:
     reason: str
 
 
+# =========================================================================
+# 【功能块：持久化冷却状态管理器（支持跨月重置自适应与 Key 变更解冻自适应）】
+# - 输入：path (Path): 冷却状态持久化 JSON 文件路径
+# - 功能：1. 记录并持久化各提供商的冷却到期时间戳、进入冷却时的月份（YYYY-MM）与 API Key 哈希；
+#         2. 跨月自动解冻（月初自适应）：检测到跨入新自然月时，自动将上月因配额耗尽沉睡的服务解冻复活；
+#         3. 密钥变更自动解冻（Key自适应）：检测到用户在 .env 中更换了 API Key 时，秒级清除冷却复活服务；
+#         4. 100% 向后兼容：兼容旧版本仅存 float 时间戳的历史数据格式。
+# - 输出：CooldownStore 实例
+# =========================================================================
 class CooldownStore:
     def __init__(self, path: Path):
         self.path = path
-        self._state: dict[str, float] = self._load()
+        self._state: dict[str, dict[str, Any]] = self._load()
 
-    def _load(self) -> dict[str, float]:
+    def _load(self) -> dict[str, dict[str, Any]]:
         try:
             parsed = json.loads(self.path.read_text(encoding="utf-8"))
-            return {str(key): float(value) for key, value in parsed.items()}
+            if not isinstance(parsed, dict):
+                return {}
+            loaded: dict[str, dict[str, Any]] = {}
+            for key, val in parsed.items():
+                if isinstance(val, (int, float)):
+                    loaded[str(key)] = {
+                        "until": float(val),
+                        "reason_type": "rate_limit",
+                        "month": "",
+                        "key_hash": ""
+                    }
+                elif isinstance(val, dict):
+                    loaded[str(key)] = {
+                        "until": float(val.get("until", 0)),
+                        "reason_type": str(val.get("reason_type", "rate_limit")),
+                        "month": str(val.get("month", "")),
+                        "key_hash": str(val.get("key_hash", ""))
+                    }
+            return loaded
         except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
             return {}
 
-    def is_available(self, provider_id: str) -> bool:
-        return self._state.get(provider_id, 0) <= time.time()
+    def is_available(self, provider_id: str, current_key: str = "") -> bool:
+        record = self._state.get(provider_id)
+        if not record:
+            return True
 
-    def set(self, provider_id: str, seconds: int | float) -> None:
-        self._state[provider_id] = time.time() + seconds
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        until = record.get("until", 0)
+        # 1. 自然时间到期：自适应恢复
+        if until <= time.time():
+            return True
+
+        # 2. 密钥自适应：检测到用户在配置中更换了 API Key，历史冷却失效
+        if current_key and record.get("key_hash"):
+            current_hash = hashlib.sha256(current_key.encode("utf-8")).hexdigest()[:16]
+            if current_hash != record["key_hash"]:
+                self.clear(provider_id)
+                return True
+
+        # 3. 月初自适应：跨入新的自然月，自动复活配额耗尽的服务（月度免费额度已刷新）
+        if record.get("reason_type") == "quota" and record.get("month"):
+            current_month = time.strftime("%Y-%m", time.gmtime())
+            if current_month != record["month"]:
+                self.clear(provider_id)
+                return True
+
+        return False
+
+    def get_until(self, provider_id: str) -> float:
+        record = self._state.get(provider_id)
+        if isinstance(record, dict):
+            return float(record.get("until", 0))
+        if isinstance(record, (int, float)):
+            return float(record)
+        return 0.0
+
+    def set(
+        self,
+        provider_id: str,
+        seconds: int | float,
+        reason_type: str = "rate_limit",
+        api_key: str = ""
+    ) -> None:
+        key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16] if api_key else ""
+        current_month = time.strftime("%Y-%m", time.gmtime())
+        self._state[provider_id] = {
+            "until": time.time() + seconds,
+            "reason_type": reason_type,
+            "month": current_month,
+            "key_hash": key_hash
+        }
+        self._save()
+
+    def clear(self, provider_id: str) -> None:
+        if provider_id in self._state:
+            del self._state[provider_id]
+            self._save()
+
+    def _save(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
+            temporary.replace(self.path)
+        except OSError:
+            pass
 
 
 class SearchGateway:
@@ -71,6 +155,7 @@ class SearchGateway:
             raise SearchError("Invalid providers configuration", retryable=False)
         enabled_count = sum(1 for p in providers if isinstance(p, dict) and p.get("enabled", False))
         cooldown_seconds = self.definition.get("cooldown_seconds", 3600)
+        quota_cooldown_seconds = self.definition.get("quota_cooldown_seconds", 259200)
         timeout = self.definition.get("timeout_seconds", 25)
         failures: list[ProviderFailure] = []
         for provider in sorted(providers, key=lambda item: item.get("priority", 1000)):
@@ -83,7 +168,7 @@ class SearchGateway:
             if not api_key and provider_id != "anysearch":
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
-            if not self.cooldowns.is_available(self._cooldown_id(provider_id)):
+            if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
                 failures.append(ProviderFailure(provider_id, "provider is in cooldown"))
                 continue
             try:
@@ -102,13 +187,224 @@ class SearchGateway:
                 self.logger.warning("Provider %s failed: %s", provider_id, exc)
                 failures.append(ProviderFailure(provider_id, str(exc)))
                 if exc.retryable:
-                    self.cooldowns.set(self._cooldown_id(provider_id), cooldown_seconds)
+                    is_quota = self._is_quota_exhausted(exc)
+                    cd = quota_cooldown_seconds if is_quota else cooldown_seconds
+                    reason_type = "quota" if is_quota else "rate_limit"
+                    self.cooldowns.set(self._cooldown_id(provider_id), cd, reason_type=reason_type, api_key=api_key)
 
         detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "No provider enabled"
         all_quota = (len(failures) >= enabled_count and enabled_count > 0 and self._is_all_quota(failures))
         auth_warning = self._format_warning(failures, all_exhausted=all_quota)
         extra = f" {auth_warning}" if auth_warning else ""
         raise SearchError(f"No search provider was available ({detail}).{extra}", retryable=False)
+
+    # =========================================================================
+    # 【功能块：多源并发聚合网页搜索（Multi-Source Concurrent Search）】
+    # - 输入：arguments (dict): 包含以下检索参数：
+    #         - query (str, 必填): 检索关键词
+    #         - max_results (int, 可选, 默认10, 范围1-20): 最终聚合返回的最大条目数
+    #         - search_depth (str, 可选): basic 或 advanced
+    #         - time_range (str, 可选): 时间跨度 (day, week, month, year)
+    #         - include_domains (list[str], 可选): 包含的域名白名单
+    #         - exclude_domains (list[str], 可选): 排除的域名黑名单
+    # - 功能：并发（ThreadPoolExecutor）同时调用所有已启用且处于就绪状态的搜索引擎
+    #         （Tavily, Exa, Jina, Bocha, AnySearch 等）；各引擎独立容错，部分失败不影响
+    #         全局；对搜集到的多路结果进行 URL 规范化清洗、智能去重、多源印证合并（打标
+    #         sources 列表并优先置顶多源认可的权威网页），最后截取 top N 结果返回。
+    # - 输出：dict 结构化结果：
+    #         - tool: "multi_web_search"
+    #         - query: 原始检索词
+    #         - active_providers: 成功贡献搜索结果的引擎列表
+    #         - total_sources_queried: 实际发起并发请求的引擎总数
+    #         - results: 融合去重后的标准化搜索条目列表（每条含 sources 来源）
+    #         - provider_failures: 故障引擎及失败原因清单
+    #         - warning: 如有引擎配额或认证异常，提供醒目的前端告警提示
+    # =========================================================================
+    def multi_search(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        query = arguments.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise SearchError("query must be a non-empty string", retryable=False)
+        max_results = arguments.get("max_results", 10)
+        if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 20:
+            raise SearchError("max_results must be an integer between 1 and 20", retryable=False)
+
+        providers = self.definition.get("providers", [])
+        if not isinstance(providers, list):
+            raise SearchError("Invalid providers configuration", retryable=False)
+        enabled_count = sum(1 for p in providers if isinstance(p, dict) and p.get("enabled", False))
+        cooldown_seconds = self.definition.get("cooldown_seconds", 3600)
+        quota_cooldown_seconds = self.definition.get("quota_cooldown_seconds", 259200)
+        timeout = self.definition.get("timeout_seconds", 25)
+
+        failures: list[ProviderFailure] = []
+        ready_providers: list[tuple[dict[str, Any], str]] = []
+
+        for provider in sorted(providers, key=lambda item: item.get("priority", 1000)):
+            provider_id = provider.get("id", "unknown")
+            if not provider.get("enabled", False):
+                continue
+            key_name = provider.get("api_key_env")
+            api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
+            if not api_key and provider_id != "anysearch":
+                failures.append(ProviderFailure(provider_id, "API key is not configured"))
+                continue
+            if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
+                failures.append(ProviderFailure(provider_id, "provider is in cooldown"))
+                continue
+            ready_providers.append((provider, api_key))
+
+        if not ready_providers:
+            detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "No provider enabled"
+            all_quota = (len(failures) >= enabled_count and enabled_count > 0 and self._is_all_quota(failures))
+            auth_warning = self._format_warning(failures, all_exhausted=all_quota)
+            extra = f" {auth_warning}" if auth_warning else ""
+            raise SearchError(f"No search provider was available ({detail}).{extra}", retryable=False)
+
+        provider_results: list[tuple[str, list[dict[str, Any]]]] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(ready_providers)) as executor:
+            future_to_provider = {
+                executor.submit(
+                    self._call,
+                    provider,
+                    query.strip(),
+                    max_results,
+                    arguments,
+                    api_key,
+                    timeout
+                ): (provider.get("id", "unknown"), api_key)
+                for provider, api_key in ready_providers
+            }
+            for future in concurrent.futures.as_completed(future_to_provider):
+                prov_id, prov_key = future_to_provider[future]
+                try:
+                    res = future.result()
+                    if isinstance(res, list):
+                        provider_results.append((prov_id, res))
+                except SearchError as exc:
+                    self.logger.warning("Multi-search provider %s failed: %s", prov_id, exc)
+                    failures.append(ProviderFailure(prov_id, str(exc)))
+                    if exc.retryable:
+                        is_quota = self._is_quota_exhausted(exc)
+                        cd = quota_cooldown_seconds if is_quota else cooldown_seconds
+                        reason_type = "quota" if is_quota else "rate_limit"
+                        self.cooldowns.set(self._cooldown_id(prov_id), cd, reason_type=reason_type, api_key=prov_key)
+                except Exception as exc:
+                    self.logger.exception("Multi-search provider %s unexpected error: %s", prov_id, exc)
+                    failures.append(ProviderFailure(prov_id, f"Unexpected error: {exc}"))
+
+        if not provider_results:
+            detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "All providers failed"
+            all_quota = (len(failures) >= enabled_count and enabled_count > 0 and self._is_all_quota(failures))
+            auth_warning = self._format_warning(failures, all_exhausted=all_quota)
+            extra = f" {auth_warning}" if auth_warning else ""
+            raise SearchError(f"No search provider succeeded ({detail}).{extra}", retryable=False)
+
+        contributed_providers = [p_id for p_id, _ in provider_results]
+        fused_results = self._fuse_and_deduplicate(provider_results, max_results)
+
+        response: dict[str, Any] = {
+            "tool": "multi_web_search",
+            "query": query.strip(),
+            "active_providers": contributed_providers,
+            "total_sources_queried": len(ready_providers),
+            "results": fused_results,
+            "provider_failures": [{"provider": item.provider, "reason": item.reason} for item in failures],
+        }
+        all_quota = (
+            len(failures) >= enabled_count
+            and enabled_count > 0
+            and self._is_all_quota(failures)
+        )
+        warning = self._format_warning(failures, all_exhausted=all_quota)
+        if warning:
+            response["warning"] = warning
+        return response
+
+    # =========================================================================
+    # 【功能块：多源结果智能去重与多维融合排序】
+    # - 输入：provider_results (list[tuple[str, list[dict[str, Any]]]]):
+    #         各引擎原始返回结果列表（格式为 (provider_id, [item, ...])）；
+    #         max_results (int): 最终保留的最大结果条数
+    # - 功能：1. 对不同引擎返回的 URL 进行归一化清洗（去除追踪参数与末尾斜杠）；
+    #         2. 归并相同 URL，保留更长更详实的摘要与有效标题，并在 sources 字段中记录所有推荐该网页的引擎；
+    #         3. 强化多源置信度：被多家引擎共同推荐的高信度结果优先排在最前列；
+    #         4. 截取前 max_results 条输出。
+    # - 输出：list[dict[str, Any]]: 融合去重后的优质搜索结果列表
+    # =========================================================================
+    @classmethod
+    def _fuse_and_deduplicate(
+        cls,
+        provider_results: list[tuple[str, list[dict[str, Any]]]],
+        max_results: int
+    ) -> list[dict[str, Any]]:
+        merged_by_url: dict[str, dict[str, Any]] = {}
+        url_order: list[str] = []
+
+        for provider_id, items in provider_results:
+            for item in items:
+                raw_url = item.get("url", "")
+                if not raw_url:
+                    continue
+                norm_url = cls._normalize_url(raw_url)
+                title = str(item.get("title") or "").strip()
+                snippet = str(item.get("snippet") or "").strip()
+                published = str(item.get("published_date") or "").strip()
+
+                if norm_url not in merged_by_url:
+                    merged_by_url[norm_url] = {
+                        "title": title,
+                        "url": raw_url,
+                        "snippet": snippet,
+                        "published_date": published,
+                        "sources": [provider_id],
+                    }
+                    url_order.append(norm_url)
+                else:
+                    existing = merged_by_url[norm_url]
+                    if provider_id not in existing["sources"]:
+                        existing["sources"].append(provider_id)
+                    if len(title) > len(existing["title"]):
+                        existing["title"] = title
+                    if len(snippet) > len(existing["snippet"]):
+                        existing["snippet"] = snippet
+                    if not existing["published_date"] and published:
+                        existing["published_date"] = published
+
+        fused = [merged_by_url[u] for u in url_order]
+        fused.sort(key=lambda x: len(x["sources"]), reverse=True)
+        return fused[:max_results]
+
+    # =========================================================================
+    # 【功能块：URL 规范化清洗（过滤跟踪参数与冗余格式）】
+    # - 输入：url (str): 待清洗的原始网页链接
+    # - 功能：将协议与域名转为小写，去除路径末尾多余斜杠，剥离 utm_*, ref, spm 等常见跟踪参数，
+    #         剔除 URL 片段锚点（#hash），确保同一网页在不同搜索引擎的链接能精准匹配去重
+    # - 输出：str: 规范化后的纯净 URL 字符串
+    # =========================================================================
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        try:
+            parts = urlsplit(url.strip())
+            scheme = parts.scheme.lower()
+            netloc = parts.netloc.lower()
+            path = parts.path
+            if path.endswith("/") and len(path) > 1:
+                path = path[:-1]
+            query = parts.query
+            if query:
+                ignored_prefixes = ("utm_", "ref", "spm", "from", "source", "feature", "fbclid", "gclid")
+                filtered_pairs = []
+                for pair in query.split("&"):
+                    if not pair:
+                        continue
+                    key = pair.split("=")[0].lower()
+                    if not any(key.startswith(p) for p in ignored_prefixes):
+                        filtered_pairs.append(pair)
+                query = "&".join(filtered_pairs)
+            return urlunsplit((scheme, netloc, path, query, ""))
+        except Exception:
+            return url.strip().rstrip("/")
+
 
     # =========================================================================
     # 【功能块：格式化后端服务故障前端警告（认证 + 配额/限流）】
@@ -167,6 +463,46 @@ class SearchGateway:
 
     def _cooldown_id(self, provider_id: str) -> str:
         return f"web_search:{provider_id}"
+
+    # =========================================================================
+    # 【功能块：判断异常是否属于上游配额/资产类耗尽】
+    # - 输入：exc (SearchError): 发生的异常对象
+    # - 功能：判断异常状态码与错误信息是否为真正的配额/余额耗尽（排除普通的 429 短时频率限流）
+    # - 输出：bool: 是配额耗尽返回 True，否则返回 False
+    # =========================================================================
+    @classmethod
+    def _is_quota_exhausted(cls, exc: SearchError) -> bool:
+        if exc.status in (402, 432):
+            return True
+        lowered = str(exc).lower()
+        quota_tokens = (
+            "402", "432", "quota", "usage limit", "insufficient balance",
+            "not enough money", "insufficient credit", "out of credit",
+            "exceeds api key usage limit", "quota exceeded", "quota exhausted",
+            "额度", "余额不足", "用量超限"
+        )
+        if any(token in lowered for token in quota_tokens) and not ("429" in lowered and "quota" not in lowered and "额度" not in lowered):
+            return True
+        return False
+
+    # =========================================================================
+    # 【功能块：计算故障提供商的分级冷却时长】
+    # - 输入：exc (SearchError): 发生的检索/提取异常对象；
+    #         default_cooldown (int | float): 常规限流/短时故障冷却时间（秒，默认 3600，即 1 小时）；
+    #         quota_cooldown (int | float): 资产/配额耗尽冷却时间（秒，默认 259200，即 3 天）
+    # - 功能：精准识别异常是否属于配额耗尽（HTTP 402/432、或包含配额/余额不足/用量超限等关键字）：
+    #         若是配额耗尽，返回长达 3 天的 quota_cooldown（避免月度配额耗尽后频繁重试与弹窗骚扰）；
+    #         若为普通短时限流（429）或网络波动，返回常规 default_cooldown（1 小时）
+    # - 输出：int | float: 应当设置的冷却秒数
+    # =========================================================================
+    @classmethod
+    def _resolve_cooldown_seconds(
+        cls,
+        exc: SearchError,
+        default_cooldown: int | float,
+        quota_cooldown: int | float
+    ) -> int | float:
+        return quota_cooldown if cls._is_quota_exhausted(exc) else default_cooldown
 
     def _call(self, provider: dict[str, Any], query: str, max_results: int, arguments: dict[str, Any], api_key: str, timeout: Any) -> list[dict[str, Any]]:
         provider_id = provider["id"]
@@ -335,6 +671,7 @@ class ExtractGateway(SearchGateway):
         extracted: list[dict[str, Any]] = []
         failures: list[ProviderFailure] = []
         cooldown_seconds = self.definition.get("cooldown_seconds", 3600)
+        quota_cooldown_seconds = self.definition.get("quota_cooldown_seconds", 259200)
         timeout = self.definition.get("timeout_seconds", 30)
         for provider in sorted(providers, key=lambda item: item.get("priority", 1000)):
             if not pending:
@@ -347,7 +684,7 @@ class ExtractGateway(SearchGateway):
             if not api_key and provider_id != "anysearch":
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
-            if not self.cooldowns.is_available(self._cooldown_id(provider_id)):
+            if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
                 failures.append(ProviderFailure(provider_id, "provider is in cooldown"))
                 continue
             try:
@@ -356,7 +693,10 @@ class ExtractGateway(SearchGateway):
                 self.logger.warning("Extract provider %s failed: %s", provider_id, exc)
                 failures.append(ProviderFailure(provider_id, str(exc)))
                 if exc.retryable:
-                    self.cooldowns.set(self._cooldown_id(provider_id), cooldown_seconds)
+                    is_quota = self._is_quota_exhausted(exc)
+                    cd = quota_cooldown_seconds if is_quota else cooldown_seconds
+                    reason_type = "quota" if is_quota else "rate_limit"
+                    self.cooldowns.set(self._cooldown_id(provider_id), cd, reason_type=reason_type, api_key=api_key)
                 # Authentication, provider-side validation, and URL parsing failures
                 # are provider-specific: preserve the reason and try the next service.
                 continue
