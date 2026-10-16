@@ -1,6 +1,6 @@
 {
   "server_name": "local-search-fallback-gateway",
-  "provider_config_files": ["providers/search.json"],
+  "provider_config_files": ["providers/*.json"],
   "log_file": "../logs/gateway.log",
   "state_file": "../state/provider-state.json"
 }

@@ -113,6 +113,18 @@ class SearchGatewayTest(unittest.TestCase):
         self.assertEqual(10, post.call_args.args[2]["max_results"])
         self.assertNotIn("tag", post.call_args.args[2])
 
+    def test_jina_search_normalizes_response(self):
+        gateway = self.make_gateway()
+        fake_data = {"code": 200, "data": [{"title": "Jina Title", "url": "https://jina.ai", "description": "Snippet text", "publishedTime": "2026-01-01"}]}
+        with patch.object(gateway, "_post", return_value=fake_data) as post:
+            results = gateway._jina("https://s.jina.ai", "fake-key", "query", 5, {}, 10)
+        self.assertEqual(1, len(results))
+        self.assertEqual("Jina Title", results[0]["title"])
+        self.assertEqual("https://jina.ai", results[0]["url"])
+        self.assertEqual("Snippet text", results[0]["snippet"])
+        self.assertEqual("Bearer fake-key", post.call_args.args[1]["Authorization"])
+        self.assertEqual("application/json", post.call_args.args[1]["Accept"])
+
 
 class McpServerTest(unittest.TestCase):
     def test_initialize_and_tools_list(self):
@@ -169,6 +181,28 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(999, response.get("id"))
         self.assertEqual(-32603, response["error"]["code"])
         self.assertIn("simulated crash", response["error"]["message"])
+
+    def test_adaptive_tools_registration_and_call(self):
+        from mcp_gateway.server import ToolDefinition
+        fake_tool_schema = {"name": "custom_tool", "description": "Custom test tool"}
+        server = McpServer(None, None, FakeLogger(), tools={
+            "custom_tool": ToolDefinition(schema=fake_tool_schema, handler=lambda args: {"echo": args.get("val")})
+        })
+        tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        self.assertEqual(1, len(tools["result"]["tools"]))
+        self.assertEqual("custom_tool", tools["result"]["tools"][0]["name"])
+
+        called = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "custom_tool", "arguments": {"val": 42}}})
+        self.assertFalse(called["result"]["isError"])
+        self.assertEqual(42, called["result"]["structuredContent"]["echo"])
+
+
+class AdaptiveConfigTest(unittest.TestCase):
+    def test_glob_config_loading(self):
+        from mcp_gateway.config import load_config
+        config = load_config(Path(__file__).resolve().parent.parent / "config" / "gateway.json")
+        self.assertIn("web_search", config["capabilities"])
+        self.assertIn("web_extract", config["capabilities"])
 
 
 class ExtractGatewayTest(unittest.TestCase):
@@ -229,6 +263,17 @@ class ExtractGatewayTest(unittest.TestCase):
         self.assertIn("tavily-search (HTTP 401)", result["warning"])
         self.assertIn("或联系MCP提供商", result["warning"])
         self.assertEqual(2, extract.call_count)
+
+    def test_jina_extract_normalizes_response(self):
+        gateway = ExtractGateway({"providers": []}, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        fake_data = {"code": 200, "data": {"title": "Page Title", "url": "https://example.com", "content": "Clean page markdown"}}
+        with patch.object(gateway, "_post", return_value=fake_data) as post:
+            results = gateway._jina_extract("https://r.jina.ai", "fake-key", ["https://example.com"], 5000, 10)
+        self.assertEqual(1, len(results))
+        self.assertEqual("Page Title", results[0]["title"])
+        self.assertEqual("Clean page markdown", results[0]["content"])
+        self.assertEqual("Bearer fake-key", post.call_args.args[1]["Authorization"])
+        self.assertEqual("application/json", post.call_args.args[1]["Accept"])
 
 
 class SearchCooldownTest(unittest.TestCase):

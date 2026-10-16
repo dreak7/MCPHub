@@ -8,19 +8,20 @@
 
 1. Tavily Search
 2. Exa
-3. AnySearch
-4. Bocha Web Search API
+3. Jina AI Search
+4. AnySearch
+5. Bocha Web Search API
 
 当服务返回额度耗尽、429、超时、连接错误或暂时性服务器错误时，网关会自动尝试下一项。
 后端服务的认证错误、调用参数错误或拒绝服务不会中断递补：网关会记录原因并继续尝试下一家。
 只有调用方传入的本地工具参数不合法时才会立即返回错误。
 
-正文提取工具使用 Tavily → Exa → AnySearch。Bocha 的 Web Search API 仅返回搜索结果
+正文提取工具使用 Tavily → Exa → Jina AI Reader → AnySearch。Bocha 的 Web Search API 仅返回搜索结果
 和摘要，因此不会用于任意 URL 正文提取。
 
 ## 目录与配置
 
-`config/gateway.json` 是入口配置，搜索服务清单在
+`config/gateway.json` 是入口配置，支持通配符（如 `providers/*.json`）自适应发现所有配置。搜索服务清单在
 `config/providers/search.json`。API 密钥在 `config/.env`，密钥文件不应提交或分享。
 
 每个 provider 的 `priority` 决定递补顺序；`enabled: false` 可临时停用服务。某服务因可递补错误失败时，网关会在 `cooldown_seconds` 内跳过它。冷却状态保存在 `state/provider-state.json`，重启 Hermes 后也会保留。
@@ -100,7 +101,7 @@
      ```
    - 执行 `hermes mcp list` 确认状态为 `✓ enabled`。
 
-聚合器与 Hermes 只在本机经标准输入输出通信，不监听网络端口；但 Tavily、Exa、AnySearch 与 Bocha 本身是在线 API，因此目标电脑必须能访问互联网。
+聚合器与 Hermes 只在本机经标准输入输出通信，不监听网络端口；但 Tavily、Exa、Jina AI、AnySearch 与 Bocha 本身是在线 API，因此目标电脑必须能访问互联网。
 
 ## 排查
 
@@ -114,7 +115,7 @@
 `fallback_web_search` 接受：
 
 - `query`（必填）
-- `max_results`（1–20，默认 5）
+- `max_results`（1–20，默认 10）
 - `search_depth`（`basic` / `advanced`，默认 `basic`）
 - `time_range`（`day` / `week` / `month` / `year`，可选）
 - `include_domains`、`exclude_domains`（字符串数组，可选）
@@ -145,6 +146,20 @@ AnySearch 的上游 API 单次最多返回 10 条；当统一工具请求超过 
 和具体的 HTTP 状态码或错误描述。工具元数据已指示 Agent 必须在前端回答中置顶向用户警示。
 
 ## 更新记录
+
+### v1.3.0 — 插件化自适应架构与 Jina AI 搜索/提取集成
+
+- **插件化配置与动态能力注册（解除硬编码限制）**：
+  - `config/gateway.json` 支持通过通配符（如 `"providers/*.json"`）自动扫描发现提供商配置，无需每次手动注册。
+  - 解除了此前必须同时具备 `web_search` 和 `web_extract` 的硬编码校验，系统支持动态能力插拔与自适应加载。
+  - 服务端引入 `ToolDefinition` 动态工具注册表机制，`tools/list` 与 `tools/call` 全量动态自适应派发，同时完美向后兼容。
+- **集成 Jina AI（搜索 + Reader 正文提取）**：
+  - 新增 Jina AI 作为搜索梯队与正文提取梯队的通用回退提供商（优先级设为 25，位于 Exa 与 AnySearch 之间）。
+  - 支持 `s.jina.ai` 搜索接口与 `r.jina.ai` 极简正文提取接口，自动规范化输出统一 Schema。
+  - 支持在 `config/.env` 中通过 `JINA_API_KEY` 进行 Bearer Token 鉴权，享受完整的失败冷却、429/432 限流与配额告警机制。
+- **默认检索条数扩增至 10 条**：
+  - 将 `fallback_web_search` 的默认返回数量从 5 条提升至 10 条，为大模型提供更充实的上下文与多源交叉校验能力，且与 AnySearch 单次上限完全匹配。
+- **测试套件扩充**：测试用例扩展至 25 项，全量覆盖通配符配置发现、动态工具注册派发、Jina Search 结果规范化以及 Jina Reader 正文提取。
 
 ### v1.2.0 — 后端故障前端告警、配额状态分流与环境自适应启动
 

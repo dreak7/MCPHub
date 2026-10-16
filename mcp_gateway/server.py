@@ -6,8 +6,9 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import ConfigError, load_config, resolve_project_path
 from .search import ExtractGateway, SearchError, SearchGateway
@@ -22,7 +23,7 @@ SEARCH_TOOL_SCHEMA = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Search query."},
-            "max_results": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+            "max_results": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
             "search_depth": {"type": "string", "enum": ["basic", "advanced"], "default": "basic"},
             "time_range": {"type": "string", "enum": ["day", "week", "month", "year"]},
             "include_domains": {"type": "array", "items": {"type": "string"}},
@@ -50,6 +51,19 @@ EXTRACT_TOOL_SCHEMA = {
         "additionalProperties": False
     }
 }
+
+
+# =========================================================================
+# 【功能块：MCP 工具定义实体数据类】
+# - 输入：schema (dict): 工具元数据描述（包含名称、描述与参数模型）；
+#         handler (Callable | None): 工具执行回调函数（接收参数字典并返回结构化结果）
+# - 功能：封装工具的对外接口契约与实际执行逻辑，实现工具定义的动态插拔与解耦
+# - 输出：ToolDefinition 实例
+# =========================================================================
+@dataclass
+class ToolDefinition:
+    schema: dict[str, Any]
+    handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
 
 # =========================================================================
@@ -87,16 +101,35 @@ def _configure_stdio() -> None:
 
 
 # =========================================================================
-# 【功能块：MCP 服务端核心类】
-# - 输入：search_gateway, extract_gateway, logger 实例
-# - 功能：遵循 MCP JSON-RPC 协议规范，通过 stdio 监听并响应客户端指令（initialize, tools/list, tools/call 等）
+# 【功能块：MCP 服务端核心类（支持自适应多工具注册与派发）】
+# - 输入：search_gateway, extract_gateway, logger 实例，及可选的 tools 工具注册字典
+# - 功能：遵循 MCP JSON-RPC 协议规范，通过 stdio 监听并动态响应客户端指令；
+#         支持动态工具清单自适应上报（tools/list）与动态工具路由派发（tools/call）
 # - 输出：McpServer 实例
 # =========================================================================
 class McpServer:
-    def __init__(self, search_gateway: SearchGateway, extract_gateway: ExtractGateway, logger: logging.Logger):
+    def __init__(
+        self,
+        search_gateway: SearchGateway | None = None,
+        extract_gateway: ExtractGateway | None = None,
+        logger: logging.Logger | None = None,
+        tools: dict[str, ToolDefinition] | None = None,
+    ):
         self.search_gateway = search_gateway
         self.extract_gateway = extract_gateway
-        self.logger = logger
+        self.logger = logger or logging.getLogger("mcp_gateway")
+        
+        if tools is not None:
+            self.tools: dict[str, ToolDefinition] = dict(tools)
+        else:
+            self.tools: dict[str, ToolDefinition] = {}
+            # 保持与旧版直接传入 search_gateway / extract_gateway 调用方式的完全向后兼容
+            if SEARCH_TOOL_SCHEMA:
+                search_handler = (lambda args: self.search_gateway.search(args)) if self.search_gateway else None
+                self.tools["fallback_web_search"] = ToolDefinition(schema=SEARCH_TOOL_SCHEMA, handler=search_handler)
+            if EXTRACT_TOOL_SCHEMA:
+                extract_handler = (lambda args: self.extract_gateway.extract(args)) if self.extract_gateway else None
+                self.tools["fallback_web_extract"] = ToolDefinition(schema=EXTRACT_TOOL_SCHEMA, handler=extract_handler)
 
     def run(self) -> None:
         _configure_stdio()
@@ -125,22 +158,29 @@ class McpServer:
         if method == "ping":
             return self._result(request_id, {})
         if method == "tools/list":
-            return self._result(request_id, {"tools": [SEARCH_TOOL_SCHEMA, EXTRACT_TOOL_SCHEMA]})
+            # 自适应返回当前所有已注册工具的 Schema 描述清单
+            return self._result(request_id, {"tools": [tool.schema for tool in self.tools.values()]})
         if method == "tools/call":
             return self._tool_call(request_id, message.get("params"))
         return self._error(request_id, -32601, f"Method not found: {method}") if "id" in message else None
 
     def _tool_call(self, request_id: Any, params: Any) -> dict[str, Any]:
-        if not isinstance(params, dict) or params.get("name") not in ("fallback_web_search", "fallback_web_extract"):
-            return self._error(request_id, -32602, "Only fallback_web_search and fallback_web_extract are available")
+        if not isinstance(params, dict):
+            return self._error(request_id, -32602, "params must be an object")
+        tool_name = params.get("name")
+        if not isinstance(tool_name, str) or tool_name not in self.tools:
+            available = ", ".join(self.tools.keys())
+            return self._error(request_id, -32602, f"Unknown tool: {tool_name}. Available: {available}")
         arguments = params.get("arguments", {})
         if not isinstance(arguments, dict):
             return self._error(request_id, -32602, "arguments must be an object")
+
+        tool = self.tools[tool_name]
+        if tool.handler is None:
+            return self._error(request_id, -32602, f"Tool handler for {tool_name} is not initialized")
+
         try:
-            if params["name"] == "fallback_web_search":
-                payload = self.search_gateway.search(arguments)
-            else:
-                payload = self.extract_gateway.extract(arguments)
+            payload = tool.handler(arguments)
             encoded = json.dumps(payload, ensure_ascii=False)
             return self._result(request_id, {"content": [{"type": "text", "text": encoded}], "structuredContent": payload, "isError": False})
         except SearchError as exc:
@@ -171,9 +211,10 @@ class McpServer:
 
 
 # =========================================================================
-# 【功能块：服务主函数启动入口】
+# 【功能块：服务主函数启动入口（支持自适应能力按需挂载）】
 # - 输入：命令行参数（--config 配置文件路径）
-# - 功能：初始化标准流 UTF-8 编码，加载配置文件与状态持久化模块，启动 MCP JSON-RPC 监听服务
+# - 功能：初始化标准流 UTF-8 编码，加载配置文件与状态持久化模块，按需动态挂载
+#         已配置的各项能力工具，启动 MCP JSON-RPC 监听服务
 # - 输出：无（持续运行 stdio 通信服务直到退出）
 # =========================================================================
 def main() -> None:
@@ -185,9 +226,26 @@ def main() -> None:
         config = load_config(args.config)
         logger = _logger(resolve_project_path(config, "log_file", "../logs/gateway.log"))
         state_path = resolve_project_path(config, "state_file", "../state/provider-state.json")
-        search_gateway = SearchGateway(config["capabilities"]["web_search"], state_path, logger)
-        extract_gateway = ExtractGateway(config["capabilities"]["web_extract"], state_path, logger)
+
+        capabilities = config.get("capabilities", {})
+        tools: dict[str, ToolDefinition] = {}
+
+        # 动态自适应挂载能力：如果配置了搜索，则装载搜索工具
+        search_gw = None
+        if "web_search" in capabilities:
+            search_gw = SearchGateway(capabilities["web_search"], state_path, logger)
+            tools["fallback_web_search"] = ToolDefinition(schema=SEARCH_TOOL_SCHEMA, handler=search_gw.search)
+
+        # 动态自适应挂载能力：如果配置了正文提取，则装载提取工具
+        extract_gw = None
+        if "web_extract" in capabilities:
+            extract_gw = ExtractGateway(capabilities["web_extract"], state_path, logger)
+            tools["fallback_web_extract"] = ToolDefinition(schema=EXTRACT_TOOL_SCHEMA, handler=extract_gw.extract)
+
+        if not tools:
+            raise ConfigError("No runnable tools could be initialized from configured capabilities")
+
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
-    McpServer(search_gateway, extract_gateway, logger).run()
+    McpServer(search_gw, extract_gw, logger, tools=tools).run()

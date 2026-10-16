@@ -19,6 +19,13 @@
           "endpoint": "https://api.exa.ai/search"
         },
         {
+          "id": "jina",
+          "enabled": true,
+          "priority": 25,
+          "api_key_env": "JINA_API_KEY",
+          "endpoint": "https://s.jina.ai"
+        },
+        {
           "id": "anysearch",
           "enabled": true,
           "priority": 30,
@@ -51,6 +58,13 @@
           "priority": 20,
           "api_key_env": "EXA_API_KEY",
           "endpoint": "https://api.exa.ai/contents"
+        },
+        {
+          "id": "jina",
+          "enabled": true,
+          "priority": 25,
+          "api_key_env": "JINA_API_KEY",
+          "endpoint": "https://r.jina.ai"
         },
         {
           "id": "anysearch",

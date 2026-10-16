@@ -43,6 +43,14 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data
 
 
+# =========================================================================
+# 【功能块：网关自适应配置加载与能力合并】
+# - 输入：path (str | Path): gateway.json 配置文件的路径
+# - 功能：读取主网关配置并加载 .env 环境变量；支持通过通配符（如 providers/*.json）
+#         或指定路径自适应扫描并合并所有提供商配置文件中的 capabilities 节点；
+#         支持动态能力插拔，解除必须包含指定能力的硬编码限制。
+# - 输出：merged (dict[str, Any]): 包含网关基础配置与全部已合并能力的配置字典
+# =========================================================================
 def load_config(path: str | Path) -> dict[str, Any]:
     gateway_path = Path(path).expanduser().resolve()
     gateway = _read_json(gateway_path)
@@ -56,17 +64,24 @@ def load_config(path: str | Path) -> dict[str, Any]:
     for relative_path in files:
         if not isinstance(relative_path, str):
             raise ConfigError("provider_config_files entries must be strings")
-        source = _read_json(root / relative_path)
-        capabilities = source.get("capabilities", {})
-        if not isinstance(capabilities, dict):
-            raise ConfigError(f"capabilities must be an object: {relative_path}")
-        for name, definition in capabilities.items():
-            if name in merged["capabilities"]:
-                raise ConfigError(f"Duplicate capability {name!r}")
-            merged["capabilities"][name] = definition
-    for required in ("web_search", "web_extract"):
-        if required not in merged["capabilities"]:
-            raise ConfigError(f"No {required} capability configured")
+        # 支持通配符扫描（例如 providers/*.json）或直接指定单个文件
+        if any(char in relative_path for char in "*?[]"):
+            matched_paths = sorted(root.glob(relative_path))
+        else:
+            matched_paths = [root / relative_path]
+        if not matched_paths:
+            raise ConfigError(f"No configuration files matched: {relative_path}")
+        for config_file in matched_paths:
+            source = _read_json(config_file)
+            capabilities = source.get("capabilities", {})
+            if not isinstance(capabilities, dict):
+                raise ConfigError(f"capabilities must be an object: {config_file.name}")
+            for name, definition in capabilities.items():
+                if name in merged["capabilities"]:
+                    raise ConfigError(f"Duplicate capability {name!r}")
+                merged["capabilities"][name] = definition
+    if not merged["capabilities"]:
+        raise ConfigError("No capabilities configured in provider config files")
     return merged
 
 

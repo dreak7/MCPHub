@@ -62,7 +62,7 @@ class SearchGateway:
         query = arguments.get("query")
         if not isinstance(query, str) or not query.strip():
             raise SearchError("query must be a non-empty string", retryable=False)
-        max_results = arguments.get("max_results", 5)
+        max_results = arguments.get("max_results", 10)
         if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 20:
             raise SearchError("max_results must be an integer between 1 and 20", retryable=False)
 
@@ -177,11 +177,46 @@ class SearchGateway:
             return self._tavily(endpoint, api_key, query, max_results, arguments, timeout)
         if provider_id == "exa":
             return self._exa(endpoint, api_key, query, max_results, arguments, timeout)
+        if provider_id == "jina":
+            return self._jina(endpoint, api_key, query, max_results, arguments, timeout)
         if provider_id == "anysearch":
             return self._anysearch(endpoint, api_key, query, max_results, provider, timeout)
         if provider_id == "bocha-search":
             return self._bocha(endpoint, api_key, query, max_results, arguments, timeout)
         raise SearchError(f"Unsupported provider id: {provider_id}", retryable=False)
+
+    # =========================================================================
+    # 【功能块：Jina AI 网页搜索适配器】
+    # - 输入：endpoint (str): Jina 搜索接口地址（例如 https://s.jina.ai）
+    #         key (str): Jina API Key（用于 Bearer Token 鉴权）
+    #         query (str): 用户检索关键词
+    #         limit (int): 返回的最大结果条数
+    #         args (dict): 扩展参数字典
+    #         timeout (float | int): 网络超时时间（秒）
+    # - 功能：向 Jina 搜索服务发送结构化 HTTP 请求，接收并解析其返回的 JSON 列表，
+    #         标准化输出为网关统一格式（title, url, snippet, published_date）
+    # - 输出：list[dict[str, Any]]: 标准化搜索结果列表
+    # =========================================================================
+    def _jina(self, endpoint: str, key: str, query: str, limit: int, args: dict[str, Any], timeout: Any) -> list[dict[str, Any]]:
+        payload: dict[str, Any] = {"q": query}
+        headers = {"Accept": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        data = self._post(endpoint, headers, payload, timeout)
+        items = data.get("data", [])
+        if isinstance(items, dict):
+            items = [items]
+        elif not isinstance(items, list):
+            items = []
+        results: list[dict[str, Any]] = []
+        for item in items[:limit]:
+            if isinstance(item, dict):
+                title = item.get("title") or ""
+                url = item.get("url") or ""
+                snippet = item.get("description") or item.get("content") or ""
+                published = item.get("publishedTime") or item.get("date") or ""
+                results.append(self._result(title, url, snippet, published))
+        return results
 
     def _tavily(self, endpoint: str, key: str, query: str, limit: int, args: dict[str, Any], timeout: Any) -> list[dict[str, Any]]:
         payload = {"query": query, "max_results": limit, "search_depth": args.get("search_depth", "basic"), "include_answer": False}
@@ -366,6 +401,8 @@ class ExtractGateway(SearchGateway):
             data = self._post(endpoint, {"x-api-key": api_key}, {"ids": urls, "text": {"maxCharacters": max_characters}}, timeout)
             items = data.get("results", [])
             return [self._extract_result(item.get("url"), item.get("title"), item.get("text") or item.get("content"), max_characters) for item in items if isinstance(item, dict)]
+        if provider_id == "jina":
+            return self._jina_extract(endpoint, api_key, urls, max_characters, timeout)
         if provider_id == "anysearch":
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             results: list[dict[str, Any]] = []
@@ -383,6 +420,36 @@ class ExtractGateway(SearchGateway):
                     results.append(self._extract_result(item.get("url", url), item.get("title"), item.get("content"), max_characters))
             return results
         raise SearchError(f"Unsupported extract provider id: {provider_id}", retryable=False)
+
+    # =========================================================================
+    # 【功能块：Jina AI Reader 网页正文提取适配器】
+    # - 输入：endpoint (str): Jina Reader 接口地址（例如 https://r.jina.ai）
+    #         key (str): Jina API Key（用于 Bearer Token 鉴权）
+    #         urls (list[str]): 待提取的公开网页 URL 列表
+    #         max_characters (int): 单页面最大字符提取限制
+    #         timeout (float | int): 网络超时时间（秒）
+    # - 功能：逐个向 Jina Reader 发送 HTTP POST 请求，提取目标网页清洗后的 Markdown 正文，
+    #         截断超长字符并封装为统一的 extract 结果结构
+    # - 输出：list[dict[str, Any]]: 格式化后的网页正文提取条目列表
+    # =========================================================================
+    def _jina_extract(self, endpoint: str, key: str, urls: list[str], max_characters: int, timeout: Any) -> list[dict[str, Any]]:
+        headers = {"Accept": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        results: list[dict[str, Any]] = []
+        for url in urls:
+            try:
+                data = self._post(endpoint, headers, {"url": url}, timeout)
+            except SearchError as exc:
+                if exc.status == 422:
+                    continue
+                raise
+            item = data.get("data", data)
+            if isinstance(item, dict):
+                title = item.get("title") or ""
+                content = item.get("content") or ""
+                results.append(self._extract_result(item.get("url", url), title, content, max_characters))
+        return results
 
     @staticmethod
     def _extract_result(url: Any, title: Any, content: Any, maximum: int) -> dict[str, Any]:
