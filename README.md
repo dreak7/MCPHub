@@ -29,7 +29,7 @@
 ## Windows 安装与配置
 
 1. 在目标电脑安装 **Python 3.11+**（推荐 3.11 或 3.13），安装器中务必勾选 **Add Python to PATH**。
-2. 将整个项目目录复制到稳定位置，例如 `C:\MCP\mcp-search-fallback-gateway`（或 `D:\MCP\MCPHub-V1.2`）。
+2. 将整个项目目录复制到稳定位置，例如 `C:\MCP\MCPHub`。
 3. 在该目录打开 PowerShell，验证 Python 环境并获取真实路径：
 
    ```powershell
@@ -55,9 +55,9 @@
    MCPHub:
      command: C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python313\python.exe  # 必须指向 python.exe，不能只填目录！
      args:
-       - C:\MCP\mcp-search-fallback-gateway\mcp_gateway
+       - C:\MCP\MCPHub\mcp_gateway
        - --config
-       - C:\MCP\mcp-search-fallback-gateway\config\gateway.json
+       - C:\MCP\MCPHub\config\gateway.json
      env:
        PYTHONUTF8: "1"  # 可选但推荐：显式通知 Python 启用 UTF-8（网关代码内部也已做自动 UTF-8 重配与 ASCII 兜底）
      enabled: true  # 必须为 true，否则服务默认 disabled
@@ -69,9 +69,9 @@
    - **Command**：`C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python313\python.exe`
      （⚠️ 注意：必须填写完整的 `python.exe` 可执行文件绝对路径，不能只写到 `...\Python313` 文件夹，否则会报 `[WinError 5] 拒绝访问`）
    - **Arguments（逐项添加 3 个独立参数，切勿合在一行）**：
-     - 参数项 1：`C:\MCP\mcp-search-fallback-gateway\mcp_gateway`
+     - 参数项 1：`C:\MCP\MCPHub\mcp_gateway`
      - 参数项 2：`--config`
-     - 参数项 3：`C:\MCP\mcp-search-fallback-gateway\config\gateway.json`
+     - 参数项 3：`C:\MCP\MCPHub\config\gateway.json`
      > ⚠️ **避坑警示**：Hermes 启动进程时不经过 Windows Shell 拆词，它的 `args` 是一个严格的参数数组。如果把上面 3 项合在一行塞进同一个输入框，Python 会将整行字符串当作单一参数，从而抛出 `ModuleNotFoundError`。
 
    **方式 C：标准 JSON 配置片段**：
@@ -79,9 +79,9 @@
    {
      "command": "C:\\Users\\<你的用户名>\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
      "args": [
-       "C:\\MCP\\mcp-search-fallback-gateway\\mcp_gateway",
+       "C:\\MCP\\MCPHub\\mcp_gateway",
        "--config",
-       "C:\\MCP\\mcp-search-fallback-gateway\\config\\gateway.json"
+       "C:\\MCP\\MCPHub\\config\\gateway.json"
      ],
      "env": {
        "PYTHONUTF8": "1"
