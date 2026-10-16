@@ -82,7 +82,11 @@
        "C:\\MCP\\mcp-search-fallback-gateway\\mcp_gateway",
        "--config",
        "C:\\MCP\\mcp-search-fallback-gateway\\config\\gateway.json"
-     ]
+     ],
+     "env": {
+       "PYTHONUTF8": "1"
+     },
+     "enabled": true
    }
    ```
 
@@ -109,6 +113,7 @@
 - 认证失败或参数不兼容会记录原因并继续递补下一家服务。如果所有服务都因认证失败，请检查 `.env` 中的变量名和 API Key。
 - 额度/频率耗尽会进入冷却。可等待 `cooldown_seconds` 到期，或在 Hermes 停止后删除 `state/provider-state.json` 以立即恢复尝试。
 - 在终端直接运行程序时它会等待 MCP JSON-RPC 输入，这是正常行为；应由 Hermes 启动它。
+- **服务已启用但在当前聊天窗口搜不到新工具？**：Hermes 桌面端在会话建立时会冻结工具目录快照。修改配置或中途重新启用 MCP 服务后，旧会话渲染端可能无法即时刷新。只需在 Hermes 中点击 **`+`（新建会话 / New Chat）**，或者**彻底重启一次 Hermes Desktop 客户端**，新会话即可直接挂载最新工具。
 
 ## 暴露的工具
 
