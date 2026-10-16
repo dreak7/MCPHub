@@ -12,20 +12,30 @@ class ConfigError(ValueError):
     pass
 
 
+# =========================================================================
+# 【功能块：轻量级 .env 环境变量加载器】
+# - 输入：path (Path): .env 文件的绝对路径
+# - 功能：安全读取 KEY=VALUE 配置行（自动兼容 UTF-8 与本地 GBK 编码），
+#         仅在环境变量中未定义该 KEY 时进行默认注入，不覆盖现有真实环境变量
+# - 输出：无（原地注入 os.environ）
+# =========================================================================
 def load_dotenv(path: Path) -> None:
-    """Load simple KEY=VALUE lines without overwriting a real environment value."""
     if not path.exists():
         return
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        content = path.read_text(encoding="gbk", errors="replace")
+    for number, raw in enumerate(content.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if "=" not in line:
-            raise ConfigError(f"Invalid .env line {number}: expected KEY=VALUE")
+            continue
         key, value = line.split("=", 1)
         key, value = key.strip(), value.strip()
         if not key:
-            raise ConfigError(f"Invalid .env line {number}: empty key")
+            continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         os.environ.setdefault(key, value)

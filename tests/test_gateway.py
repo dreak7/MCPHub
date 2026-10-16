@@ -816,6 +816,18 @@ class AuditV141RemediationTest(unittest.TestCase):
         resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(__version__, resp["result"]["serverInfo"]["version"])
 
+    def test_console_paths_and_execution(self):
+        """验证控制台模块 mcp_gateway.console 路径解析与退出逻辑健全"""
+        from mcp_gateway.console import _get_project_paths, main
+        paths = _get_project_paths()
+        self.assertTrue(paths["root"].exists())
+        self.assertTrue((paths["root"] / "config").exists())
+        self.assertTrue(paths["gui_script"].exists())
+
+        # 验证输入 '0' 能够正常退出
+        with patch("builtins.input", return_value="0"), patch("os.system"):
+            main()
+
 
 if __name__ == "__main__":
     unittest.main()
