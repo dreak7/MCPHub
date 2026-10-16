@@ -10,8 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from . import __version__
 from .config import ConfigError, load_config, resolve_project_path
-from .search import ExtractGateway, SearchError, SearchGateway
+from .search import CooldownStore, ExtractGateway, SearchError, SearchGateway
 
 SEARCH_TOOL_SCHEMA = {
     "name": "fallback_web_search",
@@ -179,7 +180,7 @@ class McpServer:
         if method == "notifications/initialized":
             return None
         if method == "initialize":
-            return self._result(request_id, {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "local-search-fallback-gateway", "version": "1.5.0"}})
+            return self._result(request_id, {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "local-search-fallback-gateway", "version": __version__}})
         if method == "ping":
             return self._result(request_id, {})
         if method == "tools/list":
@@ -251,6 +252,7 @@ def main() -> None:
         config = load_config(args.config)
         logger = _logger(resolve_project_path(config, "log_file", "../logs/gateway.log"))
         state_path = resolve_project_path(config, "state_file", "../state/provider-state.json")
+        cooldown_store = CooldownStore(state_path)
 
         capabilities = config.get("capabilities", {})
         tools: dict[str, ToolDefinition] = {}
@@ -261,7 +263,7 @@ def main() -> None:
             web_search_def = capabilities["web_search"]
             if isinstance(web_search_def, dict):
                 web_search_def.setdefault("name", "web_search")
-            search_gw = SearchGateway(web_search_def, state_path, logger)
+            search_gw = SearchGateway(web_search_def, state_path, logger, cooldown_store=cooldown_store)
             tools["fallback_web_search"] = ToolDefinition(schema=SEARCH_TOOL_SCHEMA, handler=search_gw.search)
             tools["multi_web_search"] = ToolDefinition(schema=MULTI_SEARCH_TOOL_SCHEMA, handler=search_gw.multi_search)
 
@@ -271,7 +273,7 @@ def main() -> None:
             web_extract_def = capabilities["web_extract"]
             if isinstance(web_extract_def, dict):
                 web_extract_def.setdefault("name", "web_extract")
-            extract_gw = ExtractGateway(web_extract_def, state_path, logger)
+            extract_gw = ExtractGateway(web_extract_def, state_path, logger, cooldown_store=cooldown_store)
             tools["fallback_web_extract"] = ToolDefinition(schema=EXTRACT_TOOL_SCHEMA, handler=extract_gw.extract)
 
         # 动态自适应挂载扩展能力：遍历所有自定义能力分类（例如 academic_search、code_search 等）
@@ -280,7 +282,7 @@ def main() -> None:
                 continue
             if isinstance(cap_def, dict) and "providers" in cap_def:
                 cap_def.setdefault("name", cap_name)
-                custom_gw = SearchGateway(cap_def, state_path, logger)
+                custom_gw = SearchGateway(cap_def, state_path, logger, cooldown_store=cooldown_store)
                 is_multi = cap_def.get("strategy") == "multi"
                 default_desc = (
                     f"Multi-source concurrent search using custom {cap_name} capability."

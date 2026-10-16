@@ -26,7 +26,7 @@ echo.
 echo   [1] 一键生成并查看 Hermes Desktop 挂载配置 (含本机真实绝对路径)
 echo   [2] 启动可视化引擎与能力配置向导 (GUI 界面)
 echo   [3] 快捷配置/编辑 API 密钥 (.env)
-echo   [4] 运行服务健康检查与全部测试套件 (42 项)
+echo   [4] 运行服务健康检查与全部测试套件 (52 项)
 echo   [5] 查看服务运行日志 (logs\gateway.log)
 echo   [6] 运行 Hermes MCP 连通性测试 (hermes mcp test MCPHub)
 echo.

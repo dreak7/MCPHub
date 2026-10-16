@@ -15,7 +15,7 @@ from typing import Any
 import concurrent.futures
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
 class SearchError(RuntimeError):
@@ -29,6 +29,20 @@ class SearchError(RuntimeError):
 class ProviderFailure:
     provider: str
     reason: str
+
+
+# =========================================================================
+# 【功能块：安全 HTTP 传输层与重定向拦截处理器】
+# - 输入：HTTP 请求对象与重定向目标 URL
+# - 功能：严格拦截 POST 请求发生时的任何 301/302/303 重定向跳转，
+#         彻底阻断 Authorization 凭证被重定向转发泄露到第三方恶意主机或私网目标
+# - 输出：抛出 HTTPError 明确阻断
+# =========================================================================
+class NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        raise HTTPError(req.full_url, code, f"HTTP redirect ({code}) is disallowed for security", headers, fp)
+
+_SECURE_OPENER = build_opener(NoRedirectHandler)
 
 
 # =========================================================================
@@ -89,7 +103,7 @@ class CooldownStore:
 
         # 3. 月初自适应：跨入新的自然月，自动复活配额耗尽的服务（月度免费额度已刷新）
         if record.get("reason_type") == "quota" and record.get("month"):
-            current_month = time.strftime("%Y-%m", time.gmtime())
+            current_month = time.strftime("%Y-%m", time.localtime())
             if current_month != record["month"]:
                 self.clear(provider_id)
                 return True
@@ -112,7 +126,7 @@ class CooldownStore:
         api_key: str = ""
     ) -> None:
         key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16] if api_key else ""
-        current_month = time.strftime("%Y-%m", time.gmtime())
+        current_month = time.strftime("%Y-%m", time.localtime())
         self._state[provider_id] = {
             "until": time.time() + seconds,
             "reason_type": reason_type,
@@ -122,25 +136,42 @@ class CooldownStore:
         self._save()
 
     def clear(self, provider_id: str) -> None:
-        if provider_id in self._state:
-            del self._state[provider_id]
-            self._save()
+        self._state.pop(provider_id, None)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            disk_state = self._load()
+            disk_state.pop(provider_id, None)
+            self._state = disk_state
+            unique_tmp = self.path.parent / f"{self.path.stem}_{os.getpid()}_{time.time_ns()}.tmp"
+            unique_tmp.write_text(json.dumps(self._state, indent=2, ensure_ascii=False), encoding="utf-8")
+            unique_tmp.replace(self.path)
+        except OSError:
+            pass
 
     def _save(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
-            temporary.replace(self.path)
+            disk_state = self._load()
+            merged = {**disk_state, **self._state}
+            self._state = merged
+            unique_tmp = self.path.parent / f"{self.path.stem}_{os.getpid()}_{time.time_ns()}.tmp"
+            unique_tmp.write_text(json.dumps(self._state, indent=2, ensure_ascii=False), encoding="utf-8")
+            unique_tmp.replace(self.path)
         except OSError:
             pass
 
 
 class SearchGateway:
-    def __init__(self, definition: dict[str, Any], state_path: Path, logger: logging.Logger):
+    def __init__(
+        self,
+        definition: dict[str, Any],
+        state_path: Path,
+        logger: logging.Logger,
+        cooldown_store: CooldownStore | None = None
+    ):
         self.definition = definition
         self.logger = logger
-        self.cooldowns = CooldownStore(state_path)
+        self.cooldowns = cooldown_store if cooldown_store is not None else CooldownStore(state_path)
 
     def search(self, arguments: dict[str, Any]) -> dict[str, Any]:
         query = arguments.get("query")
@@ -165,8 +196,8 @@ class SearchGateway:
             key_name = provider.get("api_key_env")
             api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
             engine_type = provider.get("type") or provider_id
-            # AnySearch explicitly supports an anonymous quota; all others require a key.
-            if not api_key and engine_type != "anysearch":
+            # AnySearch and Jina AI explicitly support an anonymous quota; all others require a key.
+            if not api_key and engine_type not in ("anysearch", "jina"):
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
             if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
@@ -247,7 +278,7 @@ class SearchGateway:
             key_name = provider.get("api_key_env")
             api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
             engine_type = provider.get("type") or provider_id
-            if not api_key and engine_type != "anysearch":
+            if not api_key and engine_type not in ("anysearch", "jina"):
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
             if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
@@ -276,23 +307,30 @@ class SearchGateway:
                 ): (provider.get("id", "unknown"), api_key)
                 for provider, api_key in ready_providers
             }
-            for future in concurrent.futures.as_completed(future_to_provider):
-                prov_id, prov_key = future_to_provider[future]
-                try:
-                    res = future.result()
-                    if isinstance(res, list):
-                        provider_results.append((prov_id, res))
-                except SearchError as exc:
-                    self.logger.warning("Multi-search provider %s failed: %s", prov_id, exc)
-                    failures.append(ProviderFailure(prov_id, str(exc)))
-                    if exc.retryable:
-                        is_quota = self._is_quota_exhausted(exc)
-                        cd = quota_cooldown_seconds if is_quota else cooldown_seconds
-                        reason_type = "quota" if is_quota else "rate_limit"
-                        self.cooldowns.set(self._cooldown_id(prov_id), cd, reason_type=reason_type, api_key=prov_key)
-                except Exception as exc:
-                    self.logger.exception("Multi-search provider %s unexpected error: %s", prov_id, exc)
-                    failures.append(ProviderFailure(prov_id, f"Unexpected error: {exc}"))
+            try:
+                for future in concurrent.futures.as_completed(future_to_provider, timeout=float(timeout)):
+                    prov_id, prov_key = future_to_provider[future]
+                    try:
+                        res = future.result()
+                        if isinstance(res, list):
+                            provider_results.append((prov_id, res))
+                    except SearchError as exc:
+                        self.logger.warning("Multi-search provider %s failed: %s", prov_id, exc)
+                        failures.append(ProviderFailure(prov_id, str(exc)))
+                        if exc.retryable:
+                            is_quota = self._is_quota_exhausted(exc)
+                            cd = quota_cooldown_seconds if is_quota else cooldown_seconds
+                            reason_type = "quota" if is_quota else "rate_limit"
+                            self.cooldowns.set(self._cooldown_id(prov_id), cd, reason_type=reason_type, api_key=prov_key)
+                    except Exception as exc:
+                        self.logger.exception("Multi-search provider %s unexpected error: %s", prov_id, exc)
+                        failures.append(ProviderFailure(prov_id, f"Unexpected error: {exc}"))
+            except (concurrent.futures.TimeoutError, TimeoutError):
+                self.logger.warning("Multi-search exceeded global timeout of %ss; proceeding with partial results", timeout)
+                for future, (p_id, p_key) in future_to_provider.items():
+                    if not future.done():
+                        future.cancel()
+                        failures.append(ProviderFailure(p_id, f"Global timeout of {timeout}s exceeded"))
 
         if not provider_results:
             detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "All providers failed"
@@ -301,7 +339,7 @@ class SearchGateway:
             extra = f" {auth_warning}" if auth_warning else ""
             raise SearchError(f"No search provider succeeded ({detail}).{extra}", retryable=False)
 
-        contributed_providers = [p_id for p_id, _ in provider_results]
+        contributed_providers = [p_id for p_id, items in provider_results if items]
         fused_results = self._fuse_and_deduplicate(provider_results, max_results)
 
         response: dict[str, Any] = {
@@ -394,14 +432,19 @@ class SearchGateway:
                 path = path[:-1]
             query = parts.query
             if query:
-                ignored_prefixes = ("utm_", "ref", "spm", "from", "source", "feature", "fbclid", "gclid")
+                ignored_keys = {
+                    "fbclid", "gclid", "spm", "yclid", "_hsenc", "_hsmi",
+                    "mc_cid", "mc_eid", "igshid", "ref", "source", "feature"
+                }
+                ignored_prefixes = ("utm_", "ref_")
                 filtered_pairs = []
                 for pair in query.split("&"):
                     if not pair:
                         continue
                     key = pair.split("=")[0].lower()
-                    if not any(key.startswith(p) for p in ignored_prefixes):
-                        filtered_pairs.append(pair)
+                    if key in ignored_keys or any(key.startswith(p) for p in ignored_prefixes):
+                        continue
+                    filtered_pairs.append(pair)
                 query = "&".join(filtered_pairs)
             return urlunsplit((scheme, netloc, path, query, ""))
         except Exception:
@@ -523,9 +566,9 @@ class SearchGateway:
             raise SearchError(f"{provider_id}: endpoint must be an HTTPS URL", retryable=False)
         parsed = urlsplit(endpoint)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-            raise SearchError(f"{provider_id}: endpoint is not a valid HTTPS URL: {endpoint}", retryable=False)
+            raise SearchError(f"{provider_id}: endpoint is not a valid HTTPS URL", retryable=False)
         if parsed.port not in (None, 443):
-            raise SearchError(f"{provider_id}: endpoint uses a non-standard port: {endpoint}", retryable=False)
+            raise SearchError(f"{provider_id}: endpoint uses a non-standard port: {parsed.port}", retryable=False)
         hostname = parsed.hostname.lower()
         if hostname in ("localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"):
             raise SearchError(f"{provider_id}: endpoint resolves to a non-public address: {hostname}", retryable=False)
@@ -669,8 +712,8 @@ class SearchGateway:
     def _post(self, endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeout: Any) -> dict[str, Any]:
         request = Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", **headers}, method="POST")
         try:
-            with urlopen(request, timeout=float(timeout)) as response:
-                body = response.read().decode("utf-8")
+            with _SECURE_OPENER.open(request, timeout=float(timeout)) as response:
+                body = response.read().decode("utf-8", errors="replace")
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             # AnySearch may return newly generated credentials in a 402 body. Never
@@ -730,7 +773,7 @@ class ExtractGateway(SearchGateway):
             key_name = provider.get("api_key_env")
             api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
             engine_type = provider.get("type") or provider_id
-            if not api_key and engine_type != "anysearch":
+            if not api_key and engine_type not in ("anysearch", "jina"):
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
             if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
@@ -804,7 +847,6 @@ class ExtractGateway(SearchGateway):
                     raise
                 if isinstance(data.get("code"), int) and data["code"] != 0:
                     code = data["code"]
-                    raw_msg = str(data.get("message") or "")
                     self.logger.warning("AnySearch extract business error: code=%s", code)
                     continue
                 item = data.get("data", data)

@@ -650,6 +650,174 @@ class CustomCapabilityAndGuiTest(unittest.TestCase):
             self.assertNotIn(secret_text, log)
 
 
+
+# =========================================================================
+# 【功能块：针对 V1.4.1 审计报告修补项的专项自动化回归测试集】
+# - 输入：Mock HTTP 重定向/编码错误、并发 CooldownStore、各类边界参数
+# - 功能：验证 M1 (重定向拦截防凭据泄露)、M3 (多实例状态合并)、L1 (非UTF8容错)、
+#         L2 (全局超时保护)、L3 (真实返回贡献者准确性)、L4 (语义参数保留)、
+#         L5 (Jina 匿名额度免 Key 放行)、L6 (错误提示凭据脱敏)、L7 (本地月份换月重置)、
+#         L9 (统一版本号单源引用)
+# - 输出：各单元测试执行断言通过
+# =========================================================================
+class AuditV141RemediationTest(unittest.TestCase):
+    def test_m1_redirect_strictly_blocked(self):
+        """验证 POST 请求遇到 301/302/303 重定向时被立即阻断抛错，禁止携带 Authorization 自动跨域跳转"""
+        from urllib.error import HTTPError
+        from mcp_gateway.search import NoRedirectHandler
+        handler = NoRedirectHandler()
+        with self.assertRaises(HTTPError) as ctx:
+            handler.redirect_request(
+                unittest.mock.Mock(full_url="https://api.test/search"),
+                None,
+                302,
+                "Found",
+                {"Location": "https://attacker.com/leak"},
+                "https://attacker.com/leak"
+            )
+        self.assertEqual(302, ctx.exception.code)
+        self.assertIn("HTTP redirect (302) is disallowed for security", str(ctx.exception))
+
+    def test_m3_cooldown_store_concurrent_instances_merge_state(self):
+        """验证多个 CooldownStore 实例同时操作同一持久化文件时，能够按需重载并合并持久化状态，杜绝互相覆盖丢失"""
+        from mcp_gateway.search import CooldownStore
+        tmp_file = Path(tempfile.mkdtemp()) / "provider-state.json"
+        store_a = CooldownStore(tmp_file)
+        store_b = CooldownStore(tmp_file)
+
+        store_a.set("web_search:tavily", 3600, reason_type="rate_limit", api_key="key_a")
+        store_b.set("web_extract:exa", 3600, reason_type="rate_limit", api_key="key_b")
+
+        # 验证文件重新加载后，两者的 key 均完好保存，并未出现后写者覆盖先写者
+        fresh_store = CooldownStore(tmp_file)
+        self.assertFalse(fresh_store.is_available("web_search:tavily", current_key="key_a"))
+        self.assertFalse(fresh_store.is_available("web_extract:exa", current_key="key_b"))
+
+    def test_l1_non_utf8_success_response_does_not_crash(self):
+        """验证 HTTP 200 响应中若含有非 UTF-8 异常字节，能够自动替换并正常解析 JSON，不会导致降级链崩溃"""
+        gw = SearchGateway({"providers": []}, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        fake_body = b'{"results": [{"title": "test' + bytes([0xff, 0xfe]) + b'", "url": "https://example.com", "content": "text"}]}'
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.read.return_value = fake_body
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = None
+
+        with patch("mcp_gateway.search._SECURE_OPENER.open", return_value=mock_resp):
+            data = gw._post("https://api.test/search", {}, {}, 10)
+            self.assertEqual(1, len(data["results"]))
+            self.assertIn("test", data["results"][0]["title"])
+
+    def test_l2_multi_search_timeout_cancels_futures(self):
+        """验证 multi_search 具备全局总超时控制，并能及时取消未完成的任务"""
+        import time
+        cap_def = {
+            "name": "web_search",
+            "timeout_seconds": 0.1,
+            "providers": [
+                {"id": "fast", "enabled": True, "priority": 1, "api_key_env": "FAST_KEY", "endpoint": "https://api.fast/search"},
+                {"id": "slow", "enabled": True, "priority": 2, "api_key_env": "SLOW_KEY", "endpoint": "https://api.slow/search"}
+            ]
+        }
+        gw = SearchGateway(cap_def, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+
+        def mock_call(provider, query, max_results, filters, key, timeout):
+            if provider["id"] == "fast":
+                return [{"title": "Fast Result", "url": "https://fast.com/a", "snippet": "ok", "published_date": ""}]
+            time.sleep(0.5)
+            return [{"title": "Slow Result", "url": "https://slow.com/b", "snippet": "late", "published_date": ""}]
+
+        with patch.dict(os.environ, {"FAST_KEY": "k1", "SLOW_KEY": "k2"}):
+            with patch.object(gw, "_call", side_effect=mock_call):
+                res = gw.multi_search({"query": "test"})
+                self.assertEqual(1, len(res["results"]))
+                self.assertEqual("Fast Result", res["results"][0]["title"])
+                self.assertTrue(any(f["provider"] == "slow" for f in res["provider_failures"]))
+
+    def test_l3_multi_search_active_providers_excludes_empty_results(self):
+        """验证 multi_search 的 active_providers 字段仅包含真正产生有效结果的引擎，排除返回空的引擎"""
+        cap_def = {
+            "name": "web_search",
+            "providers": [
+                {"id": "p_empty", "enabled": True, "priority": 1, "api_key_env": "KEY_1", "endpoint": "https://api.empty/search"},
+                {"id": "p_full", "enabled": True, "priority": 2, "api_key_env": "KEY_2", "endpoint": "https://api.full/search"}
+            ]
+        }
+        gw = SearchGateway(cap_def, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        def mock_call(provider, *args, **kwargs):
+            if provider["id"] == "p_empty":
+                return []
+            return [{"title": "T", "url": "https://t.com", "snippet": "S", "published_date": ""}]
+
+        with patch.dict(os.environ, {"KEY_1": "k1", "KEY_2": "k2"}):
+            with patch.object(gw, "_call", side_effect=mock_call):
+                res = gw.multi_search({"query": "test"})
+                self.assertEqual(["p_full"], res["active_providers"])
+
+    def test_l4_normalize_url_preserves_semantic_query_params(self):
+        """验证 URL 规范化清洗函数精准剥离分析追踪参数，但完好保留 from=2020 等语义查询参数"""
+        url = "https://example.com/items?from=2020&topic=ai&utm_source=twitter&ref=share_btn#heading"
+        normalized = SearchGateway._normalize_url(url)
+        self.assertEqual("https://example.com/items?from=2020&topic=ai", normalized)
+
+    def test_l5_jina_anonymous_access_allowed_in_search_and_extract(self):
+        """验证 Jina 引擎在未配置 API Key 时能够享受官方免费匿名配额，不触发 Key 缺失阻断"""
+        search_def = {
+            "name": "web_search",
+            "providers": [
+                {"id": "jina-search", "type": "jina", "enabled": True, "priority": 1, "api_key_env": "UNSET_KEY", "endpoint": "https://s.jina.ai"}
+            ]
+        }
+        extract_def = {
+            "name": "web_extract",
+            "providers": [
+                {"id": "jina-extract", "type": "jina", "enabled": True, "priority": 1, "api_key_env": "UNSET_KEY", "endpoint": "https://r.jina.ai"}
+            ]
+        }
+        gw_search = SearchGateway(search_def, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        gw_extract = ExtractGateway(extract_def, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(gw_search, "_call", return_value=[{"title": "Jina", "url": "https://jina.ai", "snippet": "s", "published_date": ""}]):
+                res_search = gw_search.search({"query": "test"})
+                self.assertEqual("jina-search", res_search["provider"])
+
+            with patch.object(gw_extract, "_extract", return_value=[{"url": "https://example.com", "title": "Ex", "content": "hello"}]):
+                with patch.object(gw_extract, "_validate_public_url"):
+                    res_extract = gw_extract.extract({"urls": ["https://example.com"]})
+                    self.assertEqual(1, len(res_extract["results"]))
+
+    def test_l6_validate_endpoint_does_not_echo_credentials_in_error(self):
+        """验证服务端点安全校验抛出错误时，绝不回显 URL 中可能携带的用户账号或敏感密码信息"""
+        gw = SearchGateway({"providers": []}, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        secret = "secret_pass_987"
+        with self.assertRaises(SearchError) as ctx:
+            gw._validate_endpoint("test_prov", f"https://admin:{secret}@api.example.com/search")
+        self.assertNotIn(secret, str(ctx.exception))
+
+    def test_l7_month_rollover_uses_local_month(self):
+        """验证月度配额自动重置采用本地日历月计算，避免月末跨时区提前或滞后重置"""
+        import time
+        from mcp_gateway.search import CooldownStore
+        store = CooldownStore(Path(tempfile.mkdtemp()) / "state.json")
+        now = time.time()
+        past_record = {
+            "until": now + 86400,
+            "reason_type": "quota",
+            "month": "2020-01",
+            "key_hash": ""
+        }
+        store._state["test_prov"] = past_record
+        self.assertTrue(store.is_available("test_prov", ""))
+
+    def test_l9_server_info_uses_package_version(self):
+        """验证 McpServer 初始化握手响应中动态引用 mcp_gateway.__version__，消除硬编码版本号"""
+        from mcp_gateway import __version__
+        server = McpServer()
+        resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        self.assertEqual(__version__, resp["result"]["serverInfo"]["version"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
