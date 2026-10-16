@@ -179,7 +179,7 @@ class McpServer:
         if method == "notifications/initialized":
             return None
         if method == "initialize":
-            return self._result(request_id, {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "local-search-fallback-gateway", "version": "1.4.1"}})
+            return self._result(request_id, {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "local-search-fallback-gateway", "version": "1.5.0"}})
         if method == "ping":
             return self._result(request_id, {})
         if method == "tools/list":
@@ -258,15 +258,36 @@ def main() -> None:
         # 动态自适应挂载能力：如果配置了搜索，则装载常规单源搜索与多源并发聚合搜索工具
         search_gw = None
         if "web_search" in capabilities:
-            search_gw = SearchGateway(capabilities["web_search"], state_path, logger)
+            web_search_def = capabilities["web_search"]
+            if isinstance(web_search_def, dict):
+                web_search_def.setdefault("name", "web_search")
+            search_gw = SearchGateway(web_search_def, state_path, logger)
             tools["fallback_web_search"] = ToolDefinition(schema=SEARCH_TOOL_SCHEMA, handler=search_gw.search)
             tools["multi_web_search"] = ToolDefinition(schema=MULTI_SEARCH_TOOL_SCHEMA, handler=search_gw.multi_search)
 
         # 动态自适应挂载能力：如果配置了正文提取，则装载提取工具
         extract_gw = None
         if "web_extract" in capabilities:
-            extract_gw = ExtractGateway(capabilities["web_extract"], state_path, logger)
+            web_extract_def = capabilities["web_extract"]
+            if isinstance(web_extract_def, dict):
+                web_extract_def.setdefault("name", "web_extract")
+            extract_gw = ExtractGateway(web_extract_def, state_path, logger)
             tools["fallback_web_extract"] = ToolDefinition(schema=EXTRACT_TOOL_SCHEMA, handler=extract_gw.extract)
+
+        # 动态自适应挂载扩展能力：遍历所有自定义能力分类（例如 academic_search、code_search 等）
+        for cap_name, cap_def in capabilities.items():
+            if cap_name in ("web_search", "web_extract"):
+                continue
+            if isinstance(cap_def, dict) and "providers" in cap_def:
+                cap_def.setdefault("name", cap_name)
+                custom_gw = SearchGateway(cap_def, state_path, logger)
+                tool_desc = cap_def.get("description", f"Search using custom {cap_name} capability.")
+                custom_schema = {
+                    "name": cap_name,
+                    "description": tool_desc,
+                    "inputSchema": cap_def.get("inputSchema", SEARCH_TOOL_SCHEMA["inputSchema"]),
+                }
+                tools[cap_name] = ToolDefinition(schema=custom_schema, handler=custom_gw.search)
 
         if not tools:
             raise ConfigError("No runnable tools could be initialized from configured capabilities")

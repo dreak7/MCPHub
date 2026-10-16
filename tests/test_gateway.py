@@ -259,8 +259,8 @@ class McpServerTest(unittest.TestCase):
         initialized = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual("local-search-fallback-gateway", initialized["result"]["serverInfo"]["name"])
         import mcp_gateway
-        self.assertEqual("1.4.1", mcp_gateway.__version__)
-        self.assertEqual("1.4.1", initialized["result"]["serverInfo"]["version"])
+        self.assertEqual("1.5.0", mcp_gateway.__version__)
+        self.assertEqual("1.5.0", initialized["result"]["serverInfo"]["version"])
         self.assertEqual(mcp_gateway.__version__, initialized["result"]["serverInfo"]["version"])
         tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = [t["name"] for t in tools["result"]["tools"]]
@@ -515,5 +515,101 @@ class MainEntryPointTest(unittest.TestCase):
         self.assertIn("Local MCP search fallback gateway", proc.stdout)
 
 
+
+# =========================================================================
+# 【功能块：自定义能力分类与引擎协议动态路由测试套件】
+# - 输入：临时配置文件与伪造测试环境
+# - 功能：验证动态加载自定义能力（如 academic_search）、engine_type 协议映射、
+#         冷却隔离以及 GUI 辅助工具的核心逻辑
+# - 输出：单元测试断言
+# =========================================================================
+class CustomCapabilityAndGuiTest(unittest.TestCase):
+    def test_custom_capability_dynamic_registration_and_dispatch(self):
+        """测试扩展能力（例如 academic_search）在 server 中被动态注册并在 MCP tools/list 和 tools/call 中正常暴露"""
+        from mcp_gateway.server import ToolDefinition, SEARCH_TOOL_SCHEMA
+        from mcp_gateway.search import SearchGateway
+
+        cap_def = {
+            "name": "academic_search",
+            "description": "Custom academic search capability",
+            "providers": [
+                {"id": "arxiv", "type": "tavily-search", "enabled": True, "priority": 10, "api_key_env": "ARXIV_KEY", "endpoint": "https://example.test/arxiv"}
+            ]
+        }
+        gw = SearchGateway(cap_def, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        custom_schema = {
+            "name": "academic_search",
+            "description": cap_def["description"],
+            "inputSchema": SEARCH_TOOL_SCHEMA["inputSchema"]
+        }
+        server = McpServer(None, None, FakeLogger(), tools={
+            "academic_search": ToolDefinition(schema=custom_schema, handler=gw.search)
+        })
+
+        # 1. 验证 tools/list 自适应暴露出 academic_search 工具
+        tools_resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        tools_list = tools_resp["result"]["tools"]
+        tool_names = [t["name"] for t in tools_list]
+        self.assertIn("academic_search", tool_names)
+
+        # 2. 验证 tools/call 成功路由并派发到 custom gateway
+        with patch.dict(os.environ, {"ARXIV_KEY": "dummy_val"}), patch.object(gw, "_call", return_value=[{"title": "Paper", "url": "https://arxiv.org", "snippet": "Research", "published_date": "2026-10"}]):
+            call_resp = server.handle({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "academic_search", "arguments": {"query": "quantum computing"}}
+            })
+            self.assertFalse(call_resp["result"]["isError"])
+            results = call_resp["result"]["structuredContent"]["results"]
+            self.assertEqual(1, len(results))
+            self.assertEqual("Paper", results[0]["title"])
+
+    def test_search_gateway_custom_capability_cooldown_and_engine_type(self):
+        """测试自定义能力下的独立冷却隔离及 engine_type 自适应协议映射"""
+        cap_def = {
+            "name": "code_search",
+            "providers": [
+                {"id": "github-search", "type": "tavily-search", "enabled": True, "priority": 10, "api_key_env": "GH_KEY", "endpoint": "https://example.test/gh"}
+            ]
+        }
+        gw = SearchGateway(cap_def, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        # 冷却键名应带有分类前缀进行独立隔离
+        self.assertEqual("code_search:github-search", gw._cooldown_id("github-search"))
+
+        # 验证 type 字段被识别并路由至 _tavily 适配器
+        with patch.object(gw, "_validate_endpoint"), patch.object(gw, "_tavily", return_value=[{"title": "Repo", "url": "https://git.test", "snippet": "code", "published_date": ""}]) as mock_tavily:
+            res = gw._call(cap_def["providers"][0], "query", 5, {}, "key", 10)
+            self.assertEqual(1, len(res))
+            self.assertEqual("Repo", res[0]["title"])
+            mock_tavily.assert_called_once()
+
+    def test_gui_dotenv_saver(self):
+        """测试 GUI 环境变量安全同步更新函数"""
+        from mcp_gateway.gui_add_provider import save_api_key_to_dotenv
+        import mcp_gateway.gui_add_provider as gui_mod
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        tmp_env = tmp_dir / ".env"
+        tmp_env.write_text("# Existing comment\nOLD_KEY=old_val\n", encoding="utf-8")
+
+        with patch.object(gui_mod, "ENV_PATH", tmp_env), patch.object(gui_mod, "ENV_EXAMPLE_PATH", tmp_dir / ".env.example"):
+            # 1. 更新已有变量
+            save_api_key_to_dotenv("OLD_KEY", "new_val")
+            # 2. 追加新变量
+            save_api_key_to_dotenv("NEW_KEY", "secret_123")
+
+    def test_hermes_helper_snippets(self):
+        """测试 Hermes Desktop 配置片段生成器能够正确获取解释器与项目文件绝对路径"""
+        from mcp_gateway.hermes_helper import generate_hermes_snippets
+        snippets = generate_hermes_snippets()
+        self.assertIn("python_exe", snippets)
+        self.assertIn("MCPHub:", snippets["yaml"])
+        self.assertIn("gateway.json", snippets["yaml"])
+        self.assertIn("PYTHONUTF8", snippets["yaml"])
+        self.assertIn("MCPHub", snippets["json"])
+
+
 if __name__ == "__main__":
     unittest.main()
+

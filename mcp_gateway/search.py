@@ -462,7 +462,8 @@ class SearchGateway:
         return True
 
     def _cooldown_id(self, provider_id: str) -> str:
-        return f"web_search:{provider_id}"
+        cap_name = self.definition.get("name") or self.definition.get("capability_name") or "web_search"
+        return f"{cap_name}:{provider_id}"
 
     # =========================================================================
     # 【功能块：判断异常是否属于上游配额/资产类耗尽】
@@ -544,15 +545,16 @@ class SearchGateway:
         provider_id = provider["id"]
         endpoint = provider.get("endpoint")
         self._validate_endpoint(provider_id, endpoint)
-        if provider_id == "tavily-search":
+        engine_type = provider.get("type") or provider_id
+        if engine_type in ("tavily-search", "tavily"):
             return self._tavily(endpoint, api_key, query, max_results, arguments, timeout)
-        if provider_id == "exa":
+        if engine_type == "exa":
             return self._exa(endpoint, api_key, query, max_results, arguments, timeout)
-        if provider_id == "jina":
+        if engine_type == "jina":
             return self._jina(endpoint, api_key, query, max_results, arguments, timeout)
-        if provider_id == "anysearch":
+        if engine_type == "anysearch":
             return self._anysearch(endpoint, api_key, query, max_results, provider, timeout)
-        if provider_id == "bocha-search":
+        if engine_type in ("bocha-search", "bocha"):
             return self._bocha(endpoint, api_key, query, max_results, arguments, timeout)
         raise SearchError(f"Unsupported provider id: {provider_id}", retryable=False)
 
@@ -776,17 +778,18 @@ class ExtractGateway(SearchGateway):
         provider_id = provider["id"]
         endpoint = provider.get("endpoint")
         self._validate_endpoint(provider_id, endpoint)
-        if provider_id == "tavily-search":
+        engine_type = provider.get("type") or provider_id
+        if engine_type in ("tavily-search", "tavily"):
             data = self._post(endpoint, {"Authorization": f"Bearer {api_key}"}, {"urls": urls, "extract_depth": depth, "format": "markdown"}, timeout)
             items = data.get("results", [])
             return [self._extract_result(item.get("url"), item.get("title"), item.get("raw_content") or item.get("content"), max_characters) for item in items if isinstance(item, dict)]
-        if provider_id == "exa":
+        if engine_type == "exa":
             data = self._post(endpoint, {"x-api-key": api_key}, {"ids": urls, "text": {"maxCharacters": max_characters}}, timeout)
             items = data.get("results", [])
             return [self._extract_result(item.get("url"), item.get("title"), item.get("text") or item.get("content"), max_characters) for item in items if isinstance(item, dict)]
-        if provider_id == "jina":
+        if engine_type == "jina":
             return self._jina_extract(endpoint, api_key, urls, max_characters, timeout)
-        if provider_id == "anysearch":
+        if engine_type == "anysearch":
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             results: list[dict[str, Any]] = []
             for url in urls:
