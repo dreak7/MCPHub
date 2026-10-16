@@ -610,6 +610,46 @@ class CustomCapabilityAndGuiTest(unittest.TestCase):
         self.assertIn("MCPHub", snippets["json"])
 
 
+    def test_custom_anysearch_instance_anonymous_quota(self):
+        """测试使用自定义 ID 的 AnySearch 引擎（type='anysearch'）也能享受免 Key 匿名配额"""
+        cap_def = {
+            "name": "web_search",
+            "providers": [
+                {"id": "anysearch-custom", "type": "anysearch", "enabled": True, "priority": 10, "api_key_env": "UNSET_KEY", "endpoint": "https://api.anysearch.com/v1/search"}
+            ]
+        }
+        gw = SearchGateway(cap_def, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        with patch.dict(os.environ, {}, clear=True), patch.object(gw, "_call", return_value=[{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]):
+            # 不应该抛出 'API key is not configured'
+            result = gw.search({"query": "test"})
+            self.assertEqual("anysearch-custom", result["provider"])
+
+    def test_logger_sanitization_on_business_errors(self):
+        """测试业务错误日志脱敏：确保上游可能包含敏感 Token 或凭证的原始报文不会写入日志"""
+        captured_warnings = []
+        class RecordingLogger:
+            def warning(self, msg, *args):
+                captured_warnings.append(msg % args if args else msg)
+            def exception(self, *args):
+                pass
+            def info(self, *args):
+                pass
+
+        logger = RecordingLogger()
+        gw = SearchGateway({"providers": []}, Path(tempfile.mkdtemp()) / "state.json", logger)
+        secret_text = "LEAKED_SECRET_CREDENTIAL_XYZ"
+        fake_payload = {"code": 5001, "message": f"Fatal error: {secret_text}"}
+
+        with patch.object(gw, "_post", return_value=fake_payload):
+            with self.assertRaises(SearchError):
+                gw._anysearch("https://api.anysearch.com/v1/search", "", "query", 5, {"id": "anysearch"}, 10)
+
+        # 验证捕获到的 warning 日志中绝对不包含 secret_text
+        self.assertTrue(any("AnySearch business error: code=5001" in log for log in captured_warnings))
+        for log in captured_warnings:
+            self.assertNotIn(secret_text, log)
+
+
 if __name__ == "__main__":
     unittest.main()
 

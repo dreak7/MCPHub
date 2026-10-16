@@ -281,13 +281,21 @@ def main() -> None:
             if isinstance(cap_def, dict) and "providers" in cap_def:
                 cap_def.setdefault("name", cap_name)
                 custom_gw = SearchGateway(cap_def, state_path, logger)
-                tool_desc = cap_def.get("description", f"Search using custom {cap_name} capability.")
+                is_multi = cap_def.get("strategy") == "multi"
+                default_desc = (
+                    f"Multi-source concurrent search using custom {cap_name} capability."
+                    if is_multi
+                    else f"Search using custom {cap_name} capability."
+                )
+                tool_desc = cap_def.get("description") or default_desc
+                default_schema = MULTI_SEARCH_TOOL_SCHEMA["inputSchema"] if is_multi else SEARCH_TOOL_SCHEMA["inputSchema"]
                 custom_schema = {
                     "name": cap_name,
                     "description": tool_desc,
-                    "inputSchema": cap_def.get("inputSchema", SEARCH_TOOL_SCHEMA["inputSchema"]),
+                    "inputSchema": cap_def.get("inputSchema", default_schema),
                 }
-                tools[cap_name] = ToolDefinition(schema=custom_schema, handler=custom_gw.search)
+                handler = custom_gw.multi_search if is_multi else custom_gw.search
+                tools[cap_name] = ToolDefinition(schema=custom_schema, handler=handler)
 
         if not tools:
             raise ConfigError("No runnable tools could be initialized from configured capabilities")

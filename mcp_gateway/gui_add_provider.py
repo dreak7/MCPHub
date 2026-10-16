@@ -322,27 +322,59 @@ class ConfigGuiApp:
         prov_id = self.prov_id_var.get().strip()
         prov_type = self.prov_type_var.get().strip()
         endpoint = self.endpoint_var.get().strip()
-        env_key_name = self.env_name_var.get().strip().upper()
-        api_key_val = self.api_key_var.get().strip()
-        priority = self.priority_var.get()
-        enabled = self.enabled_var.get()
-
-        # 字段基础校验
+        # 1. 字段基础校验与异常防御
         if not prov_id or not re.match(r"^[a-zA-Z0-9_\-]+$", prov_id):
             messagebox.showerror("输入错误", "引擎标识 ID 不能为空，且只能包含字母、数字、下划线与短横线！")
             return
+
+        try:
+            priority = int(self.priority_var.get())
+            if not 1 <= priority <= 1000:
+                raise ValueError()
+        except (tk.TclError, ValueError):
+            messagebox.showerror("输入错误", "执行优先级必须是 1 到 1000 之间的整数（数值越小越优先调用）！")
+            return
+
         if not endpoint.startswith("https://"):
             messagebox.showerror("安全错误", "通信接口地址必须以 https:// 开头以确保传输加密与安全合规！")
             return
-        if not env_key_name:
-            messagebox.showerror("输入错误", "环境变量名不能为空！")
+
+        try:
+            from urllib.parse import urlsplit
+            import ipaddress
+            parsed = urlsplit(endpoint)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                messagebox.showerror("安全错误", "通信接口地址格式不规范，且禁止携带内嵌用户名或密码凭据！")
+                return
+            if parsed.port not in (None, 443):
+                messagebox.showerror("安全错误", "通信接口仅允许标准 HTTPS 端口（443 或缺省端口），禁止指向非标探测端口！")
+                return
+            hostname = parsed.hostname.lower()
+            if hostname in ("localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"):
+                messagebox.showerror("安全错误", "通信接口禁止指向本机回环或局域网私网地址 (localhost)！")
+                return
+            try:
+                ip = ipaddress.ip_address(hostname)
+                if not ip.is_global:
+                    messagebox.showerror("安全错误", f"通信接口禁止指向私网或局域网保留 IP 地址 ({hostname})！")
+                    return
+            except ValueError:
+                pass
+        except Exception as exc:
+            messagebox.showerror("格式错误", f"解析通信接口地址失败：{exc}")
             return
 
-        # 确定目标能力分类名称与保存目标文件
+        if not env_key_name or not re.match(r"^[A-Z_][A-Z0-9_]*$", env_key_name):
+            messagebox.showerror("输入错误", "环境变量名只能由大写英文字母、数字和下划线组成，且不能以数字开头（例如 TAVILY_API_KEY）！")
+            return
+
+        api_key_val = self.api_key_var.get().strip().strip("'\"")
+
+        # 2. 确定目标能力分类名称与保存目标文件
         if mode == "existing":
             cap_name = self.existing_cat_var.get().strip()
             if not cap_name or cap_name not in self.capabilities_map:
-                messagebox.showerror("错误", "请选择有效的已有能力分类！")
+                messagebox.showerror("错误", "请选择有效的已有能力分类！若尚无分类，请选择『创建全新自定义能力分类』。")
                 return
             target_file, cap_def = self.capabilities_map[cap_name]
         else:

@@ -7,11 +7,11 @@ cls
 cd /d "%~dp0"
 
 :CHECK_PYTHON
-python --version >nul 2>&1
+python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo ======================================================================
-    echo 【错误】未检测到 Python 运行环境！
-    echo 请先安装 Python 3.10 或更高版本，并在安装时勾选 "Add Python to PATH"。
+    echo 【错误】未检测到合规的 Python 运行环境（要求 Python 3.10 或更高版本）！
+    echo 请先安装 Python 3.10+，并在安装时务必勾选 "Add Python to PATH"。
     echo ======================================================================
     pause
     exit /b 1
@@ -26,7 +26,7 @@ echo.
 echo   [1] 一键生成并查看 Hermes Desktop 挂载配置 (含本机真实绝对路径)
 echo   [2] 启动可视化引擎与能力配置向导 (GUI 界面)
 echo   [3] 快捷配置/编辑 API 密钥 (.env)
-echo   [4] 运行服务健康检查与全部测试套件 (39 项)
+echo   [4] 运行服务健康检查与全部测试套件 (42 项)
 echo   [5] 查看服务运行日志 (logs\gateway.log)
 echo   [6] 运行 Hermes MCP 连通性测试 (hermes mcp test MCPHub)
 echo.
@@ -96,7 +96,7 @@ echo ======================================================================
 echo 最近服务运行日志 (logs\gateway.log):
 echo ======================================================================
 if exist "%~dp0logs\gateway.log" (
-    powershell -Command "Get-Content -Path '%~dp0logs\gateway.log' -Tail 30 -Encoding UTF8"
+    python -c "from pathlib import Path; p = Path(r'%~dp0logs\gateway.log'); print(''.join(p.read_text(encoding='utf-8', errors='replace').splitlines(True)[-30:]) if p.exists() else '暂无日志记录。')"
 ) else (
     echo 暂无日志文件（服务尚未产生日志记录）。
 )

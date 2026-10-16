@@ -164,8 +164,9 @@ class SearchGateway:
                 continue
             key_name = provider.get("api_key_env")
             api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
+            engine_type = provider.get("type") or provider_id
             # AnySearch explicitly supports an anonymous quota; all others require a key.
-            if not api_key and provider_id != "anysearch":
+            if not api_key and engine_type != "anysearch":
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
             if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
@@ -245,7 +246,8 @@ class SearchGateway:
                 continue
             key_name = provider.get("api_key_env")
             api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
-            if not api_key and provider_id != "anysearch":
+            engine_type = provider.get("type") or provider_id
+            if not api_key and engine_type != "anysearch":
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
             if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
@@ -556,7 +558,7 @@ class SearchGateway:
             return self._anysearch(endpoint, api_key, query, max_results, provider, timeout)
         if engine_type in ("bocha-search", "bocha"):
             return self._bocha(endpoint, api_key, query, max_results, arguments, timeout)
-        raise SearchError(f"Unsupported provider id: {provider_id}", retryable=False)
+        raise SearchError(f"Unsupported provider type or id: {engine_type} (id: {provider_id})", retryable=False)
 
     # =========================================================================
     # 【功能块：Jina AI 网页搜索适配器】
@@ -617,7 +619,7 @@ class SearchGateway:
         if isinstance(data.get("code"), int) and data["code"] != 0:
             code = data["code"]
             raw_msg = str(data.get("message") or "")
-            self.logger.warning("AnySearch business error: code=%s, raw_message=%s", code, raw_msg)
+            self.logger.warning("AnySearch business error: code=%s", code)
             is_quota = self._is_quota_message(raw_msg)
             msg = f"AnySearch business error (code {code}): quota exhausted" if is_quota else f"AnySearch business error (code {code})"
             raise SearchError(msg, retryable=is_quota)
@@ -637,7 +639,7 @@ class SearchGateway:
         if data.get("code") not in (None, 200):
             code = data.get("code", "unknown")
             raw_msg = str(data.get("msg") or data.get("message") or "")
-            self.logger.warning("Bocha business error: code=%s, raw_message=%s", code, raw_msg)
+            self.logger.warning("Bocha business error: code=%s", code)
             is_quota = self._is_quota_message(raw_msg)
             msg = f"Bocha business error (code {code}): quota exhausted" if is_quota else f"Bocha business error (code {code})"
             raise SearchError(msg, retryable=is_quota)
@@ -727,7 +729,8 @@ class ExtractGateway(SearchGateway):
                 continue
             key_name = provider.get("api_key_env")
             api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
-            if not api_key and provider_id != "anysearch":
+            engine_type = provider.get("type") or provider_id
+            if not api_key and engine_type != "anysearch":
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
             if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
@@ -802,13 +805,13 @@ class ExtractGateway(SearchGateway):
                 if isinstance(data.get("code"), int) and data["code"] != 0:
                     code = data["code"]
                     raw_msg = str(data.get("message") or "")
-                    self.logger.warning("AnySearch extract business error: code=%s, raw_message=%s", code, raw_msg)
+                    self.logger.warning("AnySearch extract business error: code=%s", code)
                     continue
                 item = data.get("data", data)
                 if isinstance(item, dict):
                     results.append(self._extract_result(item.get("url", url), item.get("title"), item.get("content"), max_characters))
             return results
-        raise SearchError(f"Unsupported extract provider id: {provider_id}", retryable=False)
+        raise SearchError(f"Unsupported extract provider type or id: {engine_type} (id: {provider_id})", retryable=False)
 
     # =========================================================================
     # 【功能块：Jina AI Reader 网页正文提取适配器】
