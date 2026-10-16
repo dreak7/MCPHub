@@ -504,11 +504,46 @@ class SearchGateway:
     ) -> int | float:
         return quota_cooldown if cls._is_quota_exhausted(exc) else default_cooldown
 
+    # =========================================================================
+    # 【功能块：服务提供商通信端点（Endpoint）安全合规校验】
+    # - 输入：provider_id (str): 提供商标识；endpoint (str): 待校验的接口 URL
+    # - 功能：1. 强制协议必须为安全加密的 HTTPS（阻断任何明文 HTTP 请求以防凭据被截获）；
+    #         2. 校验 URL 结构合法，禁止携带 username/password 等嵌入式凭证；
+    #         3. 严格限制仅允许标准端口（443 或省略端口），拦截针对非标端口与局域网内网服务的探测；
+    #         4. 拦截私网/回环地址（如 127.0.0.1、192.168.*.*、10.*.*.*、localhost 等），
+    #            以及经 DNS 解析到非全球公网 IP 的目标，阻断配置被篡改后的 API Key 盗取与 SSRF 风险。
+    # - 输出：无（若校验失败抛出不可重试的 SearchError）
+    # =========================================================================
+    @classmethod
+    def _validate_endpoint(cls, provider_id: str, endpoint: Any) -> None:
+        if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
+            raise SearchError(f"{provider_id}: endpoint must be an HTTPS URL", retryable=False)
+        parsed = urlsplit(endpoint)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise SearchError(f"{provider_id}: endpoint is not a valid HTTPS URL: {endpoint}", retryable=False)
+        if parsed.port not in (None, 443):
+            raise SearchError(f"{provider_id}: endpoint uses a non-standard port: {endpoint}", retryable=False)
+        hostname = parsed.hostname.lower()
+        if hostname in ("localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"):
+            raise SearchError(f"{provider_id}: endpoint resolves to a non-public address: {hostname}", retryable=False)
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if not ip.is_global:
+                raise SearchError(f"{provider_id}: endpoint resolves to a non-public address: {hostname}", retryable=False)
+            return
+        except ValueError:
+            pass
+        try:
+            addresses = {record[4][0] for record in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)}
+        except socket.gaierror as exc:
+            raise SearchError(f"{provider_id}: endpoint hostname cannot be resolved: {hostname}", retryable=False) from exc
+        if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+            raise SearchError(f"{provider_id}: endpoint resolves to a non-public address: {hostname}", retryable=False)
+
     def _call(self, provider: dict[str, Any], query: str, max_results: int, arguments: dict[str, Any], api_key: str, timeout: Any) -> list[dict[str, Any]]:
         provider_id = provider["id"]
         endpoint = provider.get("endpoint")
-        if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
-            raise SearchError(f"{provider_id}: endpoint must be an HTTPS URL", retryable=False)
+        self._validate_endpoint(provider_id, endpoint)
         if provider_id == "tavily-search":
             return self._tavily(endpoint, api_key, query, max_results, arguments, timeout)
         if provider_id == "exa":
@@ -578,7 +613,12 @@ class SearchGateway:
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         data = self._post(endpoint, headers, payload, timeout)
         if isinstance(data.get("code"), int) and data["code"] != 0:
-            raise SearchError(str(data.get("message") or "AnySearch request failed"), retryable=False)
+            code = data["code"]
+            raw_msg = str(data.get("message") or "")
+            self.logger.warning("AnySearch business error: code=%s, raw_message=%s", code, raw_msg)
+            is_quota = self._is_quota_message(raw_msg)
+            msg = f"AnySearch business error (code {code}): quota exhausted" if is_quota else f"AnySearch business error (code {code})"
+            raise SearchError(msg, retryable=is_quota)
         nested = data.get("data")
         items = data.get("results") or (nested.get("results") if isinstance(nested, dict) else nested) or []
         if not isinstance(items, list):
@@ -593,8 +633,12 @@ class SearchGateway:
             payload["exclude"] = "|".join(args["exclude_domains"])
         data = self._post(endpoint, {"Authorization": f"Bearer {key}"}, payload, timeout)
         if data.get("code") not in (None, 200):
-            message = str(data.get("msg") or data.get("message") or "Bocha request failed")
-            raise SearchError(message, retryable=self._is_quota_message(message))
+            code = data.get("code", "unknown")
+            raw_msg = str(data.get("msg") or data.get("message") or "")
+            self.logger.warning("Bocha business error: code=%s, raw_message=%s", code, raw_msg)
+            is_quota = self._is_quota_message(raw_msg)
+            msg = f"Bocha business error (code {code}): quota exhausted" if is_quota else f"Bocha business error (code {code})"
+            raise SearchError(msg, retryable=is_quota)
         items = data.get("data", {}).get("webPages", {}).get("value", [])
         return [self._result(item.get("name"), item.get("url"), item.get("summary") or item.get("snippet"), item.get("datePublished")) for item in items]
 
@@ -731,8 +775,7 @@ class ExtractGateway(SearchGateway):
     def _extract(self, provider: dict[str, Any], urls: list[str], depth: str, max_characters: int, api_key: str, timeout: Any) -> list[dict[str, Any]]:
         provider_id = provider["id"]
         endpoint = provider.get("endpoint")
-        if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
-            raise SearchError(f"{provider_id}: endpoint must be an HTTPS URL", retryable=False)
+        self._validate_endpoint(provider_id, endpoint)
         if provider_id == "tavily-search":
             data = self._post(endpoint, {"Authorization": f"Bearer {api_key}"}, {"urls": urls, "extract_depth": depth, "format": "markdown"}, timeout)
             items = data.get("results", [])
@@ -754,6 +797,9 @@ class ExtractGateway(SearchGateway):
                         continue
                     raise
                 if isinstance(data.get("code"), int) and data["code"] != 0:
+                    code = data["code"]
+                    raw_msg = str(data.get("message") or "")
+                    self.logger.warning("AnySearch extract business error: code=%s, raw_message=%s", code, raw_msg)
                     continue
                 item = data.get("data", data)
                 if isinstance(item, dict):

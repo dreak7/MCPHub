@@ -125,6 +125,52 @@ class SearchGatewayTest(unittest.TestCase):
         self.assertEqual("Bearer fake-key", post.call_args.args[1]["Authorization"])
         self.assertEqual("application/json", post.call_args.args[1]["Accept"])
 
+    def test_validate_endpoint_blocks_insecure_or_private_urls(self):
+        """测试服务端点严格安全合规校验：拦截非HTTPS、非标端口、凭据及私网/内网IP"""
+        gateway = self.make_gateway()
+        # 1. 拦截非 HTTPS
+        with self.assertRaises(SearchError) as ctx:
+            gateway._validate_endpoint("tavily", "http://api.tavily.com/search")
+        self.assertIn("must be an HTTPS URL", str(ctx.exception))
+
+        # 2. 拦截嵌入凭据
+        with self.assertRaises(SearchError) as ctx:
+            gateway._validate_endpoint("tavily", "https://user:pass@api.tavily.com/search")
+        self.assertIn("not a valid HTTPS URL", str(ctx.exception))
+
+        # 3. 拦截非标端口（如 8080 等非 443 端口）
+        with self.assertRaises(SearchError) as ctx:
+            gateway._validate_endpoint("tavily", "https://api.tavily.com:8080/search")
+        self.assertIn("non-standard port", str(ctx.exception))
+
+        # 4. 拦截私网/回环 IP（防 SSRF 与私网 Key 盗取）
+        for bad_host in ("127.0.0.1", "192.168.1.1", "10.0.0.1", "169.254.169.254", "localhost"):
+            with self.assertRaises(SearchError) as ctx:
+                gateway._validate_endpoint("tavily", f"https://{bad_host}/search")
+            self.assertIn("resolves to a non-public address", str(ctx.exception))
+
+    def test_anysearch_business_error_is_sanitized(self):
+        """测试 AnySearch 业务错误响应体脱敏：绝不泄露上游内部敏感信息或临时凭证"""
+        gateway = self.make_gateway()
+        provider = {"id": "anysearch", "endpoint": "https://api.anysearch.com/v1/search"}
+        fake_payload = {"code": 1002, "message": "CRITICAL_SECRET_KEY_12345: request rejected"}
+        with patch.object(gateway, "_post", return_value=fake_payload):
+            with self.assertRaises(SearchError) as ctx:
+                gateway._anysearch("https://api.anysearch.com/v1/search", "", "query", 10, provider, 10)
+        self.assertEqual("AnySearch business error (code 1002)", str(ctx.exception))
+        self.assertNotIn("CRITICAL_SECRET_KEY_12345", str(ctx.exception))
+
+    def test_bocha_business_error_is_sanitized_and_quota_aware(self):
+        """测试 Bocha 业务错误响应体脱敏并正确识别配额耗尽标签"""
+        gateway = self.make_gateway()
+        fake_payload = {"code": 402, "msg": "INTERNAL_TRACE_ID_999: 账户余额不足，额度耗尽"}
+        with patch.object(gateway, "_post", return_value=fake_payload):
+            with self.assertRaises(SearchError) as ctx:
+                gateway._bocha("https://api.bocha.cn/v1/web-search", "key", "query", 10, {}, 10)
+        self.assertEqual("Bocha business error (code 402): quota exhausted", str(ctx.exception))
+        self.assertNotIn("INTERNAL_TRACE_ID_999", str(ctx.exception))
+        self.assertTrue(ctx.exception.retryable)
+
     @patch.dict(os.environ, {"TAVILY_API_KEY": "a", "EXA_API_KEY": "b"}, clear=False)
     def test_multi_search_success_aggregates_and_deduplicates(self):
         """测试多源并发聚合搜索：多家引擎同时返回结果，智能去重、合并摘要并置顶多源高信度条目"""
