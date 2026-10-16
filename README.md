@@ -21,10 +21,10 @@
 
 ## 目录与配置
 
-`config/gateway.json` 是入口配置，支持通配符（如 `providers/*.json`）自适应发现所有配置。搜索服务清单在
-`config/providers/search.json`。API 密钥在 `config/.env`，密钥文件不应提交或分享。
+`config\gateway.json` 是入口配置，支持通配符（如 `providers\*.json`）自适应发现所有配置。搜索服务清单在
+`config\providers\search.json`。API 密钥在 `config\.env`，密钥文件不应提交或分享。
 
-每个 provider 的 `priority` 决定递补顺序；`enabled: false` 可临时停用服务。某服务因可递补错误失败时，网关会在 `cooldown_seconds` 内跳过它。冷却状态保存在 `state/provider-state.json`，重启 Hermes 后也会保留。
+每个 provider 的 `priority` 决定递补顺序；`enabled: false` 可临时停用服务。某服务因可递补错误失败时，网关会在 `cooldown_seconds` 内跳过它。冷却状态保存在 `state\provider-state.json`，重启 Hermes 后也会保留。
 
 ## Windows 安装与配置
 
@@ -37,14 +37,24 @@
    where.exe python
    ```
 
-4. 创建并编辑密钥文件：
+4. 创建并编辑密钥文件（提供两种 Windows 操作方式，任选其一即可）：
 
-   ```powershell
-   Copy-Item config\.env.example config\.env
+   **方式一：Windows 命令行（PowerShell 与 CMD 均原生通用）**：
+   在当前项目目录终端中执行复制并调用系统记事本打开：
+   ```cmd
+   copy config\.env.example config\.env
    notepad config\.env
    ```
 
-   填写你已开通服务的 API Key。各 Key 直接填写密钥值即可，无需引号包裹（例如 `TAVILY_API_KEY=tvly-xxxx`；程序内部已做单双引号自动剥离容错）。未填写的服务会在运行时安全跳过。
+   **方式二：文件资源管理器（鼠标可视化操作，最符合 Windows 习惯）**：
+   - 打开 `C:\MCP\MCPHub\config` 文件夹；
+   - 鼠标右键复制 `.env.example` 文件并在当前文件夹粘贴；
+   - 将粘贴出来的文件重命名为 `.env`；
+     > ⚠️ **Windows 避坑提示**：请务必确保文件名没有多出 `.txt` 后缀（即避免变成 `.env.txt`）。若系统默认隐藏了后缀名，建议在文件资源管理器顶部点击「查看」→ 勾选「文件扩展名」，确保文件名纯粹为 `.env`。
+   - 鼠标右键点击 `.env` 文件，选择「打开方式」→「记事本」进行编辑。
+
+   **填写说明**：
+   在记事本中填写你已开通服务的 API Key，填完按快捷键 `Ctrl + S` 保存后关闭记事本即可。各 Key 直接填写密钥值即可，无需引号包裹（例如 `TAVILY_API_KEY=tvly-xxxx`；程序内部已做单双引号自动剥离容错）。未填写的服务会在运行时安全跳过。
 
 5. 编辑 `config\providers\search.json`，按需要启用服务或调整优先级。
 6. 在 Hermes 中添加本地 MCP 服务（强烈推荐直接使用 **方式 A** 编辑 `config.yaml`，最不易出错）：
@@ -109,9 +119,9 @@
 
 ## 排查
 
-- MCP 协议数据只写到标准输出；所有运行日志在 `logs/gateway.log`，可安全查看故障原因。
-- 认证失败或参数不兼容会记录原因并继续递补下一家服务。如果所有服务都因认证失败，请检查 `.env` 中的变量名和 API Key。
-- 额度/频率耗尽会进入冷却。可等待 `cooldown_seconds` 到期，或在 Hermes 停止后删除 `state/provider-state.json` 以立即恢复尝试。
+- MCP 协议数据只写到标准输出；所有运行日志在 `logs\gateway.log`，可安全查看故障原因。
+- 认证失败或参数不兼容会记录原因并继续递补下一家服务。如果所有服务都因认证失败，请检查 `config\.env` 中的变量名和 API Key。
+- 额度/频率耗尽会进入冷却。可等待 `cooldown_seconds` 到期，或在 Hermes 停止后删除 `state\provider-state.json` 以立即恢复尝试。
 - 在终端直接运行程序时它会等待 MCP JSON-RPC 输入，这是正常行为；应由 Hermes 启动它。
 - **服务已启用但在当前聊天窗口搜不到新工具？**：Hermes 桌面端在会话建立时会冻结工具目录快照。修改配置或中途重新启用 MCP 服务后，旧会话渲染端可能无法即时刷新。只需在 Hermes 中点击 **`+`（新建会话 / New Chat）**，或者**彻底重启一次 Hermes Desktop 客户端**，新会话即可直接挂载最新工具。
 
