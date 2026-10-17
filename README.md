@@ -201,7 +201,7 @@ python mcp_gateway\gui_add_provider.py
      ```
    - 执行 `hermes mcp list` 确认状态为 `✓ enabled`。
 
-聚合器与 Hermes 只在本机经标准输入输出通信，不监听网络端口；但 Tavily、Exa、Jina AI、AnySearch 与 Bocha 本身是在线 API，因此目标电脑必须能访问互联网。
+聚合器与 Hermes 只在本机经标准输入输出通信，不监听网络端口；但 Exa、AnySearch、Tavily、Jina AI 与 Bocha 本身是在线 API，因此目标电脑必须能访问互联网。
 
 ## 排查
 
@@ -232,7 +232,7 @@ python mcp_gateway\gui_add_provider.py
 - **多路并发全开**：使用 Python 内置 `concurrent.futures.ThreadPoolExecutor`，同时唤醒所有已配置 API Key 且处于就绪状态的引擎并发发起检索；
 - **智能容错隔离**：各引擎独立执行，即使其中某一家发生 429 限流或 401 认证异常，系统会自动记录警告并放入冷却，其余引擎依然顺利聚合并呈现；
 - **URL 规范化与跟踪参数清洗**：自动剥离 `utm_*`、`ref`、`spm` 等追踪冗余后缀，对域名小写与结尾斜杠统一归一化；
-- **多源置信度置顶（Hybrid Fusion）**：如果同一网页被多家搜索引擎独立召回，系统自动合并更丰富的摘要与标题，并为该条目打上 `sources: ["tavily-search", "exa"]` 多源认证标签，优先置顶展示；
+- **多源置信度置顶（Hybrid Fusion）**：如果同一网页被多家搜索引擎独立召回，系统自动合并更丰富的摘要与标题，并为该条目打上 `sources: ["exa", "tavily-search"]` 多源认证标签，优先置顶展示；
 - 返回结构包含：`tool: "multi_web_search"`、`active_providers`（实际返回结果的引擎列表）、`total_sources_queried`（发起请求的总数）、`results`（融合去重后的结果清单）以及故障诊断与警告信息。
 
 ### 3. `fallback_web_extract`（网页正文智能提取）
@@ -294,7 +294,7 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
   > “今天英伟达股价表现如何？”  
   > “Python 3.13 有哪些关键更新？”  
   > “今天上海天气预报。”
-- **后台机制**：优先呼叫第 1 顺位引擎（如 Tavily）极速响应；若 Tavily 免费额度用完或限流，系统后台**毫秒级无感降级递补**到 Exa 或 Jina，平滑返回答案。
+- **后台机制**：优先呼叫第 1 顺位引擎（Exa）进行高精度深度语义搜索；若 Exa 配额耗尽、未配密钥或网络波动，系统后台**毫秒级无感降级递补**到 AnySearch、Tavily、Jina 或 Bocha，平滑返回答案。
 
 ### 2. 场景二：深度研报与多方印证（推荐触发 `multi_web_search`）
 - **适用场景**：行业技术调研、论文与开源方案比选、查证热点传闻真伪，或希望打破单一搜索引擎的信息茧房。
