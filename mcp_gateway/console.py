@@ -149,7 +149,7 @@ def edit_env_keys(paths: dict[str, Path]) -> None:
 # =========================================================================
 # 【功能块：运行服务健康自检与全部测试套件】
 # - 输入：paths (dict[str, Path]): 项目关键路径字典
-# - 功能：调用 python -m unittest 执行全部 52 项单元测试，验证所有功能与算法健康状态
+# - 功能：调用 python -m unittest 执行全部 54 项单元测试，验证所有功能与算法健康状态
 # - 输出：测试控制台输出
 # =========================================================================
 def run_health_tests(paths: dict[str, Path]) -> None:
@@ -238,7 +238,7 @@ def main() -> None:
         print("  [1] 一键生成并查看 Hermes Desktop 挂载配置 (含本机真实绝对路径)")
         print("  [2] 启动可视化引擎与能力配置向导 (GUI 界面)")
         print("  [3] 快捷配置/编辑 API 密钥 (.env)")
-        print("  [4] 运行服务健康检查与全部测试套件 (52 项)")
+        print("  [4] 运行服务健康检查与全部测试套件 (54 项)")
         print("  [5] 查看服务运行日志 (logs/gateway.log)")
         print("  [6] 运行 Hermes MCP 连通性测试 (hermes mcp test MCPHub)")
         print()

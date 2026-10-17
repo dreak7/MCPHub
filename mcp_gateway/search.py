@@ -240,7 +240,7 @@ class SearchGateway:
     #         - include_domains (list[str], 可选): 包含的域名白名单
     #         - exclude_domains (list[str], 可选): 排除的域名黑名单
     # - 功能：并发（ThreadPoolExecutor）同时调用所有已启用且处于就绪状态的搜索引擎
-    #         （Tavily, Exa, Jina, Bocha, AnySearch 等）；各引擎独立容错，部分失败不影响
+    #         （Exa, AnySearch, Tavily, Jina, Bocha 等）；各引擎独立容错，部分失败不影响
     #         全局；对搜集到的多路结果进行 URL 规范化清洗、智能去重、多源印证合并（打标
     #         sources 列表并优先置顶多源认可的权威网页），最后截取 top N 结果返回。
     # - 输出：dict 结构化结果：
@@ -338,6 +338,10 @@ class SearchGateway:
             auth_warning = self._format_warning(failures, all_exhausted=all_quota)
             extra = f" {auth_warning}" if auth_warning else ""
             raise SearchError(f"No search provider succeeded ({detail}).{extra}", retryable=False)
+
+        # 按引擎优先级对并发搜集到的结果集进行稳定排序（保持 Exa -> AnySearch -> Tavily -> Jina -> Bocha 优先级顺序）
+        provider_priority = {p.get("id"): p.get("priority", 1000) for p, _ in ready_providers}
+        provider_results.sort(key=lambda item: provider_priority.get(item[0], 1000))
 
         contributed_providers = [p_id for p_id, items in provider_results if items]
         fused_results = self._fuse_and_deduplicate(provider_results, max_results)

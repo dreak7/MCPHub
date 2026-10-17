@@ -6,37 +6,37 @@
       "quota_cooldown_seconds": 259200,
       "providers": [
         {
-          "id": "tavily-search",
-          "enabled": true,
-          "priority": 10,
-          "api_key_env": "TAVILY_API_KEY",
-          "endpoint": "https://api.tavily.com/search"
-        },
-        {
           "id": "exa",
           "enabled": true,
-          "priority": 20,
+          "priority": 10,
           "api_key_env": "EXA_API_KEY",
           "endpoint": "https://api.exa.ai/search"
         },
         {
-          "id": "jina",
-          "enabled": true,
-          "priority": 25,
-          "api_key_env": "JINA_API_KEY",
-          "endpoint": "https://s.jina.ai"
-        },
-        {
           "id": "anysearch",
           "enabled": true,
-          "priority": 30,
+          "priority": 20,
           "api_key_env": "ANYSEARCH_API_KEY",
           "endpoint": "https://api.anysearch.com/v1/search"
         },
         {
-          "id": "bocha-search",
+          "id": "tavily-search",
+          "enabled": true,
+          "priority": 30,
+          "api_key_env": "TAVILY_API_KEY",
+          "endpoint": "https://api.tavily.com/search"
+        },
+        {
+          "id": "jina",
           "enabled": true,
           "priority": 40,
+          "api_key_env": "JINA_API_KEY",
+          "endpoint": "https://s.jina.ai"
+        },
+        {
+          "id": "bocha-search",
+          "enabled": true,
+          "priority": 50,
           "api_key_env": "BOCHA_API_KEY",
           "endpoint": "https://api.bocha.cn/v1/web-search"
         }
@@ -48,32 +48,32 @@
       "quota_cooldown_seconds": 259200,
       "providers": [
         {
-          "id": "tavily-search",
-          "enabled": true,
-          "priority": 10,
-          "api_key_env": "TAVILY_API_KEY",
-          "endpoint": "https://api.tavily.com/extract"
-        },
-        {
           "id": "exa",
           "enabled": true,
-          "priority": 20,
+          "priority": 10,
           "api_key_env": "EXA_API_KEY",
           "endpoint": "https://api.exa.ai/contents"
         },
         {
-          "id": "jina",
-          "enabled": true,
-          "priority": 25,
-          "api_key_env": "JINA_API_KEY",
-          "endpoint": "https://r.jina.ai"
-        },
-        {
           "id": "anysearch",
           "enabled": true,
-          "priority": 30,
+          "priority": 20,
           "api_key_env": "ANYSEARCH_API_KEY",
           "endpoint": "https://api.anysearch.com/v1/extract"
+        },
+        {
+          "id": "tavily-search",
+          "enabled": true,
+          "priority": 30,
+          "api_key_env": "TAVILY_API_KEY",
+          "endpoint": "https://api.tavily.com/extract"
+        },
+        {
+          "id": "jina",
+          "enabled": true,
+          "priority": 40,
+          "api_key_env": "JINA_API_KEY",
+          "endpoint": "https://r.jina.ai"
         }
       ]
     }

@@ -259,8 +259,8 @@ class McpServerTest(unittest.TestCase):
         initialized = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual("local-search-fallback-gateway", initialized["result"]["serverInfo"]["name"])
         import mcp_gateway
-        self.assertEqual("1.5.0", mcp_gateway.__version__)
-        self.assertEqual("1.5.0", initialized["result"]["serverInfo"]["version"])
+        self.assertEqual("1.5.1", mcp_gateway.__version__)
+        self.assertEqual("1.5.1", initialized["result"]["serverInfo"]["version"])
         self.assertEqual(mcp_gateway.__version__, initialized["result"]["serverInfo"]["version"])
         tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = [t["name"] for t in tools["result"]["tools"]]
@@ -827,6 +827,79 @@ class AuditV141RemediationTest(unittest.TestCase):
         # 验证输入 '0' 能够正常退出
         with patch("builtins.input", return_value="0"), patch("os.system"):
             main()
+
+    # =========================================================================
+    # 【功能块：验证服务提供商在配置文件与网关中的执行优先级排序】
+    # - 输入：config/providers/search.json 配置文件内容，模拟全引擎就绪的环境变量
+    # - 功能：1. 检验 search.json 中 web_search 提供商是否严格按 exa -> anysearch -> tavily -> jina -> bocha 排序；
+    #         2. 检验 search.json 中 web_extract 提供商是否严格按 exa -> anysearch -> tavily -> jina 排序；
+    #         3. 验证 fallback_web_search 触发故障回退时，递补调用顺序严格符合该优先级；
+    #         4. 验证 multi_web_search 聚合搜索返回的 active_providers 严格保持该优先级顺序；
+    #         5. 验证 fallback_web_extract 提取网页时，递补调用顺序严格符合该优先级。
+    # - 输出：各断言通过，无异常抛出
+    # =========================================================================
+    def test_provider_priority_ordering(self):
+        project_root = Path(__file__).resolve().parent.parent
+        search_json_path = project_root / "config" / "providers" / "search.json"
+        config_data = json.loads(search_json_path.read_text(encoding="utf-8"))
+        web_search_cfg = config_data["capabilities"]["web_search"]
+        web_extract_cfg = config_data["capabilities"]["web_extract"]
+
+        # 1. 验证配置文件中的提供商 ID 优先级顺序
+        expected_search_order = ["exa", "anysearch", "tavily-search", "jina", "bocha-search"]
+        actual_search_order = [
+            p["id"] for p in sorted(web_search_cfg["providers"], key=lambda item: item.get("priority", 1000))
+        ]
+        self.assertEqual(expected_search_order, actual_search_order)
+
+        expected_extract_order = ["exa", "anysearch", "tavily-search", "jina"]
+        actual_extract_order = [
+            p["id"] for p in sorted(web_extract_cfg["providers"], key=lambda item: item.get("priority", 1000))
+        ]
+        self.assertEqual(expected_extract_order, actual_extract_order)
+
+        # 2. 模拟全部 API Key 已配置的环境
+        mock_env = {
+            "EXA_API_KEY": "test_exa_key",
+            "ANYSEARCH_API_KEY": "test_anysearch_key",
+            "TAVILY_API_KEY": "test_tavily_key",
+            "JINA_API_KEY": "test_jina_key",
+            "BOCHA_API_KEY": "test_bocha_key",
+        }
+
+        # 3. 验证 fallback_web_search 在连续故障时递补尝试的顺序
+        called_search: list[str] = []
+        def fake_failing_search_call(provider, *args, **kwargs):
+            called_search.append(provider["id"])
+            raise SearchError("simulated provider error", retryable=False)
+
+        search_gw = SearchGateway(web_search_cfg, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        with patch.dict(os.environ, mock_env, clear=False):
+            with patch.object(search_gw, "_call", side_effect=fake_failing_search_call):
+                with self.assertRaises(SearchError):
+                    search_gw.search({"query": "python test"})
+        self.assertEqual(expected_search_order, called_search)
+
+        # 4. 验证 multi_web_search 返回的 active_providers 保持优先级顺序
+        def fake_success_search_call(provider, *args, **kwargs):
+            return [{"title": f"Title {provider['id']}", "url": f"https://example.com/{provider['id']}", "snippet": "Text", "published_date": ""}]
+
+        with patch.dict(os.environ, mock_env, clear=False):
+            with patch.object(search_gw, "_call", side_effect=fake_success_search_call):
+                res = search_gw.multi_search({"query": "python test"})
+        self.assertEqual(expected_search_order, res["active_providers"])
+
+        # 5. 验证 fallback_web_extract 在提取失败时的递补顺序
+        called_extract: list[str] = []
+        def fake_failing_extract_call(provider, urls, depth, max_chars, key, timeout):
+            called_extract.append(provider["id"])
+            raise SearchError("simulated extract error", retryable=False)
+
+        extract_gw = ExtractGateway(web_extract_cfg, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        with patch.dict(os.environ, mock_env, clear=False):
+            with patch.object(extract_gw, "_extract", side_effect=fake_failing_extract_call):
+                res = extract_gw.extract({"urls": ["https://example.com/article"]})
+        self.assertEqual(expected_extract_order, called_extract)
 
 
 if __name__ == "__main__":

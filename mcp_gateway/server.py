@@ -17,7 +17,7 @@ from .search import CooldownStore, ExtractGateway, SearchError, SearchGateway
 SEARCH_TOOL_SCHEMA = {
     "name": "fallback_web_search",
     "description": (
-        "Search the web with automatic provider fallback: Tavily, Exa, Jina, AnySearch, then Bocha Web Search API. "
+        "Search the web with automatic provider fallback: Exa, AnySearch, Tavily, Jina, then Bocha Web Search API. "
         "Best for fast, economic, single-source queries with automatic fallback on failure. "
         "IMPORTANT: If the returned result contains a 'warning' field, you MUST display that warning prominently to the user at the top of your answer."
     ),
@@ -39,7 +39,7 @@ SEARCH_TOOL_SCHEMA = {
 MULTI_SEARCH_TOOL_SCHEMA = {
     "name": "multi_web_search",
     "description": (
-        "Concurrently search the web across all configured providers (Tavily, Exa, Jina, Bocha, AnySearch) "
+        "Concurrently search the web across all configured providers (Exa, AnySearch, Tavily, Jina, Bocha) "
         "and synthesize deduplicated results. Best for in-depth research, comprehensive reviews, and multi-source verification. "
         "IMPORTANT: If the returned result contains a 'warning' field, you MUST display that warning prominently to the user at the top of your answer."
     ),
@@ -61,7 +61,7 @@ MULTI_SEARCH_TOOL_SCHEMA = {
 EXTRACT_TOOL_SCHEMA = {
     "name": "fallback_web_extract",
     "description": (
-        "Extract clean page content with automatic fallback: Tavily, Exa, Jina, then AnySearch. Bocha is search-only. "
+        "Extract clean page content with automatic fallback: Exa, AnySearch, Tavily, then Jina. Bocha is search-only. "
         "IMPORTANT: If the returned result contains a 'warning' field, you MUST display that warning prominently to the user at the top of your answer."
     ),
     "inputSchema": {

@@ -7,17 +7,17 @@
 
 搜索工具按以下固定优先级尝试在线搜索提供商：
 
-1. Tavily Search
-2. Exa
-3. Jina AI Search
-4. AnySearch
+1. Exa
+2. AnySearch
+3. Tavily Search
+4. Jina AI Search
 5. Bocha Web Search API
 
 当服务返回额度耗尽、429、超时、连接错误或暂时性服务器错误时，网关会自动尝试下一项。
 后端服务的认证错误、调用参数错误或拒绝服务不会中断递补：网关会记录原因并继续尝试下一家。
 只有调用方传入的本地工具参数不合法时才会立即返回错误。
 
-正文提取工具使用 Tavily → Exa → Jina AI Reader → AnySearch。Bocha 的 Web Search API 仅返回搜索结果
+正文提取工具使用 Exa → AnySearch → Tavily → Jina AI Reader。Bocha 的 Web Search API 仅返回搜索结果
 和摘要，因此不会用于任意 URL 正文提取。
 
 ## 目录与配置
@@ -175,7 +175,7 @@ python mcp_gateway\gui_add_provider.py
 - `time_range`（`day` / `week` / `month` / `year`，可选）
 - `include_domains`、`exclude_domains`（字符串数组，可选）
 
-工作机制：按优先级从高到低依次尝试（Tavily → Exa → Jina AI → AnySearch → Bocha）。只要当前第一顺位成功即立刻返回，仅在故障时向后递补。最省 API 配额，耗时短，适合高频、常规问题。
+工作机制：按优先级从高到低依次尝试（Exa → AnySearch → Tavily → Jina AI → Bocha）。只要当前第一顺位成功即立刻返回，仅在故障时向后递补。最省 API 配额，耗时短，适合高频、常规问题。
 
 ### 2. `multi_web_search`（多源并发聚合搜索，推荐深度研究与多方印证）
 
@@ -229,14 +229,14 @@ python mcp_gateway\gui_add_provider.py
     > “请进行**多源交叉验证**，某某技术突破的传闻到底是不是真的？”
   - **显式直接指派（最精准）**：  
     > “请使用 **`multi_web_search`** 帮我搜集 2026 年量子计算最新的权威报道。”
-- **后台机制**：并发唤醒全部已配置引擎（Tavily, Exa, Jina, Bocha, AnySearch）并行检索；自动清洗营销参数、剔除重复链接，并将**获得多家搜索引擎共同印证的权威网页置顶排在第一位**，助力 Hermes 生成客观深入的研报。
+- **后台机制**：并发唤醒全部已配置引擎（Exa, AnySearch, Tavily, Jina, Bocha）并行检索；自动清洗营销参数、剔除重复链接，并将**获得多家搜索引擎共同印证的权威网页置顶排在第一位**，助力 Hermes 生成客观深入的研报。
 
 ### 3. 场景三：网页长文深度精读（自动调用 `fallback_web_extract`）
 - **适用场景**：搜索出网页链接后让 AI 深入阅读长文全文，或直接将具体网址发送给 AI 进行内容总结。
 - **操作方式**：
   > “请深入阅读这篇长文，提炼出前 3 个核心结论：https://example.com/article”  
   > “在刚才搜索到的前两篇文章里，作者分别给出了什么应对建议？”
-- **后台机制**：自动通过 SSRF 安全校验，由 Tavily / Exa / Jina Reader 自动剔除页面广告与冗余标签，将纯净的正文 Markdown 喂给大模型深度总结。
+- **后台机制**：自动通过 SSRF 安全校验，由 Exa / AnySearch / Tavily / Jina Reader 自动剔除页面广告与冗余标签，将纯净的正文 Markdown 喂给大模型深度总结。
 
 ### 4. 界面展示与故障透明感知
 - **界面小卡片（Tool Call）**：Hermes 在调用工具时，回答气泡上方会显示正在调用的折叠卡片，如 `MCPHub -> multi_web_search({"query": "..."})`，直观反映调用过程。
@@ -245,6 +245,18 @@ python mcp_gateway\gui_add_provider.py
   但回答**依然完整交付**（后续备用引擎已自动顶上接管）。
 
 ## 更新记录
+
+### v1.5.1 — 默认引擎优先级调整（Exa 首选）与多源并发稳定排序
+
+- **搜索引擎执行优先级重构（Exa 优先策略）**：
+  - `fallback_web_search`（单源回退搜索）与 `multi_web_search`（多源并发搜索）默认提供商调用优先级调整为：**Exa $\to$ AnySearch $\to$ Tavily $\to$ Jina AI $\to$ Bocha**。
+  - 第一顺位全面采用 Exa 语义神经网络搜索，在配额耗尽或网络波动时，由 AnySearch、Tavily、Jina 及 Bocha 依次无缝接管递补。
+- **正文提取服务同步对齐（`fallback_web_extract`）**：
+  - 网页全文深度提取工具递补顺位同步调整为：**Exa $\to$ AnySearch $\to$ Tavily $\to$ Jina AI Reader**（Bocha 仅提供搜索接口，不参与 URL 网页提取）。
+- **多源并发结果确定性排序保障（Deterministic Priority Fusion）**：
+  - 优化 `multi_web_search` 并发搜集机制，在多线程异步获取结果后，显式基于引擎优先级进行稳定排序后再执行多源融合去重，确保 `active_providers` 列表与同权条目展示顺序严格对齐引擎优先级，彻底消除因各 API 响应延迟随机性导致的展示顺序漂移。
+- **全量测试套件扩增至 54 项**：
+  - 新增 `test_provider_priority_ordering` 专项回归测试，覆盖配置文件优先级校验、连续故障递补顺序、并发多源结果列表顺序及正文提取回退链路，测试通过率 100%。
 
 ### v1.5.0 — 可视化服务管理面板、原生 GUI 配置向导与自定义扩展能力体系
 
@@ -293,7 +305,7 @@ python mcp_gateway\gui_add_provider.py
 
 - **新增多源并发检索工具（`multi_web_search`）**：
   - 与日常经济型的 `fallback_web_search` 并行运作，向大模型同时提供“单源高可用快搜”与“全网多源深度研报搜索”双重能力。
-  - 基于 Python 原生标准库 `concurrent.futures.ThreadPoolExecutor`，一键并发唤醒全部已配置 API Key 且就绪的引擎（Tavily, Exa, Jina, Bocha, AnySearch 等），保持极速毫秒级并行响应。
+  - 基于 Python 原生标准库 `concurrent.futures.ThreadPoolExecutor`，一键并发唤醒全部已配置 API Key 且就绪的引擎（Exa, AnySearch, Tavily, Jina, Bocha 等），保持极速毫秒级并行响应。
 - **智能 URL 归一化与跟踪参数清洗**：
   - 原生内置 URL 规范化清洗，精准剥离 `utm_*`、`ref`、`spm` 等冗余追踪参数并标准化路径斜杠与大小写，确保跨引擎的相同网页精准识别与聚合。
 - **多源推荐加权置顶（Hybrid Fusion）**：
@@ -352,7 +364,7 @@ python mcp_gateway\gui_add_provider.py
 - **破坏性变更**：原 `web_search` 重命名为 `fallback_web_search`，避免与 Hermes 内置
   `web_search` 混淆。请更新任何提示词、工作流或手动工具调用。
 - 新增 `fallback_web_extract`：支持最多 5 个公开 URL 的批量正文提取。
-- 提取服务按 Tavily → Exa → AnySearch 递补；Bocha Web Search API 仅用于搜索，不参与
+- 提取服务按 Exa → AnySearch → Tavily → Jina 递补；Bocha Web Search API 仅用于搜索，不参与
   URL 正文提取。
 - 搜索和提取拥有独立的失败冷却状态；新增 URL 公网校验以降低 SSRF 风险。
 - 后端服务的认证、参数和拒绝错误也会记录后继续递补；仅本地工具输入校验会立即失败。
