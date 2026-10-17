@@ -1,4 +1,4 @@
-# Local MCP Search Fallback Gateway (v1.5.0)
+# Local MCP Search Fallback Gateway (v1.5.1)
 
 一个给 Hermes Desktop 使用的本地 MCP 搜索聚合器。它向 Hermes 暴露
 `fallback_web_search`（单源经济型回退搜索）、`multi_web_search`（多源并发聚合融合搜索）
