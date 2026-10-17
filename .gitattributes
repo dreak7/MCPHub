@@ -1,3 +1,6 @@
 # Enforce Windows CRLF line endings for batch files
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# Enforce LF line endings for shell scripts to prevent bash syntax errors
+*.sh text eol=lf
