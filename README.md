@@ -209,12 +209,14 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
 ```
 - **跨平台路径自适应**：自动读取当前系统 `${USERPROFILE}` 环境变量并归一化正斜杠，自适应识别任意 Windows 用户目录与盘符（`C:`、`D:`、`E:` 等）；
 - **精准启停判据**：智能排查 `logs/mcp-stderr.log` 中当日最后一条 MCPHub 启动记录，排除历史遗留报错干扰；
-- **缓存健康检测**：实时核对 `mcp_schema_cache.json` 工具模式定义缓存是否为当日最新更新。
+- **缓存健康检测**：实时核对 `mcp_schema_cache.json` 工具模式定义缓存是否为当日最新更新；
+- **抗注入安全闭环**：Profile 参数强制执行字符白名单校验（仅允许 `[a-zA-Z0-9_.-]`），彻底阻断路径穿越（`..`）与命令注入；行号提取增加严格纯数字校验，杜绝 Bash 算术畸变执行。
 
 ### 2. Hermes 专属探针与取证 Skill（`mcphub-probe`）
 专为 Hermes Agent 打造的诊断技能包（符合 Hermes Skill 标准规范）：
-- **首轮强制验活**：在 Agent 执行检索任务首轮前自动调度共享探活脚本与轻量 `no-op` 检索验证；
-- **通道调用取证**：详尽规定了基于 `state.db` 的真实执行后端标签识别标准（区分 MCPHub 的 `provider` / `active_providers` 与内置链的 `served_by`），以及基于 `agent.log` 的耗时分析指南（详见 `references/channel-forensics.md`）。
+- **首轮强制验活**：在 Agent 执行检索任务首轮前自动调度共享探活脚本与轻量 `no-op` 检索验证，统一使用固定无害探活词 `"ping"` 阻断提示注入；
+- **通道调用取证**：详尽规定了基于 `state.db` 的真实执行后端标签识别标准（区分 MCPHub 的 `provider` / `active_providers` 与内置链的 `served_by`），以及基于 `agent.log` 的耗时分析指南（详见 `references/channel-forensics.md`）；
+- **防 Memory 污染与凭据脱敏**：数据库连接强制使用 `mode=ro&immutable=1` 只读模式并对 `session_id` 实施防 SQL 注入强校验，回填取证参数与告警留痕严格执行敏感信息脱敏，杜绝私密凭据泄露进大模型长期记忆。
 
 ---
 
@@ -282,10 +284,12 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
 - **跨平台通用环境探活脚本（`scripts/probe_mcphub.sh`）**：
   - 支持多 Profile 环境自适应探活，兼容不同 Windows 用户目录（`${USERPROFILE}`）与任意盘符（`C:`/`D:`/`E:`）；
   - 聚焦当日最后一次网关启动记录有无路径错误，历史故障记为背景不参与致命阻断；
-  - 强制通过 `.gitattributes` 确立 LF 换行规则，规避 Windows 环境下 CRLF 导致的 Bash 语法异常。
+  - 强制通过 `.gitattributes` 确立 LF 换行规则，规避 Windows 环境下 CRLF 导致的 Bash 语法异常；
+  - 内置严格 Profile 字符白名单与行号纯数字校验，彻底阻断路径穿越、Shell 元字符注入与算术畸变执行。
 - **Hermes 专属探针与取证 Skill（`mcphub-probe`）**：
-  - 规范首轮轻量 `no-op` 验活流程，明确单源（`provider`）与多源并发（`active_providers`）健康判定准则；
-  - 包含 SQLite 数据库（`state.db`）与运行日志（`agent.log`）多源交叉取证指导规范。
+  - 规范首轮轻量 `no-op` 验活流程，统一使用固定安全探针词 `"ping"` 防范提示注入；
+  - 包含 SQLite 数据库（`state.db`）与运行日志（`agent.log`）多源交叉取证指导规范；
+  - 建立完善的防 SQL 注入、只读不可变连接与凭据脱敏防线，阻断敏感信息泄露进 Agent 长期记忆（Memory）。
 
 ### v1.5.0 — 可视化服务管理面板、原生 GUI 配置向导与自定义扩展能力体系
 

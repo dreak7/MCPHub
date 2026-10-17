@@ -5,7 +5,8 @@
 #         $HERMES_HOME_BASE (可选环境变量，优先级最高)
 # - 功能：严格维持 Hermes Skill 外部调用参数契约不变的前提下，
 #         自适应当前系统真实目录与安装盘符（自动兼容 C/D 等不同盘符），
-#         检测 config.yaml、mcp-stderr.log 与工具缓存状态
+#         检测 config.yaml、mcp-stderr.log 与工具缓存状态；
+#         内置严格参数白名单与行号数字校验，彻底杜绝命令注入与路径穿越
 # - 输出：标准输出保持原始格式（含 RESULT: PASS/FAIL），退出状态码 0 或 1
 # =========================================================================
 # 用法: bash probe_mcphub.sh [<profile>]   缺省 default
@@ -13,10 +14,11 @@
 set -u
 
 # =========================================================================
-# 【功能块 1：解析 Hermes 配置主目录与确定 Profile】
+# 【功能块 1：解析 Hermes 配置主目录与确定 Profile（含抗注入安全白名单校验）】
 # - 输入：命令行参数 $1（Profile 名称，缺省为 default）、环境变量 $HERMES_HOME_BASE
-# - 功能：自动获取系统用户主目录，自适应不同系统与用户环境（如 C:/Users/Timber 或 C:/Users/dreak），
-#         定位 config.yaml 配置文件与 mcp-stderr.log 日志文件
+# - 功能：1. 自动获取系统用户主目录，自适应不同系统与用户环境（如 C:/Users/Timber 或 C:/Users/dreak）；
+#         2. 严格执行输入安全白名单校验（仅允许字母数字点横杠下划线，严禁 .. 路径穿越与特殊 Shell 字符注入）；
+#         3. 定位 config.yaml 配置文件与 mcp-stderr.log 日志文件
 # - 输出：HOME_DIR, CFG, LOG, SCHEMA 变量路径定义
 # =========================================================================
 AUTO_USER_HOME="${USERPROFILE:-${HOME:-C:/Users/Timber}}"
@@ -24,6 +26,15 @@ AUTO_USER_HOME="${AUTO_USER_HOME//\\//}"
 BASE="${HERMES_HOME_BASE:-$AUTO_USER_HOME/AppData/Local/hermes}"
 
 PROF="${1:-default}"
+
+# 严格抗注入校验：阻断包含路径穿越符 (..) 或任何 Shell 元字符的非法入参
+case "$PROF" in
+  *..*|*[!a-zA-Z0-9_.-]*)
+    echo "FAIL  非法的 Profile 名称参数（仅允许字母数字下划线且禁止路径穿越）: $PROF"
+    exit 1
+    ;;
+esac
+
 if [ "$PROF" = "default" ]; then
   HOME_DIR="$BASE"
 else
@@ -65,28 +76,32 @@ else
 fi
 
 # =========================================================================
-# 【功能块 3：检查当日最后一次 MCPHub 启动运行状态与路径报错】
+# 【功能块 3：检查当日最后一次 MCPHub 启动运行状态与路径报错（含算术防注入）】
 # - 输入：$LOG (mcp-stderr.log 日志路径)
-# - 功能：精准提取最后一条启动记录（starting MCP server 'MCPHub'）及后续 15 行日志，
-#         只针对当前最后一次启动判断是否存在路径错误或文件缺失，历史偶发错误仅记为背景 INFO
+# - 功能：1. 精准提取最后一条启动记录（starting MCP server 'MCPHub'）；
+#         2. 强制校验提取的行号必须为纯数字，严防畸变数据触发 Bash $((...)) 算术执行注入；
+#         3. 截取启动记录后 15 行日志判定当前最后一次启动状态，历史偶发错误仅记为背景 INFO
 # - 输出：终端打印启动通过 PASS 或失败 FAIL，统计历史报错次数
 # =========================================================================
 echo "--- MCPHub 启动状态 ---"
 if [ -f "$LOG" ]; then
   LAST=$(grep -n "starting MCP server 'MCPHub'" "$LOG" 2>/dev/null | tail -1 | cut -d: -f1)
-  if [ -z "${LAST:-}" ]; then
-    echo "WARN  日志中无 MCPHub 启动记录，需靠 no-op 调用确认"
-  else
-    BLOCK=$(sed -n "${LAST},$((LAST+15))p" "$LOG")
-    LASTTS=$(echo "$BLOCK" | head -1 | cut -c1-19)
-    if echo "$BLOCK" | grep -Ei "No such file|找不到指定的|WinError" | grep -qi "mcphub\|mcp_gateway"; then
-      echo "FAIL  最后一次启动记录（$LASTTS）后报路径错误 → 通道未起"; FAIL=1
-    else
-      echo "PASS  最后一次启动记录（$LASTTS）后无路径报错"
-    fi
-    HIST=$(grep -Ei "No such file|找不到指定的|WinError" "$LOG" 2>/dev/null | grep -ci "mcphub\|mcp_gateway" || true)
-    echo "INFO  历史累计路径报错 ${HIST} 次（仅作背景，不参与判定）"
-  fi
+  case "$LAST" in
+    ""|*[!0-9]*)
+      echo "WARN  日志中无有效的 MCPHub 启动记录，需靠 no-op 调用确认"
+      ;;
+    *)
+      BLOCK=$(sed -n "${LAST},$((LAST+15))p" "$LOG")
+      LASTTS=$(echo "$BLOCK" | head -1 | cut -c1-19)
+      if echo "$BLOCK" | grep -Ei "No such file|找不到指定的|WinError" | grep -qi "mcphub\|mcp_gateway"; then
+        echo "FAIL  最后一次启动记录（$LASTTS）后报路径错误 → 通道未起"; FAIL=1
+      else
+        echo "PASS  最后一次启动记录（$LASTTS）后无路径报错"
+      fi
+      HIST=$(grep -Ei "No such file|找不到指定的|WinError" "$LOG" 2>/dev/null | grep -ci "mcphub\|mcp_gateway" || true)
+      echo "INFO  历史累计路径报错 ${HIST} 次（仅作背景，不参与判定）"
+      ;;
+  esac
 else
   echo "WARN  未找到 mcp-stderr.log: $LOG"
 fi
