@@ -1,4 +1,4 @@
-# Local MCP Search Fallback Gateway (v1.5.2)
+# Local MCP Search Fallback Gateway (v1.5.3)
 
 一个给 Hermes Desktop 使用的本地 MCP 搜索聚合器。它向 Hermes 暴露
 `fallback_web_search`（单源经济型回退搜索）、`multi_web_search`（多源并发聚合融合搜索）
@@ -314,7 +314,10 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
 - **操作方式**：
   > “请深入阅读这篇长文，提炼出前 3 个核心结论：https://example.com/article”  
   > “在刚才搜索到的前两篇文章里，作者分别给出了什么应对建议？”
-- **后台机制**：自动通过 SSRF 安全校验，由 Exa / AnySearch / Tavily / Jina Reader 自动剔除页面广告与冗余标签，将纯净的正文 Markdown 喂给大模型深度总结。
+- **后台机制**：
+  - **清洗与安全校验**：自动通过 SSRF 安全校验，由 Exa / AnySearch / Tavily / Jina Reader 自动剔除页面广告与冗余标签，将纯净的正文 Markdown 喂给大模型深度总结；
+  - **30 分钟本地落盘缓存与状态透传**：正文提取结果会在本地 `state/extract_cache/` 自动缓存 30 分钟（返回 `cached: true/false`），重复提取相同网页无需重复请求外部 API；
+  - **全文真实落盘与 `read_file` 翻页联动**：当页面字符数超过限制发生截断时（`truncated: true`），系统会在本地自动保存未截断的完整 Markdown 原文（`cache_path`），并主动向大模型注入 `paging_hint` 翻页提示，引导 AI 调用内置的 `read_file` 工具继续精读剩余章节，实现真正的零额度超长文通读！
 
 ### 4. 界面展示与故障透明感知
 - **界面小卡片（Tool Call）**：Hermes 在调用工具时，回答气泡上方会显示正在调用的折叠卡片，如 `MCPHub -> multi_web_search({"query": "..."})`，直观反映调用过程。
@@ -323,6 +326,19 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
   但回答**依然完整交付**（后续备用引擎已自动顶上接管）。
 
 ## 更新记录
+
+### v1.5.3 — 网页正文智能提取支持 30 分钟落盘缓存、全文 Markdown 持久化与 read_file 联动翻页
+
+- **30 分钟本地落盘缓存机制（Local Disk Cache）**：
+  - `fallback_web_extract` 新增 30 分钟本地文件缓存（默认 TTL 1,800 秒，支持在 `search.json` 中配置 `cache_ttl_seconds`）；
+  - 自动根据 URL 与抓取深度进行 SHA-256 哈希安全映射，30 分钟内二次提取同一网页直接从本地毫秒级读取，杜绝外部 API 额度重复消耗；
+  - 超出 30 分钟有效期自动过期清理并重新拉取。
+- **全文真实落盘与 Hermes `read_file` 翻页闭环**：
+  - 远端抓取的未截断 Markdown 原始正文完整持久化存入 `state/extract_cache/<hash>.md`，彻底解决传统接口在内存中切断导致的无法阅读全文痛点；
+  - 返回条目新增 `cache_path` 绝对路径；当文本发生截断时，自动注入 `paging_hint` 翻页引导，指引大模型无缝调用内置 `read_file` 工具继续分页查阅后半部分，长文通读零额度开销。
+- **透明的命中可辨识设计（Cache Hit Identifiability）**：
+  - 返回结果新增 `cached: true / false` 显式标识，配合 `cached_at` 提取时间戳与 `total_characters` 字符总量，调用端可一眼识别数据来源与新鲜度。
+- **服务版本升级**：版本号正式递增至 `v1.5.3`。
 
 ### v1.5.2 — 跨平台环境探活体系、Hermes 专属取证 Skill 与双轨制可选分级架构
 
