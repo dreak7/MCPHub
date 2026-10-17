@@ -242,8 +242,10 @@ python mcp_gateway\gui_add_provider.py
 - `extract_depth`（`basic` / `advanced`，默认 `basic`）；
 - `max_characters`（每页 1,000–100,000 字符，默认 10,000）。
 
-它返回每个页面的 `url`、`title`、清洗后的 `content`、`truncated` 和实际处理它的 `provider`。不可提取的 URL 会列在 `unresolved_urls`，不影响同一批其他 URL 的结果。
-为避免 SSRF，网关拒绝 localhost、私有/保留地址、含用户信息的 URL 与非 80/443 端口。
+特性与策略：
+- **30 分钟本地落盘缓存**：成功提取的正文会自动写入本地缓存（`state/extract_cache/`，默认 TTL 1,800 秒），在有效期内重复提取相同 URL 直接秒级返回，避免重复消耗外部 API 额度；
+- **智能截断与安全校验**：返回每个页面的 `url`、`title`、清洗后的 `content`、`truncated` 和实际处理它的 `provider`。不可提取的 URL 会列在 `unresolved_urls`，不影响同一批其他 URL 的结果；
+- **SSRF 深度防护**：网关拒绝 localhost、私有/保留地址、含用户信息的 URL 与非 80/443 端口。
 
 ## 🔍 通道健康探活与诊断取证（可选扩展体系）
 

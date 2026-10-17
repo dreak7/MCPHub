@@ -405,6 +405,70 @@ class ExtractGatewayTest(unittest.TestCase):
         self.assertEqual("Bearer fake-key", post.call_args.args[1]["Authorization"])
         self.assertEqual("application/json", post.call_args.args[1]["Accept"])
 
+    # =========================================================================
+    # 【功能块：测试网页正文提取本地落盘缓存命中（30分钟内免网络请求）】
+    # - 输入：同个网页 URL 的两次连续 extract 调用请求
+    # - 功能：验证首次请求成功后正文自动写入本地磁盘缓存，第二次请求在 30 分钟内直接读取磁盘缓存，
+    #         不触发任何远端服务商网络调用（call_count 保持为 1）
+    # - 输出：断言验证两次返回内容一致，且底层网络请求次数不递增
+    # =========================================================================
+    def test_extract_disk_cache_hits_within_ttl(self):
+        tmp_dir = Path(tempfile.mkdtemp())
+        gateway = ExtractGateway(
+            {"cooldown_seconds": 60, "cache_ttl_seconds": 1800, "providers": [
+                {"id": "exa", "enabled": True, "priority": 10, "api_key_env": "EXA_API_KEY", "endpoint": "https://example.test/exa"},
+            ]},
+            tmp_dir / "state.json",
+            FakeLogger(),
+        )
+        fake_res = [{"url": "https://example.com", "title": "Example Title", "content": "Cached Content Body", "truncated": False}]
+        with patch.dict(os.environ, {"EXA_API_KEY": "test-key"}, clear=False), \
+             patch.object(gateway, "_validate_public_url"), \
+             patch.object(gateway, "_extract", return_value=fake_res) as extract_mock:
+            # 第一次调用：缓存未命中，请求服务商并写入本地落盘缓存
+            res1 = gateway.extract({"urls": ["https://example.com"]})
+            self.assertEqual(1, extract_mock.call_count)
+            self.assertEqual("Cached Content Body", res1["results"][0]["content"])
+            self.assertEqual("exa", res1["results"][0]["provider"])
+
+            # 第二次调用（相同 URL）：命中本地落盘缓存，不应调用服务商网络接口
+            res2 = gateway.extract({"urls": ["https://example.com"]})
+            self.assertEqual(1, extract_mock.call_count)
+            self.assertEqual("Cached Content Body", res2["results"][0]["content"])
+            self.assertEqual("exa", res2["results"][0]["provider"])
+
+    # =========================================================================
+    # 【功能块：测试网页正文提取本地落盘缓存过期（超过30分钟重新请求）】
+    # - 输入：超过 30 分钟（1801秒）时间跨度的两次 extract 调用请求
+    # - 功能：验证超过 1800 秒后本地缓存自动失效并清理，再次触发远端服务商请求重新获取最新内容
+    # - 输出：断言验证底层网络请求次数递增为 2 次
+    # =========================================================================
+    def test_extract_disk_cache_expires_after_ttl(self):
+        tmp_dir = Path(tempfile.mkdtemp())
+        gateway = ExtractGateway(
+            {"cooldown_seconds": 60, "cache_ttl_seconds": 1800, "providers": [
+                {"id": "exa", "enabled": True, "priority": 10, "api_key_env": "EXA_API_KEY", "endpoint": "https://example.test/exa"},
+            ]},
+            tmp_dir / "state.json",
+            FakeLogger(),
+        )
+        fake_res = [{"url": "https://example.com", "title": "Example Title", "content": "Content Body", "truncated": False}]
+        current_time = 1700000000.0
+        with patch.dict(os.environ, {"EXA_API_KEY": "test-key"}, clear=False), \
+             patch.object(gateway, "_validate_public_url"), \
+             patch.object(gateway, "_extract", return_value=fake_res) as extract_mock, \
+             patch("time.time", side_effect=lambda: current_time):
+            # 第一次调用：建立缓存
+            gateway.extract({"urls": ["https://example.com"]})
+            self.assertEqual(1, extract_mock.call_count)
+
+            # 模拟时间流逝 1801 秒（超过 30 分钟）
+            current_time += 1801.0
+
+            # 第二次调用：缓存过期，应当重新请求服务商
+            gateway.extract({"urls": ["https://example.com"]})
+            self.assertEqual(2, extract_mock.call_count)
+
 
 class SearchCooldownTest(unittest.TestCase):
     """Verify that non-retryable (auth/param) errors do NOT set cooldown."""

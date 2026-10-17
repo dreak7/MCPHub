@@ -742,7 +742,122 @@ class SearchGateway:
 
 
 class ExtractGateway(SearchGateway):
-    """Quota-aware web page extraction with public-URL validation."""
+    """Quota-aware web page extraction with public-URL validation and local disk caching."""
+
+    # =========================================================================
+    # 【功能块：初始化网页提取网关与本地磁盘缓存】
+    # - 输入：definition (dict[str, Any]): web_extract 能力配置字典；
+    #         state_path (Path): 冷却状态持久化路径；
+    #         logger (logging.Logger): 日志记录器；
+    #         cooldown_store (CooldownStore | None): 共享的冷却状态存储；
+    #         cache_dir (Path | None): 本地正文缓存目录（默认 state_path 同级下的 extract_cache）；
+    #         cache_ttl_seconds (int): 缓存有效期（默认 1800 秒，即 30 分钟）
+    # - 功能：初始化网关基础设施并配置本地磁盘文件缓存的存储路径与有效期
+    # - 输出：ExtractGateway 实例
+    # =========================================================================
+    def __init__(
+        self,
+        definition: dict[str, Any],
+        state_path: Path,
+        logger: logging.Logger,
+        cooldown_store: CooldownStore | None = None,
+        cache_dir: Path | None = None,
+        cache_ttl_seconds: int = 1800,
+    ):
+        super().__init__(definition, state_path, logger, cooldown_store)
+        cfg_cache_dir = definition.get("cache_dir")
+        if cache_dir is not None:
+            self.cache_dir = Path(cache_dir)
+        elif cfg_cache_dir:
+            self.cache_dir = Path(cfg_cache_dir)
+        else:
+            self.cache_dir = state_path.parent / "extract_cache"
+        self.cache_ttl = int(definition.get("cache_ttl_seconds", cache_ttl_seconds))
+
+    # =========================================================================
+    # 【功能块：计算目标 URL 与深度的磁盘缓存路径】
+    # - 输入：url (str): 目标网页 URL；depth (str): 提取深度（basic 或 advanced）
+    # - 功能：对 URL 和 depth 进行 SHA-256 哈希，生成合法安全的文件名
+    # - 输出：Path 实例（指向该 URL 对应的本地缓存 .json 文件）
+    # =========================================================================
+    def _get_cache_path(self, url: str, depth: str) -> Path:
+        cache_key = f"{depth}:{url.strip()}"
+        url_hash = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
+        return self.cache_dir / f"{url_hash}.json"
+
+    # =========================================================================
+    # 【功能块：读取本地磁盘缓存的网页正文】
+    # - 输入：url (str): 目标网页 URL；depth (str): 提取深度；max_characters (int): 字符截断限制
+    # - 功能：检查是否存在 30 分钟以内的有效本地缓存，若有效且未过期则格式化返回
+    # - 输出：dict[str, Any]（提取结果对象）或 None（未命中或已过期）
+    # =========================================================================
+    def _read_cache(self, url: str, depth: str, max_characters: int) -> dict[str, Any] | None:
+        if self.cache_ttl <= 0:
+            return None
+        cache_file = self._get_cache_path(url, depth)
+        if not cache_file.is_file():
+            return None
+        try:
+            with cache_file.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            cached_at = float(data.get("cached_at", 0))
+            if time.time() - cached_at > self.cache_ttl:
+                try:
+                    cache_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
+            if data.get("url") != url:
+                return None
+            title = data.get("title", "")
+            content = data.get("content", "")
+            was_truncated = bool(data.get("truncated", False))
+            if was_truncated and max_characters > len(content):
+                return None
+            provider = data.get("provider", "cache")
+            result = self._extract_result(url, title, content, max_characters)
+            result["provider"] = provider
+            return result
+        except Exception as exc:
+            self.logger.debug("读取提取缓存失败 [%s]: %s", url, exc)
+            return None
+
+    # =========================================================================
+    # 【功能块：写入网页提取结果至本地磁盘缓存】
+    # - 输入：url (str): 目标网页 URL；depth (str): 提取深度；title (Any): 网页标题；
+    #         content (Any): 网页清洗正文；provider (str): 提供商标识；truncated (bool): 是否被截断
+    # - 功能：将成功的提取结果原子写入本地磁盘 JSON 文件，并记录时间戳
+    # - 输出：无（异常安全，写入失败仅打日志不阻断业务）
+    # =========================================================================
+    def _write_cache(
+        self,
+        url: str,
+        depth: str,
+        title: Any,
+        content: Any,
+        provider: str,
+        truncated: bool = False,
+    ) -> None:
+        if self.cache_ttl <= 0 or not content:
+            return
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = self._get_cache_path(url, depth)
+            data = {
+                "url": url,
+                "depth": depth,
+                "title": str(title or ""),
+                "content": str(content or ""),
+                "provider": provider,
+                "truncated": truncated,
+                "cached_at": time.time(),
+            }
+            temp_file = cache_file.with_suffix(".tmp")
+            with temp_file.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            temp_file.replace(cache_file)
+        except Exception as exc:
+            self.logger.debug("写入提取缓存失败 [%s]: %s", url, exc)
 
     def extract(self, arguments: dict[str, Any]) -> dict[str, Any]:
         urls = arguments.get("urls")
@@ -765,6 +880,14 @@ class ExtractGateway(SearchGateway):
         pending = set(unique_urls)
         extracted: list[dict[str, Any]] = []
         failures: list[ProviderFailure] = []
+
+        # 检查本地磁盘缓存（若在30分钟有效期内命中，直接复用，避免消耗远端 API 额度）
+        for url in list(pending):
+            cached = self._read_cache(url, depth, max_characters)
+            if cached is not None:
+                extracted.append(cached)
+                pending.remove(url)
+
         cooldown_seconds = self.definition.get("cooldown_seconds", 3600)
         quota_cooldown_seconds = self.definition.get("quota_cooldown_seconds", 259200)
         timeout = self.definition.get("timeout_seconds", 30)
@@ -802,6 +925,14 @@ class ExtractGateway(SearchGateway):
                 if url in pending and result["content"]:
                     returned_urls.add(url)
                     extracted.append({**result, "provider": provider_id})
+                    self._write_cache(
+                        url=url,
+                        depth=depth,
+                        title=result.get("title"),
+                        content=result.get("content"),
+                        provider=provider_id,
+                        truncated=bool(result.get("truncated", False)),
+                    )
             pending -= returned_urls
 
         ordered = sorted(extracted, key=lambda item: unique_urls.index(item["url"]))
