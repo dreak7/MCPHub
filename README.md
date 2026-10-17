@@ -41,7 +41,7 @@
    - **`[1] 一键生成并查看 Hermes Desktop 挂载配置`**：自动探测当前电脑实测真实 Python 绝对路径与配置文件绝对路径，直接输出零歧义的 YAML 与 JSON 配置，告别路径占位符猜测。
    - **`[2] 启动可视化引擎与能力配置向导 (GUI)`**：双轨制原生 Windows 窗口，无需触碰任何 JSON 文件，可视化添加/管理搜索引擎，或新建自定义能力分类，并自动同步写入 `.env`。
    - **`[3] 快捷配置/编辑 API 密钥 (.env)`**：自动检查并用系统记事本打开密钥配置文件。
-   - **`[4] 运行服务健康检查与全部测试套件 (52 项)`**：一键验证本机所有核心算法、并发熔断、SSRF安全拦截与协议适配。
+   - **`[4] 运行服务健康检查与全部测试套件 (54 项)`**：一键验证本机所有核心算法、并发熔断、SSRF安全拦截与协议适配。
    - **`[5] 查看服务运行日志`**：实时查看 `logs\gateway.log` 最新运行日志。
    - **`[6] 运行 Hermes MCP 连通性测试`**：一键执行 `hermes mcp test MCPHub`。
 
@@ -198,6 +198,24 @@ python mcp_gateway\gui_add_provider.py
 它返回每个页面的 `url`、`title`、清洗后的 `content`、`truncated` 和实际处理它的 `provider`。不可提取的 URL 会列在 `unresolved_urls`，不影响同一批其他 URL 的结果。
 为避免 SSRF，网关拒绝 localhost、私有/保留地址、含用户信息的 URL 与非 80/443 端口。
 
+## 🔍 通道健康探活与诊断取证（Health Probe & Forensics）
+
+为防范检索服务在长期运行中的“静默降级”或“无感失效”，MCPHub 原生提供两套协同运作的自检与诊断体系：
+
+### 1. 通用环境探活脚本（`scripts/probe_mcphub.sh`）
+在终端（Git Bash 或 Linux 环境）中执行，支持针对指定 Profile 运行全生命周期健康探活：
+```bash
+bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
+```
+- **跨平台路径自适应**：自动读取当前系统 `${USERPROFILE}` 环境变量并归一化正斜杠，自适应识别任意 Windows 用户目录与盘符（`C:`、`D:`、`E:` 等）；
+- **精准启停判据**：智能排查 `logs/mcp-stderr.log` 中当日最后一条 MCPHub 启动记录，排除历史遗留报错干扰；
+- **缓存健康检测**：实时核对 `mcp_schema_cache.json` 工具模式定义缓存是否为当日最新更新。
+
+### 2. Hermes 专属探针与取证 Skill（`probe_mcphub/mcphub-probe`）
+专为 Hermes Agent 打造的诊断技能包（符合 Hermes Skill 标准规范）：
+- **首轮强制验活**：在 Agent 执行检索任务首轮前自动调度共享探活脚本与轻量 `no-op` 检索验证；
+- **通道调用取证**：详尽规定了基于 `state.db` 的真实执行后端标签识别标准（区分 MCPHub 的 `provider` / `active_providers` 与内置链的 `served_by`），以及基于 `agent.log` 的耗时分析指南（详见 `references/channel-forensics.md`）。
+
 ---
 
 所有工具都会在结果中透明展示上游故障：单源搜索字段为 `provider_failures`，并发搜索字段为 `provider_failures`，提取工具字段为 `failures`。当检测到后端服务故障时，结果会额外附加显式的 `warning` 字段，按故障类型分行显示实际出问题的服务名和错误码：
@@ -261,6 +279,13 @@ python mcp_gateway\gui_add_provider.py
   - 增强窄屏防折行自适应保护机制，并在批处理入口中预设舒适视窗尺寸。
 - **全量测试套件扩增至 54 项**：
   - 新增 `test_provider_priority_ordering` 专项回归测试，覆盖配置文件优先级校验、连续故障递补顺序、并发多源结果列表顺序及正文提取回退链路，测试通过率 100%。
+- **跨平台通用环境探活脚本（`scripts/probe_mcphub.sh`）**：
+  - 支持多 Profile 环境自适应探活，兼容不同 Windows 用户目录（`${USERPROFILE}`）与任意盘符（`C:`/`D:`/`E:`）；
+  - 聚焦当日最后一次网关启动记录有无路径错误，历史故障记为背景不参与致命阻断；
+  - 强制通过 `.gitattributes` 确立 LF 换行规则，规避 Windows 环境下 CRLF 导致的 Bash 语法异常。
+- **Hermes 专属探针与取证 Skill（`probe_mcphub/mcphub-probe`）**：
+  - 规范首轮轻量 `no-op` 验活流程，明确单源（`provider`）与多源并发（`active_providers`）健康判定准则；
+  - 包含 SQLite 数据库（`state.db`）与运行日志（`agent.log`）多源交叉取证指导规范。
 
 ### v1.5.0 — 可视化服务管理面板、原生 GUI 配置向导与自定义扩展能力体系
 
