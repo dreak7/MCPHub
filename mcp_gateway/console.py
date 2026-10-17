@@ -220,9 +220,10 @@ def run_hermes_test() -> None:
 
 
 # =========================================================================
-# 【功能块：控制台主菜单循环交互】
+# 【功能块：控制台主菜单循环交互与居中排版渲染】
 # - 输入：用户在键盘上输入的数字选项 [0-6]
-# - 功能：呈现交互式菜单并根据用户输入路由分发至对应功能函数，支持循环操作直到退出
+# - 功能：动态探测终端窗口尺寸并计算居中边距，呈现美观舒展的卡片式居中菜单，
+#         拉开各行间距提升易读性，并根据用户输入路由分发至对应功能模块
 # - 输出：无
 # =========================================================================
 def main() -> None:
@@ -231,21 +232,47 @@ def main() -> None:
 
     while True:
         clear_screen()
-        print("=" * 70)
-        print("          MCPHub 智能服务管理控制台 (Hermes Desktop 增强版)")
-        print("=" * 70)
+
+        # 动态自适应探测终端窗口尺寸并计算水平与垂直居中边距
+        term_cols, term_lines = shutil.get_terminal_size((80, 25))
+        box_width = min(72, max(52, term_cols - 2)) if term_cols < 76 else 72
+        left_margin = max(0, (term_cols - box_width) // 2)
+        pad = " " * left_margin
+
+        # 垂直居中呼吸感留白（当终端高度充裕时增加顶部空行）
+        top_padding = 2 if term_lines >= 28 else (1 if term_lines >= 24 else 0)
+        for _ in range(top_padding):
+            print()
+
+        # 绘制居中顶部标题框
+        print(f"{pad}{'=' * box_width}")
+        title = "MCPHub 智能服务管理控制台 (Hermes Desktop 增强版)"
+        title_display_width = sum(2 if ord(c) > 127 else 1 for c in title)
+        title_spaces = max(0, (box_width - title_display_width) // 2)
+        print(f"{pad}{' ' * title_spaces}{title}")
+        print(f"{pad}{'=' * box_width}")
         print()
-        print("  [1] 一键生成并查看 Hermes Desktop 挂载配置 (含本机真实绝对路径)")
-        print("  [2] 启动可视化引擎与能力配置向导 (GUI 界面)")
-        print("  [3] 快捷配置/编辑 API 密钥 (.env)")
-        print("  [4] 运行服务健康检查与全部测试套件 (54 项)")
-        print("  [5] 查看服务运行日志 (logs/gateway.log)")
-        print("  [6] 运行 Hermes MCP 连通性测试 (hermes mcp test MCPHub)")
+
+        # 舒展式菜单选项（每项之间适当留白拉开行距，极大提升阅读舒适度）
+        print(f"{pad}  [1] 一键生成并查看 Hermes Desktop 挂载配置 (含本机真实绝对路径)")
         print()
-        print("  [0] 退出控制台")
-        print("=" * 70)
+        print(f"{pad}  [2] 启动可视化引擎与能力配置向导 (GUI 界面)")
+        print()
+        print(f"{pad}  [3] 快捷配置/编辑 API 密钥 (.env)")
+        print()
+        print(f"{pad}  [4] 运行服务健康检查与全部测试套件 (54 项)")
+        print()
+        print(f"{pad}  [5] 查看服务运行日志 (logs/gateway.log)")
+        print()
+        print(f"{pad}  [6] 运行 Hermes MCP 连通性测试 (hermes mcp test MCPHub)")
+        print()
+        print(f"{pad}  [0] 退出控制台")
+        print()
+        print(f"{pad}{'=' * box_width}")
+        print()
+
         try:
-            choice = input("请输入选项编号 [0-6] 并按回车: ").strip()
+            choice = input(f"{pad}👉 请输入选项编号 [0-6] 并按回车: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n退出控制台。")
             break
@@ -264,10 +291,16 @@ def main() -> None:
             run_hermes_test()
         elif choice == "0":
             clear_screen()
-            print("感谢使用 MCPHub，服务管理控制台已退出。")
+            print()
+            print(f"{pad}感谢使用 MCPHub，服务管理控制台已退出。")
+            print()
             break
         else:
-            print("无效选项，请重新输入！")
+            print(f"\n{pad}⚠️  无效选项编号，请按回车键重新选择...", end="", flush=True)
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                break
 
 
 if __name__ == "__main__":

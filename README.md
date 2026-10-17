@@ -246,7 +246,7 @@ python mcp_gateway\gui_add_provider.py
 
 ## 更新记录
 
-### v1.5.1 — 默认引擎优先级调整（Exa 首选）与多源并发稳定排序
+### v1.5.1 — 默认引擎优先级调整（Exa 首选）、多源并发稳定排序与控制台排版美化
 
 - **搜索引擎执行优先级重构（Exa 优先策略）**：
   - `fallback_web_search`（单源回退搜索）与 `multi_web_search`（多源并发搜索）默认提供商调用优先级调整为：**Exa $\to$ AnySearch $\to$ Tavily $\to$ Jina AI $\to$ Bocha**。
@@ -255,6 +255,10 @@ python mcp_gateway\gui_add_provider.py
   - 网页全文深度提取工具递补顺位同步调整为：**Exa $\to$ AnySearch $\to$ Tavily $\to$ Jina AI Reader**（Bocha 仅提供搜索接口，不参与 URL 网页提取）。
 - **多源并发结果确定性排序保障（Deterministic Priority Fusion）**：
   - 优化 `multi_web_search` 并发搜集机制，在多线程异步获取结果后，显式基于引擎优先级进行稳定排序后再执行多源融合去重，确保 `active_providers` 列表与同权条目展示顺序严格对齐引擎优先级，彻底消除因各 API 响应延迟随机性导致的展示顺序漂移。
+- **服务管理控制台排版美化与自适应居中（Console UI Layout & Centering）**：
+  - 对 `MCPHub服务管理面板.bat` 与交互控制台进行排版升级，基于终端行列数动态计算边距，实现管理菜单卡片在视窗内的**水平与垂直双向自适应居中**；
+  - 适度拉开菜单选项间的行间距（Line Spacing），文字排版舒展呼吸感更强，显著改善阅读与操作体验；
+  - 增强窄屏防折行自适应保护机制，并在批处理入口中预设舒适视窗尺寸。
 - **全量测试套件扩增至 54 项**：
   - 新增 `test_provider_priority_ordering` 专项回归测试，覆盖配置文件优先级校验、连续故障递补顺序、并发多源结果列表顺序及正文提取回退链路，测试通过率 100%。
 
