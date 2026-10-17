@@ -777,87 +777,122 @@ class ExtractGateway(SearchGateway):
     # =========================================================================
     # 【功能块：计算目标 URL 与深度的磁盘缓存路径】
     # - 输入：url (str): 目标网页 URL；depth (str): 提取深度（basic 或 advanced）
-    # - 功能：对 URL 和 depth 进行 SHA-256 哈希，生成合法安全的文件名
-    # - 输出：Path 实例（指向该 URL 对应的本地缓存 .json 文件）
+    # - 功能：对 URL 和 depth 进行 SHA-256 哈希，生成元数据 JSON 与全文 Markdown 路径
+    # - 输出：tuple[Path, Path]: (meta_file, md_file)
     # =========================================================================
-    def _get_cache_path(self, url: str, depth: str) -> Path:
+    def _get_cache_keys(self, url: str, depth: str) -> tuple[Path, Path]:
         cache_key = f"{depth}:{url.strip()}"
         url_hash = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
-        return self.cache_dir / f"{url_hash}.json"
+        meta_file = self.cache_dir / f"{url_hash}.json"
+        md_file = self.cache_dir / f"{url_hash}.md"
+        return meta_file, md_file
 
     # =========================================================================
-    # 【功能块：读取本地磁盘缓存的网页正文】
+    # 【功能块：读取本地磁盘缓存的网页正文与元数据】
     # - 输入：url (str): 目标网页 URL；depth (str): 提取深度；max_characters (int): 字符截断限制
-    # - 功能：检查是否存在 30 分钟以内的有效本地缓存，若有效且未过期则格式化返回
-    # - 输出：dict[str, Any]（提取结果对象）或 None（未命中或已过期）
+    # - 功能：检查 30 分钟内有效的磁盘缓存；若命中，读取完整 Markdown 正文，
+    #         切片出 content，并附带 cached: True、cache_path 绝对路径及 read_file 翻页提示
+    # - 输出：dict[str, Any]（提取结果条目）或 None（未命中或已过期）
     # =========================================================================
     def _read_cache(self, url: str, depth: str, max_characters: int) -> dict[str, Any] | None:
         if self.cache_ttl <= 0:
             return None
-        cache_file = self._get_cache_path(url, depth)
-        if not cache_file.is_file():
+        meta_file, md_file = self._get_cache_keys(url, depth)
+        if not meta_file.is_file() or not md_file.is_file():
             return None
         try:
-            with cache_file.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            cached_at = float(data.get("cached_at", 0))
+            with meta_file.open("r", encoding="utf-8") as f:
+                meta = json.load(f)
+            cached_at = float(meta.get("cached_at", 0))
             if time.time() - cached_at > self.cache_ttl:
                 try:
-                    cache_file.unlink(missing_ok=True)
+                    meta_file.unlink(missing_ok=True)
+                    md_file.unlink(missing_ok=True)
                 except OSError:
                     pass
                 return None
-            if data.get("url") != url:
+            if meta.get("url") != url:
                 return None
-            title = data.get("title", "")
-            content = data.get("content", "")
-            was_truncated = bool(data.get("truncated", False))
-            if was_truncated and max_characters > len(content):
-                return None
-            provider = data.get("provider", "cache")
-            result = self._extract_result(url, title, content, max_characters)
-            result["provider"] = provider
-            return result
+
+            with md_file.open("r", encoding="utf-8") as f:
+                full_content = f.read()
+
+            title = meta.get("title", "")
+            provider = meta.get("provider", "cache")
+            total_chars = len(full_content)
+            truncated = total_chars > max_characters
+            cache_abs_path = str(md_file.resolve()).replace("\\", "/")
+            cached_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cached_at))
+
+            item: dict[str, Any] = {
+                "url": url,
+                "title": title,
+                "content": full_content[:max_characters],
+                "truncated": truncated,
+                "provider": provider,
+                "cached": True,
+                "cached_at": cached_time_str,
+                "cache_path": cache_abs_path,
+                "total_characters": total_chars,
+            }
+            if truncated:
+                item["paging_hint"] = (
+                    f"提示：页面正文过长已截断（当前显示前 {max_characters} 字符，全文共 {total_chars} 字符）。"
+                    f"完整全文已落盘保存，你可以直接使用 read_file 工具分页翻阅该文件：{cache_abs_path}"
+                )
+            return item
         except Exception as exc:
             self.logger.debug("读取提取缓存失败 [%s]: %s", url, exc)
             return None
 
     # =========================================================================
-    # 【功能块：写入网页提取结果至本地磁盘缓存】
+    # 【功能块：写入网页全文至本地 Markdown 文件与元数据 JSON】
     # - 输入：url (str): 目标网页 URL；depth (str): 提取深度；title (Any): 网页标题；
-    #         content (Any): 网页清洗正文；provider (str): 提供商标识；truncated (bool): 是否被截断
-    # - 功能：将成功的提取结果原子写入本地磁盘 JSON 文件，并记录时间戳
-    # - 输出：无（异常安全，写入失败仅打日志不阻断业务）
+    #         full_content (Any): 网页原始完整正文；provider (str): 提供商标识
+    # - 功能：将未截断的原始全文原子写入本地 .md 文件（供 read_file 翻页），
+    #         并将缓存时间与元数据写入 .json 文件
+    # - 输出：Path | None（写入成功的 Markdown 文件路径，失败返回 None）
     # =========================================================================
     def _write_cache(
         self,
         url: str,
         depth: str,
         title: Any,
-        content: Any,
+        full_content: Any,
         provider: str,
-        truncated: bool = False,
-    ) -> None:
-        if self.cache_ttl <= 0 or not content:
-            return
+    ) -> Path | None:
+        if self.cache_ttl <= 0 or not full_content:
+            return None
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            cache_file = self._get_cache_path(url, depth)
-            data = {
+            meta_file, md_file = self._get_cache_keys(url, depth)
+            full_text = str(full_content or "")
+
+            # 1. 写入全文 Markdown 文件（供 read_file 翻页或人类直接阅读）
+            temp_md = md_file.with_suffix(".tmp.md")
+            with temp_md.open("w", encoding="utf-8") as f:
+                f.write(full_text)
+            temp_md.replace(md_file)
+
+            # 2. 写入元数据 JSON 文件
+            meta_data = {
                 "url": url,
                 "depth": depth,
                 "title": str(title or ""),
-                "content": str(content or ""),
                 "provider": provider,
-                "truncated": truncated,
                 "cached_at": time.time(),
+                "total_characters": len(full_text),
+                "cache_file": md_file.name,
             }
-            temp_file = cache_file.with_suffix(".tmp")
-            with temp_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
-            temp_file.replace(cache_file)
+            temp_meta = meta_file.with_suffix(".tmp.json")
+            with temp_meta.open("w", encoding="utf-8") as f:
+                json.dump(meta_data, f, ensure_ascii=False)
+            temp_meta.replace(meta_file)
+
+            return md_file
         except Exception as exc:
             self.logger.debug("写入提取缓存失败 [%s]: %s", url, exc)
+            return None
 
     def extract(self, arguments: dict[str, Any]) -> dict[str, Any]:
         urls = arguments.get("urls")
@@ -922,17 +957,35 @@ class ExtractGateway(SearchGateway):
             returned_urls = set()
             for result in results:
                 url = result["url"]
-                if url in pending and result["content"]:
+                if url in pending and result.get("content"):
                     returned_urls.add(url)
-                    extracted.append({**result, "provider": provider_id})
-                    self._write_cache(
+                    raw_content = result.get("raw_content") or result.get("content") or ""
+                    written_md = self._write_cache(
                         url=url,
                         depth=depth,
                         title=result.get("title"),
-                        content=result.get("content"),
+                        full_content=raw_content,
                         provider=provider_id,
-                        truncated=bool(result.get("truncated", False)),
                     )
+                    cache_abs_path = str(written_md.resolve()).replace("\\", "/") if written_md else ""
+                    total_chars = len(str(raw_content))
+                    truncated = bool(result.get("truncated", False))
+                    item: dict[str, Any] = {
+                        "url": url,
+                        "title": result.get("title", ""),
+                        "content": result.get("content", ""),
+                        "truncated": truncated,
+                        "provider": provider_id,
+                        "cached": False,
+                        "cache_path": cache_abs_path,
+                        "total_characters": total_chars,
+                    }
+                    if truncated and cache_abs_path:
+                        item["paging_hint"] = (
+                            f"提示：页面正文过长已截断（当前显示前 {max_characters} 字符，全文共 {total_chars} 字符）。"
+                            f"完整全文已落盘保存，你可以直接使用 read_file 工具分页翻阅该文件：{cache_abs_path}"
+                        )
+                    extracted.append(item)
             pending -= returned_urls
 
         ordered = sorted(extracted, key=lambda item: unique_urls.index(item["url"]))
@@ -965,7 +1018,7 @@ class ExtractGateway(SearchGateway):
             items = data.get("results", [])
             return [self._extract_result(item.get("url"), item.get("title"), item.get("raw_content") or item.get("content"), max_characters) for item in items if isinstance(item, dict)]
         if engine_type == "exa":
-            data = self._post(endpoint, {"x-api-key": api_key}, {"ids": urls, "text": {"maxCharacters": max_characters}}, timeout)
+            data = self._post(endpoint, {"x-api-key": api_key}, {"ids": urls, "text": {"maxCharacters": max(max_characters, 100000)}}, timeout)
             items = data.get("results", [])
             return [self._extract_result(item.get("url"), item.get("title"), item.get("text") or item.get("content"), max_characters) for item in items if isinstance(item, dict)]
         if engine_type == "jina":
@@ -1023,7 +1076,13 @@ class ExtractGateway(SearchGateway):
     @staticmethod
     def _extract_result(url: Any, title: Any, content: Any, maximum: int) -> dict[str, Any]:
         body = str(content or "")
-        return {"url": str(url or ""), "title": str(title or ""), "content": body[:maximum], "truncated": len(body) > maximum}
+        return {
+            "url": str(url or ""),
+            "title": str(title or ""),
+            "content": body[:maximum],
+            "truncated": len(body) > maximum,
+            "raw_content": body,
+        }
 
     @staticmethod
     def _validate_public_url(url: str) -> None:

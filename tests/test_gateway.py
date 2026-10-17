@@ -409,8 +409,8 @@ class ExtractGatewayTest(unittest.TestCase):
     # 【功能块：测试网页正文提取本地落盘缓存命中（30分钟内免网络请求）】
     # - 输入：同个网页 URL 的两次连续 extract 调用请求
     # - 功能：验证首次请求成功后正文自动写入本地磁盘缓存，第二次请求在 30 分钟内直接读取磁盘缓存，
-    #         不触发任何远端服务商网络调用（call_count 保持为 1）
-    # - 输出：断言验证两次返回内容一致，且底层网络请求次数不递增
+    #         不触发任何远端服务商网络调用（call_count 保持为 1），并正确返回 cached 命中状态与绝对路径
+    # - 输出：断言验证两次返回内容一致，底层网络请求次数不递增，cached 标识由 False 变为 True
     # =========================================================================
     def test_extract_disk_cache_hits_within_ttl(self):
         tmp_dir = Path(tempfile.mkdtemp())
@@ -430,12 +430,16 @@ class ExtractGatewayTest(unittest.TestCase):
             self.assertEqual(1, extract_mock.call_count)
             self.assertEqual("Cached Content Body", res1["results"][0]["content"])
             self.assertEqual("exa", res1["results"][0]["provider"])
+            self.assertFalse(res1["results"][0]["cached"])
+            self.assertTrue(Path(res1["results"][0]["cache_path"]).is_file())
 
             # 第二次调用（相同 URL）：命中本地落盘缓存，不应调用服务商网络接口
             res2 = gateway.extract({"urls": ["https://example.com"]})
             self.assertEqual(1, extract_mock.call_count)
             self.assertEqual("Cached Content Body", res2["results"][0]["content"])
             self.assertEqual("exa", res2["results"][0]["provider"])
+            self.assertTrue(res2["results"][0]["cached"])
+            self.assertEqual(res1["results"][0]["cache_path"], res2["results"][0]["cache_path"])
 
     # =========================================================================
     # 【功能块：测试网页正文提取本地落盘缓存过期（超过30分钟重新请求）】
@@ -468,6 +472,48 @@ class ExtractGatewayTest(unittest.TestCase):
             # 第二次调用：缓存过期，应当重新请求服务商
             gateway.extract({"urls": ["https://example.com"]})
             self.assertEqual(2, extract_mock.call_count)
+
+    # =========================================================================
+    # 【功能块：测试全文落盘与供 read_file 翻页指引特性】
+    # - 输入：单页正文长度为 5000 字符的长网页，且请求限定 max_characters=1000
+    # - 功能：验证返回的 content 精准截断至 1000 字符，而磁盘 cache_path 文件完整保留了 5000 字符全文，
+    #         并生成了包含 read_file 绝对路径的翻页引导提示
+    # - 输出：各字段与磁盘文件全文断言均匹配
+    # =========================================================================
+    def test_extract_full_text_persisted_for_paging(self):
+        tmp_dir = Path(tempfile.mkdtemp())
+        gateway = ExtractGateway(
+            {"cooldown_seconds": 60, "cache_ttl_seconds": 1800, "providers": [
+                {"id": "exa", "enabled": True, "priority": 10, "api_key_env": "EXA_API_KEY", "endpoint": "https://example.test/exa"},
+            ]},
+            tmp_dir / "state.json",
+            FakeLogger(),
+        )
+        full_text = "PythonArticleParagraph " * 200  # 约 4600 字符
+        fake_res = [{
+            "url": "https://example.com/long-page",
+            "title": "Long Page Title",
+            "content": full_text[:1000],
+            "truncated": True,
+            "raw_content": full_text,
+        }]
+        with patch.dict(os.environ, {"EXA_API_KEY": "test-key"}, clear=False), \
+             patch.object(gateway, "_validate_public_url"), \
+             patch.object(gateway, "_extract", return_value=fake_res):
+            res = gateway.extract({"urls": ["https://example.com/long-page"], "max_characters": 1000})
+
+        item = res["results"][0]
+        self.assertTrue(item["truncated"])
+        self.assertEqual(1000, len(item["content"]))
+        self.assertEqual(len(full_text), item["total_characters"])
+        self.assertIn("paging_hint", item)
+        self.assertIn("read_file", item["paging_hint"])
+
+        # 核心断言：本地磁盘文件必须完整存储了全部 4600 字符的原始全文，供 read_file 随时翻页阅读
+        cache_file = Path(item["cache_path"])
+        self.assertTrue(cache_file.is_file())
+        self.assertEqual(".md", cache_file.suffix)
+        self.assertEqual(full_text, cache_file.read_text(encoding="utf-8"))
 
 
 class SearchCooldownTest(unittest.TestCase):

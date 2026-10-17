@@ -243,8 +243,9 @@ python mcp_gateway\gui_add_provider.py
 - `max_characters`（每页 1,000–100,000 字符，默认 10,000）。
 
 特性与策略：
-- **30 分钟本地落盘缓存**：成功提取的正文会自动写入本地缓存（`state/extract_cache/`，默认 TTL 1,800 秒），在有效期内重复提取相同 URL 直接秒级返回，避免重复消耗外部 API 额度；
-- **智能截断与安全校验**：返回每个页面的 `url`、`title`、清洗后的 `content`、`truncated` 和实际处理它的 `provider`。不可提取的 URL 会列在 `unresolved_urls`，不影响同一批其他 URL 的结果；
+- **全文真实落盘与 `read_file` 翻页联动**：远端抓取的未截断 Markdown 原始正文会完整存入本地 `state/extract_cache/<hash>.md` 文件，返回结果中提供绝对路径 `cache_path`。当页面超出 `max_characters` 被截断时（`truncated: true`），系统自动注入 `paging_hint` 翻页指引，引导大模型直接调用内置 `read_file` 分页精读，零额外 API 消耗；
+- **透明的命中可辨识设计**：返回条目包含显式的 `cached: true / false` 状态标识及 `cached_at`（如 `2026-10-17 16:45:00`）和 `total_characters`（全文字符量），调用端可一目了然区分实时抓取与磁盘缓存命中；
+- **30 分钟生命周期管理**：默认 TTL 1,800 秒（支持在 `search.json` 中自定义 `cache_ttl_seconds`），超时自动失效清理；
 - **SSRF 深度防护**：网关拒绝 localhost、私有/保留地址、含用户信息的 URL 与非 80/443 端口。
 
 ## 🔍 通道健康探活与诊断取证（可选扩展体系）
