@@ -24,6 +24,15 @@ set -u
 AUTO_USER_HOME="${USERPROFILE:-${HOME:-C:/Users/Timber}}"
 AUTO_USER_HOME="${AUTO_USER_HOME//\\//}"
 BASE="${HERMES_HOME_BASE:-$AUTO_USER_HOME/AppData/Local/hermes}"
+BASE="${BASE//\\//}"
+
+# 严格抗注入校验：阻断包含路径穿越符 (..) 的非法环境变量
+case "$BASE" in
+  *..*)
+    echo "FAIL  非法的 HERMES_HOME_BASE 路径（禁止路径穿越）: $BASE"
+    exit 1
+    ;;
+esac
 
 PROF="${1:-default}"
 
