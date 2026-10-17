@@ -211,7 +211,7 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
 - **精准启停判据**：智能排查 `logs/mcp-stderr.log` 中当日最后一条 MCPHub 启动记录，排除历史遗留报错干扰；
 - **缓存健康检测**：实时核对 `mcp_schema_cache.json` 工具模式定义缓存是否为当日最新更新。
 
-### 2. Hermes 专属探针与取证 Skill（`probe_mcphub/mcphub-probe`）
+### 2. Hermes 专属探针与取证 Skill（`mcphub-probe`）
 专为 Hermes Agent 打造的诊断技能包（符合 Hermes Skill 标准规范）：
 - **首轮强制验活**：在 Agent 执行检索任务首轮前自动调度共享探活脚本与轻量 `no-op` 检索验证；
 - **通道调用取证**：详尽规定了基于 `state.db` 的真实执行后端标签识别标准（区分 MCPHub 的 `provider` / `active_providers` 与内置链的 `served_by`），以及基于 `agent.log` 的耗时分析指南（详见 `references/channel-forensics.md`）。
@@ -283,7 +283,7 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
   - 支持多 Profile 环境自适应探活，兼容不同 Windows 用户目录（`${USERPROFILE}`）与任意盘符（`C:`/`D:`/`E:`）；
   - 聚焦当日最后一次网关启动记录有无路径错误，历史故障记为背景不参与致命阻断；
   - 强制通过 `.gitattributes` 确立 LF 换行规则，规避 Windows 环境下 CRLF 导致的 Bash 语法异常。
-- **Hermes 专属探针与取证 Skill（`probe_mcphub/mcphub-probe`）**：
+- **Hermes 专属探针与取证 Skill（`mcphub-probe`）**：
   - 规范首轮轻量 `no-op` 验活流程，明确单源（`provider`）与多源并发（`active_providers`）健康判定准则；
   - 包含 SQLite 数据库（`state.db`）与运行日志（`agent.log`）多源交叉取证指导规范。
 
