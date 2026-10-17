@@ -1,4 +1,4 @@
-# Local MCP Search Fallback Gateway (v1.5.1)
+# Local MCP Search Fallback Gateway (v1.5.2)
 
 一个给 Hermes Desktop 使用的本地 MCP 搜索聚合器。它向 Hermes 暴露
 `fallback_web_search`（单源经济型回退搜索）、`multi_web_search`（多源并发聚合融合搜索）
@@ -20,17 +20,64 @@
 正文提取工具使用 Exa → AnySearch → Tavily → Jina AI Reader。Bocha 的 Web Search API 仅返回搜索结果
 和摘要，因此不会用于任意 URL 正文提取。
 
-## 目录与配置
+## 👥 适用用户分级指南（User Tiered Guide）
 
-`config\gateway.json` 是入口配置，支持通配符（如 `providers\*.json`）自适应发现所有配置。搜索服务清单在
-`config\providers\search.json`。API 密钥在 `config\.env`，密钥文件不应提交或分享。
+为了兼顾不同用户的使用偏好，MCPHub 采用**“核心极简高可用、外挂扩展按需装”**的双轨制分级架构：
 
-每个 provider 的 `priority` 决定递补顺序；`enabled: false` 可临时停用服务。系统采用具有自我感知能力的**分级智能冷却与双重自适应解冻机制**：
-- **短时频率限流（429 / 网络抖动）**：冷却 `cooldown_seconds`（默认 1 小时 / 3600 秒），到期自动恢复；
-- **月度配额耗尽（402 / 432 / 余额不足）**：冷却 `quota_cooldown_seconds`（默认 3 天 / 259200 秒），杜绝频繁试探骚扰；
-- **月初跨月自适应复活**：自动识别日历跨月，新自然月到来时自动解冻上月因配额耗尽沉睡的服务（月度免费额度已重置），无需任何人工干预；
-- **密钥变更自适应解冻**：在 `config\.env` 中为某个服务更换了新 API Key 后，网关自动识别并秒级清除历史冷却复活服务，无需手动删除任何状态文件。
-冷却状态持久化保存在 `state\provider-state.json`，重启 Hermes 后也会完好保留。
+| 用户层级 | 推荐模式 | Skill 安装要求 | 运行特征与体验收益 |
+| :--- | :--- | :--- | :--- |
+| **L1 普通用户 / 极简主义者**<br>*(默认推荐，绝大多数用户)* | **核心极简高可用模式**<br>(Simple & Clean) | **完全不安装任何 Skill**<br>*(零文件复制，免去 mcphub-probe)* | • **零记忆注入**：大模型上下文（Prompt / Memory）100% 保持原生纯净；<br>• **零冗余耗时**：搜索直接发起，绝不执行外部探活脚本，零多余 Token；<br>• **开箱即用**：MCPHub 原生自带 Exa $\to$ AnySearch $\to$ Tavily $\to$ Jina $\to$ Bocha 毫秒级故障自动轮换与跨月解冻。 |
+| **L2 进阶用户 / 开发者 / 运维排查**<br>*(可选外挂)* | **按需取证诊断模式**<br>(Advanced Diagnostics) | **选择性将 `mcphub-probe` 复制部署至 Hermes 的 `skills` 目录** | • **按需唤醒机制**：日常搜索 100% 静默免测；仅在用户显式提问或多源连续失败时触发；<br>• **通道深度取证**：可按需溯源单次检索的真实执行后端、耗时与返回体积（详见 `references/channel-forensics.md`）；<br>• **安全闭环护航**：具备固定探针防 Prompt 诱导、只读不可变连接与凭据脱敏防线。 |
+
+## 📁 目录与配置（Directory & Configuration）
+
+整个项目的标准工程目录结构如下：
+
+```text
+MCPHub/
+├── mcp_gateway/                 # MCPHub 本地服务网关核心源码
+│   ├── server.py                # MCP JSON-RPC 协议驱动与动态工具调度
+│   ├── search.py                # 搜索引擎适配器、分级冷却与多源融合算法
+│   ├── console.py               # 交互式管理控制台核心驱动
+│   ├── gui_add_provider.py      # Tkinter 原生可视化配置向导
+│   └── hermes_helper.py         # 真实绝对路径探测与挂载片段生成器
+├── config/                      # 配置文件目录
+│   ├── gateway.json             # 网关总入口配置（支持通配符扫描）
+│   ├── providers/               # 能力分类配置目录
+│   │   └── search.json          # 搜索引擎清单与优先级排布配置
+│   ├── .env                     # 本地 API 密钥文件（需自行配置，勿提交）
+│   └── .env.example             # 密钥模板文件
+├── scripts/                     # 共享运维与环境健康探活脚本目录
+│   └── probe_mcphub.sh          # 跨平台通用探活脚本（支持多Profile自适应）
+├── mcphub-probe/                # 【可选外挂】Hermes 专属探针与取证 Skill 技能包
+│   ├── SKILL.md                 # 技能定义与按需唤醒调度规程
+│   └── references/              # 取证规范指南（包含 channel-forensics.md）
+├── logs/                        # 运行日志目录（gateway.log）
+├── state/                       # 状态持久化目录（provider-state.json 冷却状态）
+├── tests/                       # 54 项全量自动化单元测试套件
+├── MCPHub服务管理面板.bat          # Windows 双击即用一键管理控制台
+├── README.md                    # 项目全景使用与配置文档
+├── LICENSE                      # MIT 开源许可证
+└── .gitattributes               # 行尾换行符规则（.bat强制CRLF，.sh强制LF）
+```
+
+### 核心目录与配置项详解
+
+1. **`config/`（配置中心）**：
+   - `config\gateway.json` 是主入口配置，支持通配符（如 `providers\*.json`）自适应发现所有配置能力；
+   - `config\providers\search.json` 记录搜索提供商清单、端点、优先级以及超时参数；
+   - `config\.env` 存放各引擎 API 密钥（可由 `.env.example` 复制生成），由网关运行时安全读取。
+2. **`scripts/`（共享运维脚本）**：
+   - 存放跨平台环境自检与探活脚本（如 `probe_mcphub.sh`），负责自动化排查当前环境的 `config.yaml` 挂载路径、服务最后启动状态与工具缓存健康度，具备跨用户目录自适应与防注入加固。
+3. **`mcphub-probe/`（可选外挂技能包）**：
+   - 专为 Hermes Agent 打造的进阶诊断包，解耦放置在第一层，进阶用户可按需部署至 Hermes 的 `skills/` 目录。
+4. **`state/`（持久化状态）**：
+   - 每个 provider 的 `priority` 决定递补顺序；`enabled: false` 可临时停用服务。系统采用具有自我感知能力的**分级智能冷却与双重自适应解冻机制**：
+     - **短时频率限流（429 / 网络抖动）**：冷却 `cooldown_seconds`（默认 1 小时 / 3600 秒），到期自动恢复；
+     - **月度配额耗尽（402 / 432 / 余额不足）**：冷却 `quota_cooldown_seconds`（默认 3 天 / 259200 秒），杜绝频繁试探骚扰；
+     - **月初跨月自适应复活**：自动识别日历跨月，新自然月到来时自动解冻上月因配额耗尽沉睡的服务（月度免费额度已重置），无需任何人工干预；
+     - **密钥变更自适应解冻**：在 `config\.env` 中为某个服务更换了新 API Key 后，网关自动识别并秒级清除历史冷却复活服务，无需手动删除任何状态文件。
+   - 冷却状态持久化保存在 `state\provider-state.json`，重启 Hermes 后也会完好保留。
 
 ## 🚀 极速上手：双击即可使用的服务管理控制台
 
@@ -274,6 +321,22 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
 
 ## 更新记录
 
+### v1.5.2 — 跨平台环境探活体系、Hermes 专属取证 Skill 与双轨制可选分级架构
+
+- **新增适用用户分级架构（User Tiered Architecture）**：
+  - **L1 普通用户（极简高可用模式，默认推荐）**：架构完全物理解耦，零 Skill 侵入，无需复制任何技能包文件，直接纯净享受毫秒级开箱即用的多源轮换搜索（Exa $\to$ AnySearch $\to$ Tavily $\to$ Jina $\to$ Bocha）；
+  - **L2 进阶用户（按需诊断模式，可选外挂）**：可选将 `mcphub-probe` 部署至 Hermes 的 `skills` 目录，日常搜索 100% 静默免测，仅在显式诊断指令或连续失败时受控激活。
+- **跨平台通用环境探活体系（`scripts/probe_mcphub.sh`）**：
+  - 支持多 Profile 环境自适应探活，自适应兼容 Windows 用户目录（`${USERPROFILE}`）与任意盘符（`C:`/`D:`/`E:`）；
+  - 聚焦当日最后一次网关启动记录有无路径错误，历史故障记为背景不参与致命阻断；
+  - 强制通过 `.gitattributes` 确立 LF 换行规则，规避 Windows 环境下 CRLF 导致的 Bash 语法异常；
+  - **全闭环抗注入加固**：Profile 参数与 Base 路径强制执行字符白名单校验与路径穿越拦截（`*..*`），行号提取增加严格纯数字校验，杜绝 Bash 算术畸变执行。
+- **Hermes 专属探针与取证 Skill（`mcphub-probe`，可选外挂）**：
+  - 扁平化架构设计，移除多余外层套娃包装目录，一键直达安装；
+  - 规范轻量 `no-op` 验活流程，统一使用固定安全探针词 `"ping"` 防范提示注入；
+  - 包含 SQLite 数据库（`state.db`）与运行日志（`agent.log`）多源交叉取证指导规范；
+  - 建立完善的防 SQL 注入、只读不可变连接（`mode=ro&immutable=1`）与凭据脱敏防线，阻断敏感信息泄露进 Agent 长期记忆（Memory）。
+
 ### v1.5.1 — 默认引擎优先级调整（Exa 首选）、多源并发稳定排序与控制台排版美化
 
 - **搜索引擎执行优先级重构（Exa 优先策略）**：
@@ -289,16 +352,6 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
   - 增强窄屏防折行自适应保护机制，并在批处理入口中预设舒适视窗尺寸。
 - **全量测试套件扩增至 54 项**：
   - 新增 `test_provider_priority_ordering` 专项回归测试，覆盖配置文件优先级校验、连续故障递补顺序、并发多源结果列表顺序及正文提取回退链路，测试通过率 100%。
-- **跨平台通用环境探活脚本（`scripts/probe_mcphub.sh`）**：
-  - 支持多 Profile 环境自适应探活，兼容不同 Windows 用户目录（`${USERPROFILE}`）与任意盘符（`C:`/`D:`/`E:`）；
-  - 聚焦当日最后一次网关启动记录有无路径错误，历史故障记为背景不参与致命阻断；
-  - 强制通过 `.gitattributes` 确立 LF 换行规则，规避 Windows 环境下 CRLF 导致的 Bash 语法异常；
-  - 内置严格 Profile 字符白名单与行号纯数字校验，彻底阻断路径穿越、Shell 元字符注入与算术畸变执行。
-- **Hermes 专属探针与取证 Skill（`mcphub-probe`，可选外挂）**：
-  - 架构完全物理解耦，零侵入核心网关；日常搜索绝不打扰，仅在显式诊断指令或连续失败时按需触发；
-  - 规范轻量 `no-op` 验活流程，统一使用固定安全探针词 `"ping"` 防范提示注入；
-  - 包含 SQLite 数据库（`state.db`）与运行日志（`agent.log`）多源交叉取证指导规范；
-  - 建立完善的防 SQL 注入、只读不可变连接与凭据脱敏防线，阻断敏感信息泄露进 Agent 长期记忆（Memory）。
 
 ### v1.5.0 — 可视化服务管理面板、原生 GUI 配置向导与自定义扩展能力体系
 
