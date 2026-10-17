@@ -36,7 +36,9 @@ metadata:
 
 ## 失效判据（诊断口径）
 - 返回体出现 `rescued_from` / `backend_error`（内置链），或单源 `provider` ≠ 首选 `exa` / 并发 `active_providers` 不含 `exa`（MCPHub 链）→ **该次未走主后端**。
-- **`provider_failures` 非空 ≠ 通道失效**：链式 fallback 会继续试，只要最终 `provider` 有值即成功；**只有多 provider 全失败、返回体无 `provider` 才算链路失效**。
+- **`provider_failures` 非空 ≠ 通道失效**：链式 fallback 会继续尝试下一个引擎，只要最终 `provider` 有值即代表成功（可能走了兜底，看 `provider_failures`）；**调用直接报错 `No search provider was available` / `No search provider succeeded` ⇒ 链路失效**。（全失败时工具直接抛出异常中断，根本不会存在“没有 provider 的返回体”）。
+- **跳过原因诊断**：无密钥的 provider 会被记为 `API key is not configured` 并跳过（`anysearch`、`jina` 允许匿名免密，不在此列）—— 诊断“为什么跳过了某家引擎”时看此条。
+- **冷却原因与恢复预估**：冷却原因分两类记录在 `provider_failures[].reason`：`quota`（配额耗尽 → 冷却 3 天）与 `rate_limit`（频控触发 → 冷却 1 小时），探针据此可向用户计算并精准汇报“还有 N 分钟恢复”。
 - 单任务「未走主后端」比例 **≥ 50%** → 判定通道失效（换道动作见 `search-channel-routing`，本 skill 只负责判）。
 - Tavily 配额耗尽（HTTP 432）→ 3 天冷却（`quota_cooldown_seconds: 259200`）属**预期内降级，不是故障**，不要因此回退内置。
 

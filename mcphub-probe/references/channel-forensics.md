@@ -31,7 +31,7 @@ FROM messages WHERE session_id='<id>' ORDER BY id;
 
 - **参数不在 tool 行上**。`role='tool'` 只有返回体；调用参数在被调函数前一条 `assistant` 消息的 `tool_calls` JSON 里，按 `tool_call_id` 关联。要回答「当时到底查了什么词」，必须回填这一步。
 - **后端标签在返回体里**：
-  - **MCPHub 网关链**：单源 `fallback_web_search` 匹配 `"provider":"<provider_id>"`（如 `"provider":"exa"`）；多源并发 `multi_web_search` 匹配 `"active_providers":["exa", ...]`；
+  - **MCPHub 网关链**：后端标签是 `provider`（实际服务方）、`provider_failures`（被跳过引擎+原因）、`active_providers`（`multi_web_search` 的贡献引擎）、`total_sources_queried` —— 与内置链的 `served_by` / `rescued_from` 是两套字段，别混；单源 `fallback_web_search` 匹配 `"provider":"<provider_id>"`（如 `"provider":"exa"`），多源并发 `multi_web_search` 匹配 `"active_providers":["exa", ...]`；
   - **内置检索链**：匹配 `"served_by":"<provider>"`、`"rescued_from":"<provider>"`、`"backend_error"`。
   直接标明这次由谁执行、是否走了兜底。按 provider 分组计数即得通道健康度。
 - **会话 id 里的时间戳是预分配**。`started_at` 字段（首条用户消息时间）才是任务起点。
