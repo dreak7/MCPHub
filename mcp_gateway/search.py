@@ -817,6 +817,9 @@ class ExtractGateway(SearchGateway):
             with md_file.open("r", encoding="utf-8") as f:
                 full_content = f.read()
 
+            if not full_content or not full_content.strip():
+                return None
+
             title = meta.get("title", "")
             provider = meta.get("provider", "cache")
             total_chars = len(full_content)
@@ -850,7 +853,8 @@ class ExtractGateway(SearchGateway):
     # - 输入：url (str): 目标网页 URL；depth (str): 提取深度；title (Any): 网页标题；
     #         full_content (Any): 网页原始完整正文；provider (str): 提供商标识
     # - 功能：将未截断的原始全文原子写入本地 .md 文件（供 read_file 翻页），
-    #         并将缓存时间与元数据写入 .json 文件
+    #         并将缓存时间与元数据写入 .json 文件；采用 PID 与纳秒级时间戳生成唯一临时文件，
+    #         彻底消除多进程/多线程并发写入时的文件冲突
     # - 输出：Path | None（写入成功的 Markdown 文件路径，失败返回 None）
     # =========================================================================
     def _write_cache(
@@ -863,13 +867,19 @@ class ExtractGateway(SearchGateway):
     ) -> Path | None:
         if self.cache_ttl <= 0 or not full_content:
             return None
+        temp_md: Path | None = None
+        temp_meta: Path | None = None
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             meta_file, md_file = self._get_cache_keys(url, depth)
             full_text = str(full_content or "")
+            if not full_text.strip():
+                return None
+
+            unique_id = f"{os.getpid()}_{time.time_ns()}"
 
             # 1. 写入全文 Markdown 文件（供 read_file 翻页或人类直接阅读）
-            temp_md = md_file.with_suffix(".tmp.md")
+            temp_md = self.cache_dir / f"{md_file.stem}_{unique_id}.tmp.md"
             with temp_md.open("w", encoding="utf-8") as f:
                 f.write(full_text)
             temp_md.replace(md_file)
@@ -884,7 +894,7 @@ class ExtractGateway(SearchGateway):
                 "total_characters": len(full_text),
                 "cache_file": md_file.name,
             }
-            temp_meta = meta_file.with_suffix(".tmp.json")
+            temp_meta = self.cache_dir / f"{meta_file.stem}_{unique_id}.tmp.json"
             with temp_meta.open("w", encoding="utf-8") as f:
                 json.dump(meta_data, f, ensure_ascii=False)
             temp_meta.replace(meta_file)
@@ -892,6 +902,12 @@ class ExtractGateway(SearchGateway):
             return md_file
         except Exception as exc:
             self.logger.debug("写入提取缓存失败 [%s]: %s", url, exc)
+            for stray in (temp_md, temp_meta):
+                if stray is not None:
+                    try:
+                        stray.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             return None
 
     def extract(self, arguments: dict[str, Any]) -> dict[str, Any]:

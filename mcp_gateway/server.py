@@ -199,8 +199,10 @@ class McpServer:
         if not isinstance(tool_name, str) or tool_name not in self.tools:
             available = ", ".join(self.tools.keys())
             return self._error(request_id, -32602, f"Unknown tool: {tool_name}. Available: {available}")
-        arguments = params.get("arguments", {})
-        if not isinstance(arguments, dict):
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        elif not isinstance(arguments, dict):
             return self._error(request_id, -32602, "arguments must be an object")
 
         tool = self.tools[tool_name]
