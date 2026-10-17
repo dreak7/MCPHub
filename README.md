@@ -198,9 +198,16 @@ python mcp_gateway\gui_add_provider.py
 它返回每个页面的 `url`、`title`、清洗后的 `content`、`truncated` 和实际处理它的 `provider`。不可提取的 URL 会列在 `unresolved_urls`，不影响同一批其他 URL 的结果。
 为避免 SSRF，网关拒绝 localhost、私有/保留地址、含用户信息的 URL 与非 80/443 端口。
 
-## 🔍 通道健康探活与诊断取证（Health Probe & Forensics）
+## 🔍 通道健康探活与诊断取证（可选扩展体系）
 
-为防范检索服务在长期运行中的“静默降级”或“无感失效”，MCPHub 原生提供两套协同运作的自检与诊断体系：
+MCPHub 始终坚持**“核心极简高可用、外设插件零侵入”**的设计哲学。探活与诊断体系被设计为**完全可选的独立外挂包**，充分尊重不同用户的使用习惯：
+
+- **模式 A：极简高可用模式（默认推荐，零 Skill 侵入）**：
+  - 如果你希望保持系统最纯粹、零额外 Token 消耗、避免任何外部 Skill 注入记忆上下文，你**完全不需要安装或复制任何 Skill 文件**；
+  - MCPHub 核心网关（`mcp_gateway`）本身已原生具备高可用容错链（Exa → AnySearch → Tavily → Jina → Bocha）与自动解冻机制，日常搜索开箱即用，极速稳定。
+- **模式 B：进阶运维与取证模式（可选安装）**：
+  - 如果你需要大模型具备自我诊断、通道取证与故障追溯能力，可选择将 `mcphub-probe` 部署至 Hermes 的 `skills` 目录；
+  - 即使安装了该技能，它也严格遵循**“按需唤醒（On-Demand）”**原则：日常正常搜索时完全静默不打扰，仅在用户明确提问（如“排查通道状态”）或遭遇连续严重异常时才唤醒。
 
 ### 1. 通用环境探活脚本（`scripts/probe_mcphub.sh`）
 在终端（Git Bash 或 Linux 环境）中执行，支持针对指定 Profile 运行全生命周期健康探活：
@@ -212,9 +219,10 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
 - **缓存健康检测**：实时核对 `mcp_schema_cache.json` 工具模式定义缓存是否为当日最新更新；
 - **抗注入安全闭环**：Profile 参数强制执行字符白名单校验（仅允许 `[a-zA-Z0-9_.-]`），彻底阻断路径穿越（`..`）与命令注入；行号提取增加严格纯数字校验，杜绝 Bash 算术畸变执行。
 
-### 2. Hermes 专属探针与取证 Skill（`mcphub-probe`）
-专为 Hermes Agent 打造的诊断技能包（符合 Hermes Skill 标准规范）：
-- **首轮强制验活**：在 Agent 执行检索任务首轮前自动调度共享探活脚本与轻量 `no-op` 检索验证，统一使用固定无害探活词 `"ping"` 阻断提示注入；
+### 2. Hermes 专属探针与取证 Skill（`mcphub-probe`，可选外挂）
+专为需要高级诊断能力的用户打造（符合 Hermes Skill 标准规范）：
+- **按需静默原则**：日常搜索绝不主动触发探针，仅在显式诊断指令或连续失败时按需激活；
+- **固定安全探针**：受控 `no-op` 验活统一使用固定无害探活词 `"ping"`，杜绝提示注入；
 - **通道调用取证**：详尽规定了基于 `state.db` 的真实执行后端标签识别标准（区分 MCPHub 的 `provider` / `active_providers` 与内置链的 `served_by`），以及基于 `agent.log` 的耗时分析指南（详见 `references/channel-forensics.md`）；
 - **防 Memory 污染与凭据脱敏**：数据库连接强制使用 `mode=ro&immutable=1` 只读模式并对 `session_id` 实施防 SQL 注入强校验，回填取证参数与告警留痕严格执行敏感信息脱敏，杜绝私密凭据泄露进大模型长期记忆。
 
@@ -286,8 +294,9 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
   - 聚焦当日最后一次网关启动记录有无路径错误，历史故障记为背景不参与致命阻断；
   - 强制通过 `.gitattributes` 确立 LF 换行规则，规避 Windows 环境下 CRLF 导致的 Bash 语法异常；
   - 内置严格 Profile 字符白名单与行号纯数字校验，彻底阻断路径穿越、Shell 元字符注入与算术畸变执行。
-- **Hermes 专属探针与取证 Skill（`mcphub-probe`）**：
-  - 规范首轮轻量 `no-op` 验活流程，统一使用固定安全探针词 `"ping"` 防范提示注入；
+- **Hermes 专属探针与取证 Skill（`mcphub-probe`，可选外挂）**：
+  - 架构完全物理解耦，零侵入核心网关；日常搜索绝不打扰，仅在显式诊断指令或连续失败时按需触发；
+  - 规范轻量 `no-op` 验活流程，统一使用固定安全探针词 `"ping"` 防范提示注入；
   - 包含 SQLite 数据库（`state.db`）与运行日志（`agent.log`）多源交叉取证指导规范；
   - 建立完善的防 SQL 注入、只读不可变连接与凭据脱敏防线，阻断敏感信息泄露进 Agent 长期记忆（Memory）。
 

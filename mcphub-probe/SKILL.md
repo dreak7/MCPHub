@@ -1,26 +1,28 @@
 ---
 name: mcphub-probe
-description: "Use to probe or diagnose the MCPHub search gateway health. MCPHub 探活与取证。"
+description: "Optional on-demand diagnostic skill for MCPHub. Triggered ONLY by explicit user request or continuous search failures. MCPHub 可选按需探活与取证。"
 version: 1.0.0
 author: Hermes Agent
 license: MIT
 platforms: [windows]
 metadata:
   hermes:
-    tags: [Search, MCP, MCPHub, probe, diagnostics, forensics, timing]
+    tags: [Search, MCP, MCPHub, probe, diagnostics, forensics, timing, optional]
     related_skills: [search-channel-routing]
 ---
 
-# MCPHub 探针与取证
+# MCPHub 探针与取证（可选进阶扩展包）
 
-通道层诊断专用：**探活、失效判定、耗时取证**。应用/操作规定（四段路由、调用方式、换道动作）见 `search-channel-routing` —— 本 skill 只回答"通道现在好不好、刚才那次走了哪个后端"。
+通道层诊断专用：**按需探活、失效判定、耗时取证**。
+⚠️ **核心定位**：本 Skill 是 MCPHub 的**可选外挂诊断工具**。MCPHub 核心网关本身已具备高可用容错链（Exa → AnySearch → Tavily → Jina → Bocha），日常正常检索时**完全无需介入，零干预、零延迟**。
 
-## When to Use
-- 每个检索任务**首轮**先探活（防静默失效）
-- 检索结果可疑 / 来源集中 / 多次重试才拿到 / 用户追问"这条数据从哪来、花了多久"
-- 需要还原某次调用实际走了哪个后端
+## When to Use（何时唤醒）
+- **日常检索静默**：日常查询时**绝对不要主动运行探活**，直接发起搜索，保证最快的响应速度与纯净上下文；
+- **仅在以下两种情况按需触发**：
+  1. **用户明确要求**：用户明确发出探活或诊断指令（如：“检查搜索通道”、“MCPHub 还活着吗？”、“刚才的数据来自哪家引擎”）；
+  2. **严重链路异常**：在当前任务中遭遇搜索多源连续报错或多源全部失败时，Agent 主动唤醒排查根因。
 
-## 探活规程（每个检索任务首轮必做）
+## 探活规程（按需触发，日常检索免测）
 1. 跑共享探活脚本（**唯一脚本**，各 profile 通用；脚本路径可从 Hermes 的 `config.yaml` 中 `MCPHub` 节点的网关路径解析其同级的 `scripts/`，或直接使用实际安装路径）：
    ```bash
    bash "<MCPHub安装目录>/scripts/probe_mcphub.sh" <profile>    # default 可省略
