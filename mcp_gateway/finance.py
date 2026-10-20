@@ -187,6 +187,9 @@ CASHFLOW_FIELDS_NON_FINANCE: dict[str, str] = {
 # =========================================================================
 def infer_market_setcode(symbol: str) -> str:
     clean_sym = symbol.strip().upper()
+    # 港股标的 (5位纯数字或带有 HK 前缀，如 00700, 09988, HK00700)
+    if clean_sym.startswith("HK") or (clean_sym.isdigit() and len(clean_sym) == 5):
+        return "31"
     # 优先匹配北交所专属代码 (包含920新代码号段、8开头及4开头)
     if clean_sym.startswith(("BJ", "8", "4", "920")):
         return "2"
@@ -412,17 +415,233 @@ class TdxClient:
         """AI RAG 语义代码检索 (支持 A股, 港股 HK-GP, 美股 MG-GP, 基金 JJ, 指数 ZS)"""
         req_body = {"query": query.strip(), "range": market_range}
         resp = self._post(self.rag_endpoint, req_body)
+        entities: list[dict[str, Any]] = []
         if isinstance(resp, dict) and "retrieved_entities" in resp:
-            entities = resp["retrieved_entities"]
-            if isinstance(entities, list):
-                return entities
-        return []
+            raw_entities = resp["retrieved_entities"]
+            if isinstance(raw_entities, list):
+                entities = raw_entities
+
+        # 智能全市场双重嗅探：如果默认搜 AG 返回为空，但用户可能问的是港股（如“腾讯”、“阿里”、“美团”），自动降级尝试 HK-GP
+        if not entities and market_range == "AG":
+            try:
+                hk_resp = self._post(self.rag_endpoint, {"query": query.strip(), "range": "HK-GP"})
+                if isinstance(hk_resp, dict) and "retrieved_entities" in hk_resp:
+                    hk_entities = hk_resp["retrieved_entities"]
+                    if isinstance(hk_entities, list) and hk_entities:
+                        entities = hk_entities
+            except Exception:
+                pass
+
+        return entities
+
+    # =========================================================================
+    # 【功能块：腾讯免费公开港股实时行情获取与格式标准化】
+    # - 输入：clean_code (str): 5位港股数字代码（如 "00700", "09988"）
+    # - 功能：调用腾讯财经官方开放行情专线 (qt.gtimg.cn)，提取现价、五档委托、
+    #         市盈率、总市值、成交额及52周高低点，标准化映射为统一盘口格式
+    # - 输出：dict[str, Any]: 结构化港股微观盘口行情字典
+    # =========================================================================
+    def _get_hk_quotes(self, clean_code: str) -> dict[str, Any]:
+        norm_code = clean_code.zfill(5)
+        url = f"https://qt.gtimg.cn/q=r_hk{norm_code}"
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        try:
+            with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
+                raw_bytes = resp.read()
+                raw_text = raw_bytes.decode("gb18030", errors="replace")
+        except Exception as exc:
+            raise RuntimeError(f"腾讯免费港股实时行情接口请求失败: {exc}") from exc
+
+        if "none_match" in raw_text or "~" not in raw_text:
+            raise ValueError(f"未找到港股代码 '{clean_code}' 的有效行情，请核实代码是否存在（提示：港股通常为 5 位数字代码，如腾讯控股为 '00700'）。")
+
+        try:
+            payload_str = raw_text.split('"', 2)[1]
+            parts = payload_str.split("~")
+        except Exception as exc:
+            raise RuntimeError(f"解析腾讯港股行情数据结构失败: {exc}") from exc
+
+        name = parts[1] if len(parts) > 1 and parts[1] else f"港股_{norm_code}"
+
+        def _safe_float(val: Any) -> float:
+            try:
+                return round(float(val), 3) if val and str(val).strip() else 0.0
+            except (ValueError, TypeError):
+                return 0.0
+
+        def _safe_opt_float(val: Any) -> float | None:
+            try:
+                return round(float(val), 2) if val and str(val).strip() else None
+            except (ValueError, TypeError):
+                return None
+
+        # 动态解析结算货币（默认为港元 HKD，双柜台可能包含 CNY/RMB）
+        curr_val = "HKD"
+        for item in parts[50:]:
+            clean_item = item.strip().upper()
+            if clean_item in ("HKD", "CNY", "USD", "RMB"):
+                curr_val = clean_item
+                break
+
+        result: dict[str, Any] = {
+            "symbol": norm_code,
+            "name": name,
+            "setcode": "31",
+            "market": "香港交易所 (HKEX)",
+            "source": "tencent_free_hk_quote (腾讯免费港股专线)",
+            "盘口核心行情": {
+                "股票名称": name,
+                "现价": _safe_float(parts[3] if len(parts) > 3 else 0),
+                "昨收": _safe_float(parts[4] if len(parts) > 4 else 0),
+                "今开": _safe_float(parts[5] if len(parts) > 5 else 0),
+                "最高": _safe_float(parts[33] if len(parts) > 33 else 0),
+                "最低": _safe_float(parts[34] if len(parts) > 34 else 0),
+                "涨跌额": _safe_float(parts[31] if len(parts) > 31 else 0),
+                "涨跌幅_pct": _safe_float(parts[32] if len(parts) > 32 else 0),
+                "成交量_股": _safe_float(parts[6] if len(parts) > 6 else 0),
+                "成交额_港元": _safe_float(parts[37] if len(parts) > 37 else 0),
+                "振幅_pct": _safe_float(parts[43] if len(parts) > 43 else 0),
+                "行情时间": parts[30] if len(parts) > 30 else "",
+                "结算货币": curr_val,
+            },
+            "估值与基本盘面": {
+                "市盈率_TTM": _safe_opt_float(parts[39] if len(parts) > 39 else None),
+                "总市值_亿港元": _safe_opt_float(parts[44] if len(parts) > 44 else None),
+                "流通市值_亿港元": _safe_opt_float(parts[45] if len(parts) > 45 else None),
+                "52周最高": _safe_opt_float(parts[48] if len(parts) > 48 else None),
+                "52周最低": _safe_opt_float(parts[49] if len(parts) > 49 else None),
+            },
+            "五档深度盘口": {
+                "买一": {"价格": _safe_float(parts[9] if len(parts) > 9 else 0), "委托量": int(_safe_float(parts[10] if len(parts) > 10 else 0))},
+                "买二": {"价格": None, "委托量": None},
+                "买三": {"价格": None, "委托量": None},
+                "买四": {"价格": None, "委托量": None},
+                "买五": {"价格": None, "委托量": None},
+                "卖一": {"价格": _safe_float(parts[19] if len(parts) > 19 else 0), "委托量": int(_safe_float(parts[20] if len(parts) > 20 else 0))},
+                "卖二": {"价格": None, "委托量": None},
+                "卖三": {"价格": None, "委托量": None},
+                "卖四": {"价格": None, "委托量": None},
+                "卖五": {"价格": None, "委托量": None},
+            },
+        }
+        return result
+
+    # =========================================================================
+    # 【功能块：腾讯免费公开港股多周期历史 K 线获取与量化指标计算】
+    # - 输入：clean_code (str): 5位港股数字代码（如 "00700"）
+    #         period (str): 周期类型 ("day", "week", "month", "60m", "30m", "15m", "5m")
+    #         count (int): 获取条数上限 (1-300)
+    #         adjust (str): 复权方式 ("qfq", "hfq", "none")
+    #         with_indicators (bool): 是否在底层计算量化指标
+    # - 功能：调用腾讯财经官方开放 K 线专线 (web.ifzq.gtimg.cn)，拉取历史行情数据，
+    #         清洗时间、开高低收成交量，并在纯 Python 算法层原生计算 MA/MACD/KDJ/BOLL/RSI
+    # - 输出：dict[str, Any]: 结构化港股 K 线与指标字典
+    # =========================================================================
+    def _get_hk_kline(
+        self,
+        clean_code: str,
+        period: str = "day",
+        count: int = 30,
+        adjust: str = "qfq",
+        with_indicators: bool = True,
+    ) -> dict[str, Any]:
+        norm_code = clean_code.zfill(5)
+        period_map = {
+            "day": "day",
+            "week": "week",
+            "month": "month",
+            "5m": "m5",
+            "15m": "m15",
+            "30m": "m30",
+            "60m": "m60",
+        }
+        p_str = period_map.get(period.lower(), "day")
+        limit_cnt = max(1, min(int(count), 300))
+        adj_param = "qfq" if adjust == "qfq" else ("hfq" if adjust == "hfq" else "")
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get?_var=kline_{p_str}{adj_param}&param=hk{norm_code},{p_str},,,{limit_cnt},{adj_param}"
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        try:
+            with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
+                raw_bytes = resp.read()
+                raw_text = raw_bytes.decode("utf-8", errors="replace")
+        except Exception as exc:
+            raise RuntimeError(f"腾讯免费港股历史K线接口请求失败: {exc}") from exc
+
+        if "=" not in raw_text:
+            return {
+                "symbol": norm_code,
+                "name": f"港股_{norm_code}",
+                "setcode": "31",
+                "period": period,
+                "adjust": adjust,
+                "total_bars": 0,
+                "klines": [],
+            }
+
+        try:
+            json_str = raw_text.split("=", 1)[1]
+            data = json.loads(json_str)
+            stock_data = data.get("data", {}).get(f"hk{norm_code}", {})
+            name = stock_data.get("qt", {}).get(f"hk{norm_code}", ["", f"港股_{norm_code}"])[1]
+            raw_klines = (
+                stock_data.get(f"{adj_param}{p_str}")
+                or stock_data.get(p_str)
+                or []
+            )
+        except Exception:
+            name = f"港股_{norm_code}"
+            raw_klines = []
+
+        parsed_bars: list[dict[str, Any]] = []
+        for k in raw_klines:
+            if not isinstance(k, list) or len(k) < 6:
+                continue
+            dt_str = str(k[0])
+            open_p = float(k[1]) if str(k[1]).replace(".", "").isdigit() else 0.0
+            close_p = float(k[2]) if str(k[2]).replace(".", "").isdigit() else 0.0
+            high_p = float(k[3]) if str(k[3]).replace(".", "").isdigit() else 0.0
+            low_p = float(k[4]) if str(k[4]).replace(".", "").isdigit() else 0.0
+            vol = float(k[5]) if str(k[5]).replace(".", "").replace("e", "").replace("+", "").isdigit() else 0.0
+            amt = float(k[8]) if len(k) > 8 and str(k[8]).replace(".", "").isdigit() else 0.0
+
+            parsed_bars.append({
+                "time": dt_str,
+                "open": round(open_p, 3),
+                "high": round(high_p, 3),
+                "low": round(low_p, 3),
+                "close": round(close_p, 3),
+                "volume": vol,
+                "amount": amt,
+            })
+
+        if with_indicators and parsed_bars:
+            parsed_bars = calculate_indicators(parsed_bars)
+
+        return {
+            "symbol": norm_code,
+            "name": name,
+            "setcode": "31",
+            "period": period,
+            "adjust": adjust,
+            "total_bars": len(parsed_bars),
+            "klines": parsed_bars,
+        }
 
     def get_quotes(self, symbol: str, setcode: str | None = None) -> dict[str, Any]:
-        """获取实时盘口、深度量化指标与五档买卖盘"""
+        """获取实时盘口、深度量化指标与五档买卖盘（支持 A 股与港股）"""
         clean_code = re.sub(r"[^\d]", "", symbol)
         if not clean_code:
-            raise ValueError(f"无效的证券代码 '{symbol}'，A 股标的代码必须包含有效数字编号（如'600519'、'000001'）。若仅知道公司名称，请先调用 stock_lookup 工具查找对应代码。")
+            raise ValueError(f"无效的证券代码 '{symbol}'，证券标的代码必须包含有效数字编号（如 A股'600519'、港股'00700'）。若仅知道公司名称，请先调用 stock_lookup 工具查找对应代码。")
+
+        # 智能判定是否为港股标的 (市场显式指定为 31/116/HK，或原始代码带 HK 前缀，或数字代码为 5 位)
+        is_hk = (
+            (setcode is not None and str(setcode).upper() in ("31", "116", "HK"))
+            or symbol.strip().upper().startswith("HK")
+            or len(clean_code) == 5
+        )
+        if is_hk:
+            return self._get_hk_quotes(clean_code)
+
         m_setcode = setcode if setcode is not None else infer_market_setcode(clean_code)
 
         req_body = {
@@ -492,8 +711,25 @@ class TdxClient:
         setcode: str | None = None,
         with_indicators: bool = True,
     ) -> dict[str, Any]:
-        """获取多周期历史 K 线走势，并可选附加 MACD, KDJ, BOLL 等量化指标计算结果"""
+        """获取多周期历史 K 线走势，并可选附加 MACD, KDJ, BOLL 等量化指标计算结果（支持 A 股与港股）"""
         clean_code = re.sub(r"[^\d]", "", symbol)
+        if not clean_code:
+            raise ValueError(f"无效的证券代码 '{symbol}'，证券标的代码必须包含有效数字编号（如 A股'600519'、港股'00700'）。若仅知道公司名称，请先调用 stock_lookup 工具查找对应代码。")
+
+        is_hk = (
+            (setcode is not None and str(setcode).upper() in ("31", "116", "HK"))
+            or symbol.strip().upper().startswith("HK")
+            or len(clean_code) == 5
+        )
+        if is_hk:
+            return self._get_hk_kline(
+                clean_code,
+                period=period,
+                count=count,
+                adjust=adjust,
+                with_indicators=with_indicators,
+            )
+
         m_setcode = setcode if setcode is not None else infer_market_setcode(clean_code)
 
         # 周期映射: day->4, week->5, month->6, 60m->3, 30m->2, 15m->1, 5m->0, 1m->7
@@ -855,12 +1091,12 @@ STOCK_LOOKUP_SCHEMA = {
 
 STOCK_QUOTES_SCHEMA = {
     "name": "stock_quotes",
-    "description": "查询指定股票的实时五档盘口、买卖挂单、最新现价、涨跌幅、换手率、量比、内外盘强弱、总市值与动态市盈率等高频盘口与量化估值指标。数据全面中文化映射。",
+    "description": "查询指定股票的实时五档盘口、买卖挂单、最新现价、涨跌幅、换手率、量比、内外盘强弱、总市值与动态市盈率等高频盘口与量化估值指标。全面支持 A 股（通达信官方专线）与港股（腾讯免费专线回退，如 '00700' 腾讯控股、'09988' 阿里巴巴）。数据全面中文化映射。",
     "inputSchema": {
         "type": "object",
         "properties": {
-            "symbol": {"type": "string", "description": "证券代码（通常为6位数字，如'600519'、'000001'）"},
-            "setcode": {"type": "string", "description": "市场代码：0=深市，1=沪市，2=北交所。若不传将自动根据代码前缀智能推导"}
+            "symbol": {"type": "string", "description": "证券代码：A股为6位数字（如'600519'、'000001'），港股为5位数字（如'00700'、'09988'，支持'HK'前缀）"},
+            "setcode": {"type": "string", "description": "市场代码：0=深市，1=沪市，2=北交所，31=港交所。若不传将自动智能推导"}
         },
         "required": ["symbol"],
         "additionalProperties": False
@@ -869,15 +1105,15 @@ STOCK_QUOTES_SCHEMA = {
 
 STOCK_KLINE_SCHEMA = {
     "name": "stock_kline",
-    "description": "获取指定股票的多周期历史复权K线走势，并自动计算输出关键量化指标（MA5/MA10/MA20均线、MACD指标DIF/DEA/柱状图、KDJ随机指标、BOLL布林带上中下轨）。支持日线(day)、周线(week)、月线(month)、60分钟(60m)、15分钟(15m)、5分钟(5m)。",
+    "description": "获取指定股票的多周期历史复权K线走势，并自动计算输出关键量化指标（MA5/MA10/MA20均线、MACD指标DIF/DEA/柱状图、KDJ随机指标、BOLL布林带上中下轨）。全面支持 A 股及港股（腾讯免费专线）。支持日线(day)、周线(week)、月线(month)、60分钟(60m)、15分钟(15m)、5分钟(5m)。",
     "inputSchema": {
         "type": "object",
         "properties": {
-            "symbol": {"type": "string", "description": "证券代码（如'600519'）"},
+            "symbol": {"type": "string", "description": "证券代码：A股为6位数字（如'600519'），港股为5位数字（如'00700'）"},
             "period": {"type": "string", "enum": ["day", "week", "month", "60m", "30m", "15m", "5m", "1m"], "default": "day", "description": "K线周期，默认为 day (日线)"},
             "count": {"type": "integer", "minimum": 1, "maximum": 300, "default": 30, "description": "请求K线根数（1-300），默认30根"},
             "adjust": {"type": "string", "enum": ["qfq", "hfq", "none"], "default": "qfq", "description": "复权方式：qfq=前复权(默认), hfq=后复权, none=不复权"},
-            "setcode": {"type": "string", "description": "市场代码：0=深市，1=沪市，2=北交所。默认自动推导"},
+            "setcode": {"type": "string", "description": "市场代码：0=深市，1=沪市，2=北交所，31=港交所。默认自动推导"},
             "with_indicators": {"type": "boolean", "default": True, "description": "是否自动附带量化指标计算结果（MA、MACD、KDJ、BOLL），默认为 true"}
         },
         "required": ["symbol"],

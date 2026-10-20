@@ -22,6 +22,8 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertEqual(infer_market_setcode("920001"), "2")  # 北交所920代码
         self.assertEqual(infer_market_setcode("512480"), "1")  # 沪市ETF
         self.assertEqual(infer_market_setcode("159325"), "0")  # 深市ETF
+        self.assertEqual(infer_market_setcode("00700"), "31")   # 港股主板（5位数字）
+        self.assertEqual(infer_market_setcode("HK09988"), "31") # 港股带前缀
 
     def test_market_context(self) -> None:
         """测试 A 股交易日历与时钟状态输出"""
@@ -112,6 +114,46 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertIn("description", schema)
             self.assertIn("inputSchema", schema)
             self.assertEqual(schema["inputSchema"]["type"], "object")
+
+    def test_hk_stock_quotes_and_kline_dispatch(self) -> None:
+        """测试港股代码识别与腾讯行情/K线接口解析分发"""
+        from unittest.mock import patch, MagicMock
+        fin_gw = FinanceGateway()
+
+        # 1. 模拟腾讯港股实时行情响应
+        mock_resp_quotes = MagicMock()
+        mock_resp_quotes.read.return_value = 'v_r_hk00700="100~腾讯控股~00700~410.40~417.80~413.20~22840013~0~0~410.40~1000~0~0~0~0~0~0~0~0~410.60~2000~0~0~0~0~0~0~0~0~0~2026/10/20 16:08:24~-7.40~-1.77~415.60~406.40~00700/22840013/9371898153~9371898153~0.24~14.99~~415.60~406.40~2.20~37316.21~37316.21~0.00~0.00~658.70~406.40~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~0.00~HKD";\n'.encode("gb18030")
+        mock_resp_quotes.__enter__.return_value = mock_resp_quotes
+
+        with patch("mcp_gateway.finance._SECURE_OPENER.open", return_value=mock_resp_quotes):
+            q_res = fin_gw.stock_quotes({"symbol": "00700"})
+            self.assertEqual(q_res["symbol"], "00700")
+            self.assertEqual(q_res["name"], "腾讯控股")
+            self.assertEqual(q_res["setcode"], "31")
+            self.assertEqual(q_res["盘口核心行情"]["现价"], 410.4)
+            self.assertEqual(q_res["盘口核心行情"]["涨跌幅_pct"], -1.77)
+            self.assertEqual(q_res["盘口核心行情"]["结算货币"], "HKD")
+            self.assertEqual(q_res["五档深度盘口"]["买一"]["价格"], 410.4)
+            self.assertEqual(q_res["五档深度盘口"]["卖一"]["价格"], 410.6)
+
+        # 2. 模拟腾讯港股多周期K线响应
+        mock_kline_json = (
+            'kline_dayqfq={"code":0,"msg":"","data":{"hk00700":{"qt":{"hk00700":["100","腾讯控股"]},'
+            '"qfqday":[["2026-10-17","410.0","412.0","415.0","408.0","100000"],'
+            '["2026-10-20","413.2","410.4","415.6","406.4","200000"]]}}}'
+        )
+        mock_resp_kline = MagicMock()
+        mock_resp_kline.read.return_value = mock_kline_json.encode("utf-8")
+        mock_resp_kline.__enter__.return_value = mock_resp_kline
+
+        with patch("mcp_gateway.finance._SECURE_OPENER.open", return_value=mock_resp_kline):
+            k_res = fin_gw.stock_kline({"symbol": "HK00700", "count": 2})
+            self.assertEqual(k_res["symbol"], "00700")
+            self.assertEqual(k_res["name"], "腾讯控股")
+            self.assertEqual(k_res["setcode"], "31")
+            self.assertEqual(k_res["total_bars"], 2)
+            self.assertEqual(k_res["klines"][-1]["close"], 410.4)
+            self.assertIn("ma5", k_res["klines"][-1])
 
 
 if __name__ == "__main__":
