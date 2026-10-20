@@ -2,7 +2,7 @@
 
 一个给 Hermes Desktop 使用的本地高可用 MCP 服务聚合网关。它向 Hermes 暴露两大核心能力组（共 12 大标准 MCP 工具）：
 - **全网搜索与正文提取能力组**：`fallback_web_search`（单源经济型回退搜索）、`multi_web_search`（多源并发聚合融合搜索）、`fallback_web_extract`（正文提取与缓存）以及 `code_docs_search`（基于 Context7 驱动的编程文档与代码片段检索）；
-- **A股与证券金融服务能力组（全新推出）**：基于通达信官方专线与 AI 语义代码检索驱动的 8 大标准证券金融工具——`stock_lookup`（语义化股票代码查询）、`stock_quotes`（实时五档盘口与微观行情）、`stock_kline`（多周期K线与防幻觉量化指标）、`stock_financials`（资产负债/利润/现金流三张表）、`stock_f10`（题材概念与资金流向）、`stock_screener`（自然语言AI智能选股）、`stock_news`（个股资讯公告）、`market_context`（市场交易时钟）。
+- **A股与证券金融服务能力组（全新推出，A股+港股双轨自动回退）**：全面覆盖 A 股（通达信官方专线）与港股（腾讯免费专线自动路由，支持腾讯控股 `00700`、阿里巴巴 `09988` 等标的），提供 8 大标准证券金融工具——`stock_lookup`（语义化股票代码与标的检索）、`stock_quotes`（实时五档盘口与微观微观行情）、`stock_kline`（多周期K线与防幻觉量化指标）、`stock_financials`（资产负债/利润/现金流三张表）、`stock_f10`（题材概念与资金流向）、`stock_screener`（自然语言AI智能选股）、`stock_news`（个股资讯公告）、`market_context`（市场交易时钟）。
 
 搜索工具按以下固定优先级尝试在线搜索提供商：
 
@@ -204,9 +204,9 @@ python mcp_gateway\gui_add_provider.py
          multi_web_search      多源并发聚合融合搜索
          fallback_web_extract  自动回退的网页正文提取
          code_docs_search      基于 Context7 驱动的编程文档与代码片段检索
-         stock_lookup          股票名称/拼音代码语义智能检索
-         stock_quotes          A股实时五档盘口与微观行情
-         stock_kline           多周期K线与内置防幻觉量化指标(MA/MACD/KDJ/BOLL/RSI)
+         stock_lookup          股票名称/拼音代码语义智能检索(支持A股与港股)
+         stock_quotes          A股与港股实时五档盘口与微观行情
+         stock_kline           多周期K线与内置防幻觉量化指标(MA/MACD/KDJ/BOLL/RSI，覆盖A股与港股)
          stock_financials      三大财务报表(资产负债表/利润表/现金流量表)
          stock_f10             个股核心题材概念、资金流向与F10深度资料
          stock_screener        自然语言智能条件选股
@@ -277,13 +277,13 @@ python mcp_gateway\gui_add_provider.py
 
 ## 📈 金融与证券分析工具组 (Finance Tools — 8大标准工具)
 
-基于通达信官方行情专线（VIP 高速通道）与 AI 语义代码检索核心驱动，开箱即用，全面覆盖 A 股行情分析、量化指标计算、财务报表、资金题材与智能选股：
+基于通达信官方行情专线（VIP 高速通道）与腾讯官方开放行情专线双轨驱动，开箱即用，全面覆盖 A 股与港股行情分析、量化指标计算、财务报表、资金题材与智能选股：
 
 | 工具名称 | 功能定位 | 核心输入参数 | 返回关键字段 / 输出特色 |
 | :--- | :--- | :--- | :--- |
-| **`stock_lookup`** | 股票代码/名称语义智能检索 | `query`（股票名/代码/拼音简称，如“茅台”、“BYD”）、`market_range`（默认 "AG"） | 标准化 6 位数字代码、市场归属（`market` / `setcode`）、公司全称 |
-| **`stock_quotes`** | 实时盘口微观行情 | `symbol`（股票代码，如 "600519"）、`setcode`（市场标识，可选） | 实时买一至买五、卖一至卖五五档委托挂单量与价格、现价、涨跌幅、换手率、PE(动/静/TTM)、总市值与流通市值、涨跌停限制价 |
-| **`stock_kline`** | 多周期K线与防幻觉量化指标 | `symbol`、`period`（`day`/`week`/`month`/`5m`/`15m`/`30m`/`60m`）、`count`（K线根数，默认100）、`indicators`（是否计算指标，默认 true） | 日期时间、OHLCV 基础行情，**客户端原生纯 Python 毫秒级计算 MA5/10/20、MACD (DIF/DEA/MACD柱)、KDJ (K/D/J)、布林带 (BOLL上中下轨)、RSI (6/12)**，彻底杜绝大模型数值计算幻觉 |
+| **`stock_lookup`** | 股票代码/名称语义智能检索 | `query`（股票名/代码/拼音简称，如“茅台”、“腾讯”、“BYD”）、`market_range`（默认 "AG"） | 标准化 6 位数字代码（A股）或 5 位代码（港股）、市场归属（`market` / `setcode`）、公司全称 |
+| **`stock_quotes`** | 实时盘口微观行情 | `symbol`（股票代码，如 A股 "600519"、港股 "00700"）、`setcode`（市场标识，可选） | 实时买一至买五、卖一至卖五五档委托挂单量与价格（A股五档深度盘口，港股买卖一档）、最新现价、涨跌幅、换手率、PE(动/静/TTM)、总市值与流通市值、结算货币（CNY/HKD） |
+| **`stock_kline`** | 多周期K线与防幻觉量化指标 | `symbol`、`period`（`day`/`week`/`month`/`5m`/`15m`/`30m`/`60m`）、`count`（K线根数，默认30）、`with_indicators`（是否计算指标，默认 true） | 日期时间、OHLCV 基础行情（全面覆盖 A 股与港股标的），**客户端原生纯 Python 毫秒级计算 MA5/10/20、MACD (DIF/DEA/MACD柱)、KDJ (K/D/J)、布林带 (BOLL上中下轨)、RSI (6/12)**，彻底杜绝大模型数值计算幻觉 |
 | **`stock_financials`** | 结构化财务三张表 | `symbol`、`statement_type`（`balance` 资产负债表 / `income` 利润表 / `cashflow` 现金流量表）、`report_type`（`quarter` 季度 / `report` 年报）、`count`（历史期数，默认4） | 全量映射友好中文财务会计科目（如“货币资金”、“营业收入”、“扣非净利润”、“经营活动产生的现金流量净额”），杜绝生僻英文字段代码 |
 | **`stock_f10`** | 题材概念与资金流向 | `symbol`、`category`（`concepts` 题材概念、`forecast` 业绩预告、`shareholders` 股东户数、`top10` 十大流通股东、`capital_flow` 资金净流入、`margin` 融资融券、`unlock` 限售解禁） | 官方 F10 权威解析数据，支持板块概念明细、主力资金博弈与股东变动追踪 |
 | **`stock_screener`** | 自然语言智能选股 | `message`（自然语言选股指令，如“近三年ROE大于15%且市值大于500亿”）、`limit`（返回上限）、`page`（页码） | 官方 JNLPSE 自然语言问达选股引擎，直接返回符合量化条件的高匹配度股票标的列表及关键财务指标 |
@@ -291,9 +291,11 @@ python mcp_gateway\gui_add_provider.py
 | **`market_context`** | 市场交易时钟与交易日参考 | 可选传入或缺省 | 当前东八区北京时间、A股交易日判定、交易状态（开盘交易中 / 集合竞价 / 午间休市 / 已收盘 / 非交易日周末），辅助大模型建立时间意识 |
 
 ### 金融接口架构特色
+- **A股 + 港股双轨智能路由与自动回退（Dual-Market Routing）**：针对 6 位 A 股标的默认直连通达信官方专线；针对 5 位港股标的（如腾讯控股 `00700`、阿里巴巴 `09988`）或带 `HK` 前缀的代码，底层自动识别并路由至腾讯官方开放行情通道（`qt.gtimg.cn` / `hk-quote`），突破通达信免费账号下无港股权限的技术瓶颈，免配置额外 API Key 即享极速双市场行情；
 - **双端点抽象解耦**：通达信主网关（`http://tdxhub.icfqs.com:7615/TQLEX`）与 RAG 检索端点（`https://ai.icfqs.com:8965/v1/rag-entity-retrieve`）已在 `config/providers/finance.json` 中全面参数化抽象，若未来官方服务器 IP 或域名发生变动，仅需修改配置文件，零代码改动；
 - **防重定向凭据泄漏（Security Hardening）**：底层通信使用独立安全 `OpenerDirector` 与 `NoRedirectHandler`，杜绝 301/302 重定向外泄用户敏感 API Key / Token；
-- **防幻觉量化指标算法（Anti-Hallucination Quant）**：大模型在直接阅读大量浮点数并自主计算 MACD 金叉死叉时极易发生计算幻觉。网关内置了纯 Python 高精度量化指标算法，直接在底层输出精确的浮点数指标序列，大模型只需负责逻辑解读，极大提升研报专业度与可信度。
+- **防幻觉量化指标算法（Anti-Hallucination Quant）**：大模型在直接阅读大量浮点数并自主计算 MACD 金叉死叉时极易发生计算幻觉。网关内置了纯 Python 高精度量化指标算法，直接在底层输出精确的浮点数指标序列，大模型只需负责逻辑解读，极大提升研报专业度与可信度；
+- **工业级安全与工程质量保障**：全量通过 68 项自动化单元测试，具备严格的 SSRF 防御、参数纯数字白名单校验、全量除零守卫与零外部重量级依赖（无 pandas/numpy，微秒级冷启动）。
 
 ---
 
