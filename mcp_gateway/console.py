@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import __version__
+
 # =========================================================================
 # 【功能块：配置标准输入输出流编码】
 # - 输入：sys.stdin, sys.stdout, sys.stderr
@@ -246,7 +248,7 @@ def main() -> None:
 
         # 绘制居中顶部标题框
         print(f"{pad}{'=' * box_width}")
-        title = "MCPHub 智能服务管理控制台 (Hermes Desktop 增强版)"
+        title = f"MCPHub 智能服务管理控制台 v{__version__} (Hermes Desktop 增强版)"
         title_display_width = sum(2 if ord(c) > 127 else 1 for c in title)
         title_spaces = max(0, (box_width - title_display_width) // 2)
         print(f"{pad}{' ' * title_spaces}{title}")
