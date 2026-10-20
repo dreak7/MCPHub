@@ -1,0 +1,48 @@
+{
+  "capabilities": {
+    "code_docs_search": {
+      "description": "Search up-to-date documentation, API references, and code snippets for programming languages, libraries, and frameworks (powered by Context7). Best for coding, syntax, and framework questions.",
+      "timeout_seconds": 25,
+      "cooldown_seconds": 3600,
+      "quota_cooldown_seconds": 259200,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Programming question or library documentation query."
+          },
+          "library": {
+            "type": "string",
+            "description": "Optional library name or ID hint (e.g., 'next.js', 'react', 'fastapi')."
+          },
+          "version": {
+            "type": "string",
+            "description": "Optional library version preference (e.g., '15.2', 'v2.0')."
+          },
+          "language": {
+            "type": "string",
+            "description": "Optional programming language (e.g., 'TypeScript', 'Python', 'Go')."
+          },
+          "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 5
+          }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "providers": [
+        {
+          "id": "context7",
+          "enabled": true,
+          "priority": 10,
+          "api_key_env": "CONTEXT7_API_KEY",
+          "endpoint": "https://context7.com/api/v3/search"
+        }
+      ]
+    }
+  }
+}

@@ -43,6 +43,7 @@ DEFAULT_ENDPOINTS = {
     "jina": "https://s.jina.ai",
     "bocha-search": "https://api.bocha.cn/v1/web-search",
     "anysearch": "https://api.anysearch.com/v1/search",
+    "context7": "https://context7.com/api/v3/search",
 }
 
 
@@ -230,7 +231,7 @@ class ConfigGuiApp:
         adapter_cb = ttk.Combobox(
             prov_group,
             textvariable=self.prov_type_var,
-            values=["tavily-search", "exa", "jina", "bocha-search", "anysearch"],
+            values=["tavily-search", "exa", "jina", "bocha-search", "anysearch", "context7"],
             state="readonly"
         )
         adapter_cb.grid(row=1, column=1, sticky="ew", pady=4)

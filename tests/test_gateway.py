@@ -259,8 +259,8 @@ class McpServerTest(unittest.TestCase):
         initialized = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual("local-search-fallback-gateway", initialized["result"]["serverInfo"]["name"])
         import mcp_gateway
-        self.assertEqual("1.5.3", mcp_gateway.__version__)
-        self.assertEqual("1.5.3", initialized["result"]["serverInfo"]["version"])
+        self.assertEqual("1.6.0", mcp_gateway.__version__)
+        self.assertEqual("1.6.0", initialized["result"]["serverInfo"]["version"])
         self.assertEqual(mcp_gateway.__version__, initialized["result"]["serverInfo"]["version"])
         tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = [t["name"] for t in tools["result"]["tools"]]
@@ -1010,6 +1010,141 @@ class AuditV141RemediationTest(unittest.TestCase):
             with patch.object(extract_gw, "_extract", side_effect=fake_failing_extract_call):
                 res = extract_gw.extract({"urls": ["https://example.com/article"]})
         self.assertEqual(expected_extract_order, called_extract)
+
+
+# =========================================================================
+# 【功能块：Context7 编程文档能力与适配器自动化测试套件】
+# - 输入：SearchGateway 实例、测试用 Context7 API 响应模拟数据与异常对象
+# - 功能：全方位验证 Context7 代码切片格式化清洗、免 Key 匿名调用放行、
+#         404 未找到文档智能容错、402 资产配额耗尽长冷却、以及 coding.json
+#         在 McpServer 网关层的自适应动态装载与工具注册
+# - 输出：各断言校验通过
+# =========================================================================
+class Context7IntegrationTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.state_file = Path(self.tmp_dir) / "state.json"
+        self.gateway = SearchGateway({
+            "name": "code_docs_search",
+            "cooldown_seconds": 60,
+            "quota_cooldown_seconds": 3600,
+            "providers": [
+                {
+                    "id": "context7",
+                    "enabled": True,
+                    "priority": 10,
+                    "api_key_env": "CONTEXT7_API_KEY",
+                    "endpoint": "https://context7.com/api/v3/search"
+                }
+            ]
+        }, self.state_file, FakeLogger())
+
+    # =========================================================================
+    # 【测试用例：验证 Context7 返回数据解析与 Markdown 代码块标准化组装】
+    # =========================================================================
+    def test_context7_call_formatting(self):
+        mock_response = {
+            "codeSnippets": [
+                {
+                    "pageTitle": "Next.js App Router",
+                    "codeTitle": "Streaming Route Handler",
+                    "codeId": "https://nextjs.org/docs/app/building-your-application/routing/route-handlers",
+                    "codeDescription": "How to stream responses with OpenAI in Next.js",
+                    "codeList": [
+                        {
+                            "language": "typescript",
+                            "code": "export async function GET() {\n  return new Response('stream');\n}"
+                        }
+                    ]
+                }
+            ]
+        }
+
+        with patch.object(self.gateway, "_get", return_value=mock_response) as mock_get:
+            res = self.gateway._context7(
+                endpoint="https://context7.com/api/v3/search",
+                key="test_api_key",
+                query="nextjs streaming",
+                limit=5,
+                args={"library": "next.js", "version": "15.2", "language": "TypeScript"},
+                timeout=25
+            )
+
+        mock_get.assert_called_once()
+        self.assertEqual(1, len(res))
+        item = res[0]
+        self.assertEqual("[Next.js App Router] Streaming Route Handler", item["title"])
+        self.assertEqual("https://nextjs.org/docs/app/building-your-application/routing/route-handlers", item["url"])
+        self.assertIn("How to stream responses with OpenAI in Next.js", item["snippet"])
+        self.assertIn("```typescript", item["snippet"])
+        self.assertIn("export async function GET()", item["snippet"])
+
+    # =========================================================================
+    # 【测试用例：验证 Context7 支持免 Key 匿名调用通道】
+    # =========================================================================
+    def test_context7_anonymous_allowed_without_key(self):
+        with patch.dict(os.environ, {}, clear=True):
+            # 确保环境变量中无 CONTEXT7_API_KEY
+            os.environ.pop("CONTEXT7_API_KEY", None)
+            mock_results = [{"title": "Snippet", "url": "https://example.com", "snippet": "code", "published_date": ""}]
+            with patch.object(self.gateway, "_call", return_value=mock_results) as mock_call:
+                res = self.gateway.search({"query": "fastapi middleware"})
+            self.assertEqual("context7", res["provider"])
+            self.assertEqual(1, mock_call.call_count)
+
+    # =========================================================================
+    # 【测试用例：验证 Context7 404 (no_documentation_found) 容错为正常空列表】
+    # =========================================================================
+    def test_context7_404_no_documentation_found_handled_gracefully(self):
+        import io
+        from urllib.error import HTTPError
+        
+        err_body = b'{"error": "no_documentation_found", "message": "No documentation library matched"}'
+        err_fp = io.BytesIO(err_body)
+        http_404 = HTTPError(
+            "https://context7.com/api/v3/search",
+            404,
+            "Not Found",
+            {},
+            err_fp
+        )
+
+        with patch("mcp_gateway.search._SECURE_OPENER.open", side_effect=http_404):
+            data = self.gateway._get("https://context7.com/api/v3/search", {}, {"query": "non_existent_lib"}, 25)
+            self.assertEqual({"codeSnippets": []}, data)
+
+    # =========================================================================
+    # 【测试用例：验证 Context7 402 配额超限触发长冷却】
+    # =========================================================================
+    def test_context7_quota_exhausted_cooling(self):
+        with patch.object(self.gateway, "_call", side_effect=SearchError("HTTP 402: quota exhausted", retryable=True, status=402)):
+            with self.assertRaises(SearchError):
+                self.gateway.search({"query": "react hooks"})
+        self.assertFalse(self.gateway.cooldowns.is_available("code_docs_search:context7"))
+
+    # =========================================================================
+    # 【测试用例：验证 config/providers/coding.json 配置与网关动态装载】
+    # =========================================================================
+    def test_coding_capability_config_and_server_registration(self):
+        from mcp_gateway.config import load_config
+        project_root = Path(__file__).resolve().parent.parent
+        gateway_json_path = project_root / "config" / "gateway.json"
+        
+        config = load_config(gateway_json_path)
+        capabilities = config.get("capabilities", {})
+        self.assertIn("code_docs_search", capabilities)
+        
+        coding_cap = capabilities["code_docs_search"]
+        self.assertIn("providers", coding_cap)
+        self.assertEqual("context7", coding_cap["providers"][0]["id"])
+        
+        # 验证 inputSchema 参数完备性
+        schema = coding_cap.get("inputSchema", {})
+        props = schema.get("properties", {})
+        self.assertIn("query", props)
+        self.assertIn("library", props)
+        self.assertIn("version", props)
+        self.assertIn("language", props)
 
 
 if __name__ == "__main__":

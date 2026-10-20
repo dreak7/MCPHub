@@ -1,9 +1,9 @@
-# Local MCP Search Fallback Gateway (v1.5.3)
+# Local MCP Search Fallback Gateway (v1.6.0)
 
-一个给 Hermes Desktop 使用的本地 MCP 搜索聚合器。它向 Hermes 暴露
-`fallback_web_search`（单源经济型回退搜索）、`multi_web_search`（多源并发聚合融合搜索）
-与 `fallback_web_extract`（正文提取）三个工具，以避免和 Hermes 内置
-`web_search` / `web_extract` 混淆。
+一个给 Hermes Desktop 使用的本地高可用 MCP 服务聚合网关。它向 Hermes 暴露
+`fallback_web_search`（单源经济型回退搜索）、`multi_web_search`（多源并发聚合融合搜索）、
+`fallback_web_extract`（正文提取与缓存）以及全新开辟的 `code_docs_search`（基于 Context7 驱动的编程文档与代码片段检索）
+四个工具，以避免和 Hermes 内置工具混淆，同时让大模型在写代码时精准获取官方技术文档。
 
 搜索工具按以下固定优先级尝试在线搜索提供商：
 
@@ -44,7 +44,8 @@ MCPHub/
 ├── config/                      # 配置文件目录
 │   ├── gateway.json             # 网关总入口配置（支持通配符扫描）
 │   ├── providers/               # 能力分类配置目录
-│   │   └── search.json          # 搜索引擎清单与优先级排布配置
+│   │   ├── search.json          # 搜索引擎清单与优先级排布配置
+│   │   └── coding.json          # 编程与代码库文档检索配置 (Context7 驱动)
 │   ├── .env                     # 本地 API 密钥文件（需自行配置，勿提交）
 │   └── .env.example             # 密钥模板文件
 ├── scripts/                     # 共享运维与环境健康探活脚本目录
@@ -54,7 +55,7 @@ MCPHub/
 │   └── references/              # 取证规范指南（包含 channel-forensics.md）
 ├── logs/                        # 运行日志目录（gateway.log）
 ├── state/                       # 状态持久化目录（provider-state.json 冷却状态）
-├── tests/                       # 54 项全量自动化单元测试套件
+├── tests/                       # 62 项全量自动化单元测试套件
 ├── MCPHub服务管理面板.bat          # Windows 双击即用一键管理控制台
 ├── README.md                    # 项目全景使用与配置文档
 ├── LICENSE                      # MIT 开源许可证
@@ -88,7 +89,7 @@ MCPHub/
    - **`[1] 一键生成并查看 Hermes Desktop 挂载配置`**：自动探测当前电脑实测真实 Python 绝对路径与配置文件绝对路径，直接输出零歧义的 YAML 与 JSON 配置，告别路径占位符猜测。
    - **`[2] 启动可视化引擎与能力配置向导 (GUI)`**：双轨制原生 Windows 窗口，无需触碰任何 JSON 文件，可视化添加/管理搜索引擎，或新建自定义能力分类，并自动同步写入 `.env`。
    - **`[3] 快捷配置/编辑 API 密钥 (.env)`**：自动检查并用系统记事本打开密钥配置文件。
-   - **`[4] 运行服务健康检查与全部测试套件 (54 项)`**：一键验证本机所有核心算法、并发熔断、SSRF安全拦截与协议适配。
+   - **`[4] 运行服务健康检查与全部测试套件 (62 项)`**：一键验证本机所有核心算法、并发熔断、SSRF安全拦截与协议适配。
    - **`[5] 查看服务运行日志`**：实时查看 `logs\gateway.log` 最新运行日志。
    - **`[6] 运行 Hermes MCP 连通性测试`**：一键执行 `hermes mcp test MCPHub`。
 
@@ -194,10 +195,11 @@ python mcp_gateway\gui_add_provider.py
      ```text
      Transport: stdio → ...\Python313\python.exe
      ✓ Connected
-     ✓ Tools discovered: 3
+     ✓ Tools discovered: 4
          fallback_web_search   单源经济型回退搜索
          multi_web_search      多源并发聚合融合搜索
          fallback_web_extract  自动回退的网页正文提取
+         code_docs_search      基于 Context7 驱动的编程文档与代码片段检索
      ```
    - 执行 `hermes mcp list` 确认状态为 `✓ enabled`。
 
@@ -319,13 +321,38 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
   - **30 分钟本地落盘缓存与状态透传**：正文提取结果会在本地 `state/extract_cache/` 自动缓存 30 分钟（返回 `cached: true/false`），重复提取相同网页无需重复请求外部 API；
   - **全文真实落盘与 `read_file` 翻页联动**：当页面字符数超过限制发生截断时（`truncated: true`），系统会在本地自动保存未截断的完整 Markdown 原文（`cache_path`），并主动向大模型注入 `paging_hint` 翻页提示，引导 AI 调用内置的 `read_file` 工具继续精读剩余章节，实现真正的零额度超长文通读！
 
-### 4. 界面展示与故障透明感知
+### 4. 场景四：编程开发与开源库文档精准检索（自动调用 `code_docs_search`）
+- **适用场景**：编写代码、排查框架报错、查阅最新 API 语法，需要官方权威文档与现成代码切片（彻底杜绝大模型在代码细节上的幻觉）。
+- **操作方式（直接正常提问编程问题即可）**：
+  > “请使用最新的 Next.js 15 App Router 写一个流式传输接口。”  
+  > “FastAPI 如何编写一个带计时的全局中间件？”  
+  > “Pydantic v2 中 field_validator 的最新用法是什么？”
+- **后台机制**：直接调用专属 Context7 引擎，毫秒级检索官方库索引切片；自动提取多语言 Markdown 代码高亮块、关键参数说明与官方原厂源链接（`codeId`），以极低 Token 消耗直给核心代码。若后续需要整页深读，还可与 `fallback_web_extract` 无缝联动！
+
+### 5. 界面展示与故障透明感知
 - **界面小卡片（Tool Call）**：Hermes 在调用工具时，回答气泡上方会显示正在调用的折叠卡片，如 `MCPHub -> multi_web_search({"query": "..."})`，直观反映调用过程。
 - **异常透明预警**：当某家后端服务欠费耗尽或请求超限时，Hermes 的回答最顶部会带有醒目的黄底警示标：  
   `⚠️ 警告：检测到后端服务配额耗尽或请求限流 [tavily-search (HTTP 432: quota exhausted)]。请耐心等待配额重置稍后重试或联系MCP提供商。`  
   但回答**依然完整交付**（后续备用引擎已自动顶上接管）。
 
 ## 更新记录
+
+### v1.6.0 — 架构升级：开辟编程分类集成 Context7 引擎，新增 code_docs_search 专属编程检索工具
+
+- **全新能力分类与工具（`code_docs_search`）**：
+  - 在 `config/providers/` 架构下正式开辟 `coding.json` 专属编程能力，向 Hermes 暴露第 4 个核心 MCP 工具 `code_docs_search`；
+  - 专用于编程语言、开发框架、开源技术库的官方文档、API 参考与精选代码片段切片检索。
+- **Context7 Search API 专属适配器与安全 GET 通信管道**：
+  - 网关核心 `search.py` 扩展支持 `context7` 引擎类型，实现专属安全 GET 通信管道；
+  - 智能清洗提取 `pageTitle`、`codeTitle`、`codeDescription` 与多语言 Markdown 代码块，剔除元数据废弃噪音，极大节省大模型上下文 Token；
+  - 智能特判 Context7 独有的 `404 no_documentation_found` 状态码（判定为空结果而非服务故障，避免误入冷却小黑屋）。
+- **API Key 双轨弹性设计与无感兼容**：
+  - 允许留空 `CONTEXT7_API_KEY` 走公共 IP 临时通道试用体验；
+  - 填入密钥后无缝切换为每月 1,000 次官方免费高速通道，享受 MCPHub 的智能配额长冷却（402/432）与跨月/换 Key 自适应复活。
+- **可视化配置向导 (GUI Tool) 与管理控制台协同**：
+  - 原生 Windows GUI 配置向导同步支持 `context7` 协议与默认端点快捷选择；
+  - 全量测试套件扩充至 62 项，涵盖数据清洗、免 Key 放行、404 容错、配额冷却与动态装载全场景，100% 自动化测试通过。
+- **服务版本升级**：版本号正式递增至 `v1.6.0`。
 
 ### v1.5.3 — 网页正文智能提取支持 30 分钟落盘缓存、全文 Markdown 持久化与 read_file 联动翻页
 

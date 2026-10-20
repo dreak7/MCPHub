@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 import concurrent.futures
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
@@ -196,8 +196,8 @@ class SearchGateway:
             key_name = provider.get("api_key_env")
             api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
             engine_type = provider.get("type") or provider_id
-            # AnySearch and Jina AI explicitly support an anonymous quota; all others require a key.
-            if not api_key and engine_type not in ("anysearch", "jina"):
+            # AnySearch, Jina AI, and Context7 explicitly support an anonymous quota; all others require a key.
+            if not api_key and engine_type not in ("anysearch", "jina", "context7"):
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
             if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
@@ -605,6 +605,8 @@ class SearchGateway:
             return self._anysearch(endpoint, api_key, query, max_results, provider, timeout)
         if engine_type in ("bocha-search", "bocha"):
             return self._bocha(endpoint, api_key, query, max_results, arguments, timeout)
+        if engine_type == "context7":
+            return self._context7(endpoint, api_key, query, max_results, arguments, timeout)
         raise SearchError(f"Unsupported provider type or id: {engine_type} (id: {provider_id})", retryable=False)
 
     # =========================================================================
@@ -693,6 +695,76 @@ class SearchGateway:
         items = data.get("data", {}).get("webPages", {}).get("value", [])
         return [self._result(item.get("name"), item.get("url"), item.get("summary") or item.get("snippet"), item.get("datePublished")) for item in items]
 
+    # =========================================================================
+    # 【功能块：Context7 编程文档与代码切片检索适配器】
+    # - 输入：endpoint (str): Context7 Search API 端点（https://context7.com/api/v3/search）；
+    #         key (str): Context7 API Key（可选，若存在则作为 Bearer Token 发送）；
+    #         query (str): 用户检索提问或代码问题；
+    #         limit (int): 返回的最大条目数；
+    #         args (dict): 扩展参数字典（支持 library, version, language 等提示词）；
+    #         timeout (Any): 网络请求超时秒数
+    # - 功能：向 Context7 服务端发送结构化 GET 请求，获取高质量的 codeSnippets 切片；
+    #         提取 pageTitle、codeTitle、codeDescription、codeList 多语言代码块与原厂 codeId 链接，
+    #         组装为标准 Markdown 代码高亮块与精炼文本格式并返回
+    # - 输出：list[dict[str, Any]]: 标准化检索结果列表
+    # =========================================================================
+    def _context7(self, endpoint: str, key: str, query: str, limit: int, args: dict[str, Any], timeout: Any) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "query": query,
+            "type": "json",
+        }
+        if args.get("library"):
+            params["library"] = args["library"]
+        if args.get("version"):
+            params["version"] = args["version"]
+        if args.get("language"):
+            params["language"] = args["language"]
+
+        headers: dict[str, str] = {}
+        if key and key.strip():
+            headers["Authorization"] = f"Bearer {key.strip()}"
+
+        data = self._get(endpoint, headers, params, timeout)
+        snippets = data.get("codeSnippets", [])
+        if not isinstance(snippets, list):
+            return []
+
+        results: list[dict[str, Any]] = []
+        for item in snippets[:limit]:
+            if not isinstance(item, dict):
+                continue
+            page_title = str(item.get("pageTitle") or "").strip()
+            code_title = str(item.get("codeTitle") or "").strip()
+            if page_title and code_title:
+                title = f"[{page_title}] {code_title}"
+            else:
+                title = code_title or page_title or "Code Snippet"
+
+            url = str(item.get("codeId") or "").strip()
+            description = str(item.get("codeDescription") or "").strip()
+
+            # 组装格式化 Markdown 代码高亮块
+            code_blocks: list[str] = []
+            code_list = item.get("codeList", [])
+            if isinstance(code_list, list):
+                for code_item in code_list:
+                    if isinstance(code_item, dict):
+                        lang = str(code_item.get("language") or "").strip()
+                        code = str(code_item.get("code") or "").strip()
+                        if code:
+                            code_blocks.append(f"```{lang}\n{code}\n```")
+
+            content_parts: list[str] = []
+            if description:
+                content_parts.append(description)
+            if code_blocks:
+                content_parts.append("\n\n".join(code_blocks))
+
+            snippet_text = "\n\n".join(content_parts)
+            results.append(self._result(title, url, snippet_text, ""))
+
+        return results
+
     @staticmethod
     def _add_filters(payload: dict[str, Any], args: dict[str, Any]) -> None:
         for key in ("time_range", "include_domains", "exclude_domains"):
@@ -722,6 +794,47 @@ class SearchGateway:
             body = exc.read().decode("utf-8", errors="replace")
             # AnySearch may return newly generated credentials in a 402 body. Never
             # put provider response bodies into logs or MCP output.
+            retryable = exc.code in (402, 408, 429, 432) or 500 <= exc.code <= 599 or ((exc.code in (403, 432)) and self._is_quota_message(body)) or self._is_quota_message(body)
+            message = f"HTTP {exc.code}: quota exhausted" if (exc.code in (402, 432) or (exc.code == 403 and retryable) or self._is_quota_message(body)) else f"HTTP {exc.code}"
+            raise SearchError(message, retryable=retryable, status=exc.code) from exc
+        except (URLError, socket.timeout, TimeoutError) as exc:
+            raise SearchError(f"Network error: {exc}", retryable=True) from exc
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise SearchError("Provider returned invalid JSON", retryable=True) from exc
+        if not isinstance(data, dict):
+            raise SearchError("Provider returned an invalid response", retryable=True)
+        return data
+
+    # =========================================================================
+    # 【功能块：安全 HTTP GET 通信管道（支持查询参数自动编解码与 404 容错）】
+    # - 输入：endpoint (str): API 接口地址；
+    #         headers (dict[str, str]): HTTP 请求头（包含 Accept、Authorization 等）；
+    #         params (dict[str, Any]): URL 查询参数字典；
+    #         timeout (Any): 请求超时秒数
+    # - 功能：使用受保护的 _SECURE_OPENER 发起 GET 请求；对 404 (no_documentation_found)
+    #         进行智能容错（判定为空结果而非服务故障）；对 402/429/432 等配额错误抛出对应 SearchError
+    # - 输出：dict[str, Any]: 服务端解析后的 JSON 响应字典
+    # =========================================================================
+    def _get(self, endpoint: str, headers: dict[str, str], params: dict[str, Any], timeout: Any) -> dict[str, Any]:
+        query_items = [(k, str(v)) for k, v in params.items() if v is not None and str(v).strip() != ""]
+        url = f"{endpoint}?{urlencode(query_items, doseq=True)}" if query_items else endpoint
+        request = Request(url, headers={"Accept": "application/json", **headers}, method="GET")
+        try:
+            with _SECURE_OPENER.open(request, timeout=float(timeout)) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            # Context7 专属容错：404 no_documentation_found 代表该问题在文档库中未命中结果，作为空结果正常返回
+            if exc.code == 404:
+                try:
+                    err_data = json.loads(body)
+                    if isinstance(err_data, dict) and err_data.get("error") == "no_documentation_found":
+                        return {"codeSnippets": []}
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                return {"codeSnippets": []}
             retryable = exc.code in (402, 408, 429, 432) or 500 <= exc.code <= 599 or ((exc.code in (403, 432)) and self._is_quota_message(body)) or self._is_quota_message(body)
             message = f"HTTP {exc.code}: quota exhausted" if (exc.code in (402, 432) or (exc.code == 403 and retryable) or self._is_quota_message(body)) else f"HTTP {exc.code}"
             raise SearchError(message, retryable=retryable, status=exc.code) from exc
