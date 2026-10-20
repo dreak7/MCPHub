@@ -1,9 +1,8 @@
-# Local MCP Search Fallback Gateway (v1.6.0)
+# Local MCP Search & Finance Fallback Gateway (v1.7.0)
 
-一个给 Hermes Desktop 使用的本地高可用 MCP 服务聚合网关。它向 Hermes 暴露
-`fallback_web_search`（单源经济型回退搜索）、`multi_web_search`（多源并发聚合融合搜索）、
-`fallback_web_extract`（正文提取与缓存）以及全新开辟的 `code_docs_search`（基于 Context7 驱动的编程文档与代码片段检索）
-四个工具，以避免和 Hermes 内置工具混淆，同时让大模型在写代码时精准获取官方技术文档。
+一个给 Hermes Desktop 使用的本地高可用 MCP 服务聚合网关。它向 Hermes 暴露两大核心能力组（共 12 大标准 MCP 工具）：
+- **全网搜索与正文提取能力组**：`fallback_web_search`（单源经济型回退搜索）、`multi_web_search`（多源并发聚合融合搜索）、`fallback_web_extract`（正文提取与缓存）以及 `code_docs_search`（基于 Context7 驱动的编程文档与代码片段检索）；
+- **A股与证券金融服务能力组（全新推出）**：基于通达信官方专线与 AI 语义代码检索驱动的 8 大标准证券金融工具——`stock_lookup`（语义化股票代码查询）、`stock_quotes`（实时五档盘口与微观行情）、`stock_kline`（多周期K线与防幻觉量化指标）、`stock_financials`（资产负债/利润/现金流三张表）、`stock_f10`（题材概念与资金流向）、`stock_screener`（自然语言AI智能选股）、`stock_news`（个股资讯公告）、`market_context`（市场交易时钟）。
 
 搜索工具按以下固定优先级尝试在线搜索提供商：
 
@@ -26,7 +25,7 @@
 
 | 用户层级 | 推荐模式 | Skill 安装要求 | 运行特征与体验收益 |
 | :--- | :--- | :--- | :--- |
-| **L1 普通用户 / 极简主义者**<br>*(默认推荐，绝大多数用户)* | **核心极简高可用模式**<br>(Simple & Clean) | **完全不安装任何 Skill**<br>*(零文件复制，免去 mcphub-probe)* | • **零记忆注入**：大模型上下文（Prompt / Memory）100% 保持原生纯净；<br>• **零冗余耗时**：搜索直接发起，绝不执行外部探活脚本，零多余 Token；<br>• **开箱即用**：MCPHub 原生自带 Exa $\to$ AnySearch $\to$ Tavily $\to$ Jina $\to$ Bocha 毫秒级故障自动轮换与跨月解冻。 |
+| **L1 普通用户 / 极简主义者**<br>*(默认推荐，绝大多数用户)* | **核心极简高可用模式**<br>(Simple & Clean) | **完全不安装任何 Skill**<br>*(零文件复制，免去 mcphub-probe)* | • **零记忆注入**：大模型上下文（Prompt / Memory）100% 保持原生纯净；<br>• **零冗余耗时**：搜索直接发起，绝不执行外部探活脚本，零多余 Token；<br>• **开箱即用**：MCPHub 原生自带 Exa $\to$ AnySearch $\to$ Tavily $\to$ Jina $\to$ Bocha 毫秒级故障自动轮换与跨月解冻，金融工具专线零延迟直通。 |
 | **L2 进阶用户 / 开发者 / 运维排查**<br>*(可选外挂)* | **按需取证诊断模式**<br>(Advanced Diagnostics) | **选择性将 `mcphub-probe` 复制部署至 Hermes 的 `skills` 目录** | • **按需唤醒机制**：日常搜索 100% 静默免测；仅在用户显式提问或多源连续失败时触发；<br>• **通道深度取证**：可按需溯源单次检索的真实执行后端、耗时与返回体积（详见 `references/channel-forensics.md`）；<br>• **安全闭环护航**：具备固定探针防 Prompt 诱导、只读不可变连接与凭据脱敏防线。 |
 
 ## 📁 目录与配置（Directory & Configuration）
@@ -38,6 +37,7 @@ MCPHub/
 ├── mcp_gateway/                 # MCPHub 本地服务网关核心源码
 │   ├── server.py                # MCP JSON-RPC 协议驱动与动态工具调度
 │   ├── search.py                # 搜索引擎适配器、分级冷却与多源融合算法
+│   ├── finance.py               # 通达信金融适配器、量化指标引擎与金融网关调度
 │   ├── console.py               # 交互式管理控制台核心驱动
 │   ├── gui_add_provider.py      # Tkinter 原生可视化配置向导
 │   └── hermes_helper.py         # 真实绝对路径探测与挂载片段生成器
@@ -45,17 +45,21 @@ MCPHub/
 │   ├── gateway.json             # 网关总入口配置（支持通配符扫描）
 │   ├── providers/               # 能力分类配置目录
 │   │   ├── search.json          # 搜索引擎清单与优先级排布配置
-│   │   └── coding.json          # 编程与代码库文档检索配置 (Context7 驱动)
+│   │   ├── coding.json          # 编程与代码库文档检索配置 (Context7 驱动)
+│   │   └── finance.json         # 证券金融服务配置 (通达信官方主线路 + 抽象端点)
 │   ├── .env                     # 本地 API 密钥文件（需自行配置，勿提交）
 │   └── .env.example             # 密钥模板文件
 ├── scripts/                     # 共享运维与环境健康探活脚本目录
-│   └── probe_mcphub.sh          # 跨平台通用探活脚本（支持多Profile自适应）
+│   ├── probe_mcphub.sh          # 跨平台通用探活脚本（支持多Profile自适应）
+│   └── probe_tdx_quote.py       # 通达信金融接口网络连通性与行情探活脚本
 ├── mcphub-probe/                # 【可选外挂】Hermes 专属探针与取证 Skill 技能包
 │   ├── SKILL.md                 # 技能定义与按需唤醒调度规程
 │   └── references/              # 取证规范指南（包含 channel-forensics.md）
 ├── logs/                        # 运行日志目录（gateway.log）
 ├── state/                       # 状态持久化目录（provider-state.json 冷却状态）
-├── tests/                       # 62 项全量自动化单元测试套件
+├── tests/                       # 67 项全量自动化单元测试套件
+│   ├── test_gateway.py          # 核心网关与搜索适配器测试
+│   └── test_finance.py          # 金融工具与量化指标算法自动化测试
 ├── MCPHub服务管理面板.bat          # Windows 双击即用一键管理控制台
 ├── README.md                    # 项目全景使用与配置文档
 ├── LICENSE                      # MIT 开源许可证
@@ -89,7 +93,7 @@ MCPHub/
    - **`[1] 一键生成并查看 Hermes Desktop 挂载配置`**：自动探测当前电脑实测真实 Python 绝对路径与配置文件绝对路径，直接输出零歧义的 YAML 与 JSON 配置，告别路径占位符猜测。
    - **`[2] 启动可视化引擎与能力配置向导 (GUI)`**：双轨制原生 Windows 窗口，无需触碰任何 JSON 文件，可视化添加/管理搜索引擎，或新建自定义能力分类，并自动同步写入 `.env`。
    - **`[3] 快捷配置/编辑 API 密钥 (.env)`**：自动检查并用系统记事本打开密钥配置文件。
-   - **`[4] 运行服务健康检查与全部测试套件 (62 项)`**：一键验证本机所有核心算法、并发熔断、SSRF安全拦截与协议适配。
+   - **`[4] 运行服务健康检查与全部测试套件 (67 项)`**：一键验证本机所有核心算法、并发熔断、SSRF安全拦截、协议适配与金融量化计算。
    - **`[5] 查看服务运行日志`**：实时查看 `logs\gateway.log` 最新运行日志。
    - **`[6] 运行 Hermes MCP 连通性测试`**：一键执行 `hermes mcp test MCPHub`。
 
@@ -140,7 +144,7 @@ python mcp_gateway\gui_add_provider.py
    - 鼠标右键点击 `.env` 文件，选择「打开方式」→「记事本」进行编辑。
 
    **填写说明**：
-   在记事本中填写你已开通服务的 API Key，填完按快捷键 `Ctrl + S` 保存后关闭记事本即可。各 Key 直接填写密钥值即可，无需引号包裹（例如 `TAVILY_API_KEY=tvly-xxxx`；程序内部已做单双引号自动剥离容错）。未填写的服务会在运行时安全跳过。
+   在记事本中填写你已开通服务的 API Key，填完按快捷键 `Ctrl + S` 保存后关闭记事本即可。各 Key 直接填写密钥值即可，无需引号包裹（例如 `TAVILY_API_KEY=tvly-xxxx` 或 `TDX_API_KEY=xxxx`；程序内部已做单双引号自动剥离容错）。未填写的服务会在运行时安全跳过。
 
 5. 编辑 `config\providers\search.json`，按需要启用服务或调整优先级。
 6. 在 Hermes 中添加本地 MCP 服务（强烈推荐直接使用 **方式 A** 编辑 `config.yaml`，最不易出错）：
@@ -195,15 +199,23 @@ python mcp_gateway\gui_add_provider.py
      ```text
      Transport: stdio → ...\Python313\python.exe
      ✓ Connected
-     ✓ Tools discovered: 4
+     ✓ Tools discovered: 12
          fallback_web_search   单源经济型回退搜索
          multi_web_search      多源并发聚合融合搜索
          fallback_web_extract  自动回退的网页正文提取
          code_docs_search      基于 Context7 驱动的编程文档与代码片段检索
+         stock_lookup          股票名称/拼音代码语义智能检索
+         stock_quotes          A股实时五档盘口与微观行情
+         stock_kline           多周期K线与内置防幻觉量化指标(MA/MACD/KDJ/BOLL/RSI)
+         stock_financials      三大财务报表(资产负债表/利润表/现金流量表)
+         stock_f10             个股核心题材概念、资金流向与F10深度资料
+         stock_screener        自然语言智能条件选股
+         stock_news            个股最新资讯、公司公告与新闻速递
+         market_context        实时交易时钟、交易日与盘中阶段识别
      ```
    - 执行 `hermes mcp list` 确认状态为 `✓ enabled`。
 
-聚合器与 Hermes 只在本机经标准输入输出通信，不监听网络端口；但 Exa、AnySearch、Tavily、Jina AI 与 Bocha 本身是在线 API，因此目标电脑必须能访问互联网。
+聚合器与 Hermes 只在本机经标准输入输出通信，不监听网络端口；但各在线 API 本身需要网络连接，因此目标电脑必须能访问互联网。
 
 ## 排查
 
@@ -249,6 +261,41 @@ python mcp_gateway\gui_add_provider.py
 - **透明的命中可辨识设计**：返回条目包含显式的 `cached: true / false` 状态标识及 `cached_at`（如 `2026-10-17 16:45:00`）和 `total_characters`（全文字符量），调用端可一目了然区分实时抓取与磁盘缓存命中；
 - **30 分钟生命周期管理**：默认 TTL 1,800 秒（支持在 `search.json` 中自定义 `cache_ttl_seconds`），超时自动失效清理；
 - **SSRF 深度防护**：网关拒绝 localhost、私有/保留地址、含用户信息的 URL 与非 80/443 端口。
+
+### 4. `code_docs_search`（编程技术文档与代码片段精准检索）
+
+接受参数：
+- `query`（必填）：技术框架、库名或编程问题（如 `fastapi lifespan middleware`、`nextjs 15 app router`）
+- `limit`（1–20，默认 5）：返回结果条数
+
+特性与策略：
+- 由 Context7 原生高速官方驱动，精准检索权威开源库、编程语言与框架的 API 核心文档切片与高亮 Markdown 代码块；
+- 剥离噪音元数据，节约大模型上下文 Token；
+- 优雅兼容未配置 Key 时的公共试用通道与填入 Key 后的专属千次高速通道。
+
+---
+
+## 📈 金融与证券分析工具组 (Finance Tools — 8大标准工具)
+
+基于通达信官方行情专线（VIP 高速通道）与 AI 语义代码检索核心驱动，开箱即用，全面覆盖 A 股行情分析、量化指标计算、财务报表、资金题材与智能选股：
+
+| 工具名称 | 功能定位 | 核心输入参数 | 返回关键字段 / 输出特色 |
+| :--- | :--- | :--- | :--- |
+| **`stock_lookup`** | 股票代码/名称语义智能检索 | `query`（股票名/代码/拼音简称，如“茅台”、“BYD”）、`market_range`（默认 "AG"） | 标准化 6 位数字代码、市场归属（`market` / `setcode`）、公司全称 |
+| **`stock_quotes`** | 实时盘口微观行情 | `symbol`（股票代码，如 "600519"）、`setcode`（市场标识，可选） | 实时买一至买五、卖一至卖五五档委托挂单量与价格、现价、涨跌幅、换手率、PE(动/静/TTM)、总市值与流通市值、涨跌停限制价 |
+| **`stock_kline`** | 多周期K线与防幻觉量化指标 | `symbol`、`period`（`day`/`week`/`month`/`5m`/`15m`/`30m`/`60m`）、`count`（K线根数，默认100）、`indicators`（是否计算指标，默认 true） | 日期时间、OHLCV 基础行情，**客户端原生纯 Python 毫秒级计算 MA5/10/20、MACD (DIF/DEA/MACD柱)、KDJ (K/D/J)、布林带 (BOLL上中下轨)、RSI (6/12)**，彻底杜绝大模型数值计算幻觉 |
+| **`stock_financials`** | 结构化财务三张表 | `symbol`、`statement_type`（`balance` 资产负债表 / `income` 利润表 / `cashflow` 现金流量表）、`report_type`（`quarter` 季度 / `report` 年报）、`count`（历史期数，默认4） | 全量映射友好中文财务会计科目（如“货币资金”、“营业收入”、“扣非净利润”、“经营活动产生的现金流量净额”），杜绝生僻英文字段代码 |
+| **`stock_f10`** | 题材概念与资金流向 | `symbol`、`category`（`concepts` 题材概念、`forecast` 业绩预告、`shareholders` 股东户数、`top10` 十大流通股东、`capital_flow` 资金净流入、`margin` 融资融券、`unlock` 限售解禁） | 官方 F10 权威解析数据，支持板块概念明细、主力资金博弈与股东变动追踪 |
+| **`stock_screener`** | 自然语言智能选股 | `message`（自然语言选股指令，如“近三年ROE大于15%且市值大于500亿”）、`limit`（返回上限）、`page`（页码） | 官方 JNLPSE 自然语言问达选股引擎，直接返回符合量化条件的高匹配度股票标的列表及关键财务指标 |
+| **`stock_news`** | 个股最新资讯与公告 | `symbol`（股票代码）、`limit`（新闻条数，默认5） | 实时公告与主流财经资讯速递（含新闻标题、发布时间、摘要及原文链接） |
+| **`market_context`** | 市场交易时钟与交易日参考 | 可选传入或缺省 | 当前东八区北京时间、A股交易日判定、交易状态（开盘交易中 / 集合竞价 / 午间休市 / 已收盘 / 非交易日周末），辅助大模型建立时间意识 |
+
+### 金融接口架构特色
+- **双端点抽象解耦**：通达信主网关（`http://tdxhub.icfqs.com:7615/TQLEX`）与 RAG 检索端点（`https://ai.icfqs.com:8965/v1/rag-entity-retrieve`）已在 `config/providers/finance.json` 中全面参数化抽象，若未来官方服务器 IP 或域名发生变动，仅需修改配置文件，零代码改动；
+- **防重定向凭据泄漏（Security Hardening）**：底层通信使用独立安全 `OpenerDirector` 与 `NoRedirectHandler`，杜绝 301/302 重定向外泄用户敏感 API Key / Token；
+- **防幻觉量化指标算法（Anti-Hallucination Quant）**：大模型在直接阅读大量浮点数并自主计算 MACD 金叉死叉时极易发生计算幻觉。网关内置了纯 Python 高精度量化指标算法，直接在底层输出精确的浮点数指标序列，大模型只需负责逻辑解读，极大提升研报专业度与可信度。
+
+---
 
 ## 🔍 通道健康探活与诊断取证（可选扩展体系）
 
@@ -329,13 +376,54 @@ bash scripts/probe_mcphub.sh [profile]   # 缺省 profile 为 default
   > “Pydantic v2 中 field_validator 的最新用法是什么？”
 - **后台机制**：直接调用专属 Context7 引擎，毫秒级检索官方库索引切片；自动提取多语言 Markdown 代码高亮块、关键参数说明与官方原厂源链接（`codeId`），以极低 Token 消耗直给核心代码。若后续需要整页深读，还可与 `fallback_web_extract` 无缝联动！
 
-### 5. 界面展示与故障透明感知
-- **界面小卡片（Tool Call）**：Hermes 在调用工具时，回答气泡上方会显示正在调用的折叠卡片，如 `MCPHub -> multi_web_search({"query": "..."})`，直观反映调用过程。
+### 5. 场景五：A股盘口、量化指标与财报多维分析（自动调度 8 大金融工具集）
+- **适用场景**：个股微观行情跟踪、量化技术指标研判、上市公司财报排查、板块题材概念挖掘与自然语言量化选股。
+- **操作方式（直接使用日常自然语言提问）**：
+  - **盘口与微观指标**：  
+    > “帮我查一下宁德时代的实时股价和五档买卖盘口委托情况。”
+  - **技术分析与量化指标（防计算幻觉）**：  
+    > “请分析贵州茅台最近 60 个交易日的日K线走势，重点解读 MACD 和 KDJ 是否金叉，当前布林带处于什么形态？”
+  - **基本面与财务三张表**：  
+    > “请提取比亚迪近四期财报的利润表，对比营业收入、扣非净利润与毛利率的变化趋势。”
+  - **资金博弈与题材背景**：  
+    > “立讯精密最近有什么核心题材概念？主力资金流向和北向持股变动如何？”
+  - **AI 自然语言选股**：  
+    > “帮我选出近三年 ROE 大于 15%、市盈率小于 30 且市值大于 500 亿的半导体行业龙头股票。”
+- **后台机制**：
+  - **智能代码解析与自动纠偏**：即使只提“茅台”或“比亚迪”，底层 RAG 语义检索模块毫秒级完成名称到 6 位数字代码与市场的精确映射；
+  - **双通道极速直连**：行情、K线、财报数据通过通达信 VIP 官方线路极速返回；
+  - **本地量化指标零幻觉保障**：网关在 Python 进程内完成 MA、MACD、KDJ、BOLL 与 RSI 指标的高精度浮点数运算，大模型直接获得现成指标数据，专注逻辑综合研判。
+
+### 6. 界面展示与故障透明感知
+- **界面小卡片（Tool Call）**：Hermes 在调用工具时，回答气泡上方会显示正在调用的折叠卡片，如 `MCPHub -> stock_quotes({"symbol": "600519"})` 或 `MCPHub -> multi_web_search({"query": "..."})`，直观反映调用过程。
 - **异常透明预警**：当某家后端服务欠费耗尽或请求超限时，Hermes 的回答最顶部会带有醒目的黄底警示标：  
   `⚠️ 警告：检测到后端服务配额耗尽或请求限流 [tavily-search (HTTP 432: quota exhausted)]。请耐心等待配额重置稍后重试或联系MCP提供商。`  
   但回答**依然完整交付**（后续备用引擎已自动顶上接管）。
 
 ## 更新记录
+
+### v1.7.0 — 重磅升级：全面集成通达信官方专线，新增 8 大 A 股证券金融 MCP 工具与纯 Python 量化指标引擎
+
+- **正式推出 A 股与证券金融能力组（Finance Tools）**：
+  - 在 `config/providers/` 架构下正式开辟 `finance.json` 专属金融能力，向 Hermes 暴露 8 个标准金融 MCP 工具：
+    1. `stock_lookup`：基于 AI 语义向量检索的股票名称/代码/拼音简称自动纠偏匹配；
+    2. `stock_quotes`：A股五档盘口、市盈率(动/静/TTM)、换手率、总市值与流通市值等微观数据；
+    3. `stock_kline`：多周期（日/周/月/5分/15分/30分/60分）OHLCV 行情序列；
+    4. `stock_financials`：资产负债表、利润表、现金流量表三张表，全量映射友好中文会计科目；
+    5. `stock_f10`：概念题材、业绩预报、股东户数、十大流通股东、资金净流向、两融余额与限售解禁；
+    6. `stock_screener`：基于通达信 JNLPSE 自然语言问答选股引擎，实现无门槛量化选股；
+    7. `stock_news`：个股实时公告、权威财经快讯与新闻速递；
+    8. `market_context`：实时市场交易时钟、交易日与盘中交易状态判定。
+- **纯 Python 本地防幻觉量化指标算法引擎（Quant Anti-Hallucination Engine）**：
+  - 内置纯 Python 算法原生计算 MA5/10/20、MACD (12,26,9)、KDJ (9,3,3)、BOLL (20,2) 与 RSI (6,12)；
+  - 彻底杜绝大模型在面对大量 K 线浮点数时自主计算金叉/死叉引发的数值计算幻觉，大模型专注逻辑解读与趋势研判。
+- **网络通信安全加固与配置抽象解耦**：
+  - **服务器端点抽象**：将通达信主网关与 RAG 端点抽象至 `config/providers/finance.json`，支持零代码修改应对未来官方服务器迁移；
+  - **凭据防 302 跨域重定向泄漏**：为金融网关构建独立安全 `OpenerDirector` 与 `NoRedirectHandler`，杜绝 HTTP 301/302 重定向窃取敏感 Token；
+  - **严格参数类型校验**：强化股票代码与市场标识的非空、纯数字与边界防注入校验。
+- **全量测试套件扩增至 67 项**：
+  - 新增 `tests/test_finance.py` 专项测试，涵盖市场代码推断、量化指标计算精度、交易时钟识别、Schema 合法性与参数防御测试，全套 67 项测试 100% 通过。
+- **服务版本升级**：版本号正式递增至 `v1.7.0`。
 
 ### v1.6.0 — 架构升级：开辟编程分类集成 Context7 引擎，新增 code_docs_search 专属编程检索工具
 

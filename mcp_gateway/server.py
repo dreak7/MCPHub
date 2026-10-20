@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any, Callable
 
 from . import __version__
 from .config import ConfigError, load_config, resolve_project_path
+from .finance import FinanceGateway, get_finance_tool_specs
 from .search import CooldownStore, ExtractGateway, SearchError, SearchGateway
 
 SEARCH_TOOL_SCHEMA = {
@@ -216,6 +218,9 @@ class McpServer:
         except SearchError as exc:
             self.logger.warning("Gateway request failed: %s", exc)
             return self._result(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
+        except Exception as exc:
+            self.logger.warning("Tool %s execution failed: %s", tool_name, exc)
+            return self._result(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
 
     @staticmethod
     def _result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -280,9 +285,28 @@ def main() -> None:
             extract_gw = ExtractGateway(web_extract_def, state_path, logger, cooldown_store=cooldown_store)
             tools["fallback_web_extract"] = ToolDefinition(schema=EXTRACT_TOOL_SCHEMA, handler=extract_gw.extract)
 
+        # 动态自适应挂载金融服务能力：如果配置了 finance 且处于启用状态，则注册 8 大标准金融工具
+        if "finance" in capabilities:
+            fin_def = capabilities["finance"]
+            if isinstance(fin_def, dict) and fin_def.get("enabled", True):
+                api_key_name = fin_def.get("api_key_env", "TDX_API_KEY")
+                tdx_token = os.getenv(api_key_name, "") if isinstance(api_key_name, str) else ""
+                api_endpoint = fin_def.get("api_endpoint") or os.getenv("TDX_API_ENDPOINT") or "http://tdxhub.icfqs.com:7615/TQLEX"
+                rag_endpoint = fin_def.get("rag_endpoint") or os.getenv("TDX_RAG_ENDPOINT") or "https://ai.icfqs.com:8965/v1/rag-entity-retrieve"
+                timeout = fin_def.get("timeout_seconds", 15)
+                fin_gw = FinanceGateway(
+                    tdx_token=tdx_token,
+                    api_endpoint=api_endpoint,
+                    rag_endpoint=rag_endpoint,
+                    timeout=timeout,
+                    logger=logger,
+                )
+                for tool_name, (schema, handler) in get_finance_tool_specs(fin_gw).items():
+                    tools[tool_name] = ToolDefinition(schema=schema, handler=handler)
+
         # 动态自适应挂载扩展能力：遍历所有自定义能力分类（例如 academic_search、code_search 等）
         for cap_name, cap_def in capabilities.items():
-            if cap_name in ("web_search", "web_extract"):
+            if cap_name in ("web_search", "web_extract", "finance"):
                 continue
             if isinstance(cap_def, dict) and "providers" in cap_def:
                 cap_def.setdefault("name", cap_name)
