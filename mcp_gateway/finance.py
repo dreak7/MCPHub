@@ -2670,7 +2670,7 @@ STOCK_FINANCIALS_SCHEMA = {
     "inputSchema": {
         "type": "object",
         "properties": {
-            "symbol": {"type": "string", "description": "证券代码（如'600519'）"},
+            "symbol": {"type": "string", "description": "证券代码：A股为6位数字（如'600519'），港股为5位数字（如'00700'）"},
             "report_type": {"type": "string", "enum": ["balance", "income", "cashflow"], "default": "balance", "description": "财报类型：balance=资产负债表, income=利润表, cashflow=现金流量表"},
             "period_type": {"type": "string", "enum": ["report", "quarter"], "default": "report", "description": "统计口径：report=报告期累计(一季报/中报/三季报/年报), quarter=单季度口径"},
             "limit_periods": {"type": "integer", "minimum": 1, "maximum": 10, "default": 4, "description": "返回的历史财报期数，默认4期"}
@@ -2686,7 +2686,7 @@ STOCK_F10_SCHEMA = {
     "inputSchema": {
         "type": "object",
         "properties": {
-            "symbol": {"type": "string", "description": "证券代码（如'600519'）"},
+            "symbol": {"type": "string", "description": "证券代码：A股为6位数字（如'600519'），港股为5位数字（如'00700'）"},
             "category": {
                 "type": "string",
                 "enum": ["concepts", "events", "forecast", "shareholders", "top_holders", "margin_trading", "capital_flow", "limit_up", "unlocks", "summary", "basic_info"],
