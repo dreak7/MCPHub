@@ -4,6 +4,7 @@
 
 import json
 import unittest
+import unittest.mock
 from mcp_gateway.finance import (
     calculate_indicators,
     get_market_context,
@@ -396,22 +397,21 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertEqual(valuation.get("流通市值_亿港元"), 190.67)
             self.assertGreaterEqual(valuation.get("总市值_亿港元"), valuation.get("流通市值_亿港元"))
 
-    def test_hk_financials_and_f10_transparent_unsupported(self) -> None:
-        """测试港股代码调用 financials 与 f10 时显式返回 unsupported 状态与说明，杜绝静默空返回"""
+    def test_hk_financials_and_f10_supported(self) -> None:
+        """测试港股代码调用 financials 与 f10 成功接入新浪主力与东财备份数据源"""
         fin_gw = FinanceGateway()
-        # 1. 港股财报三张表
-        res_fin = fin_gw.stock_financials({"symbol": "02357", "report_type": "income"})
-        self.assertEqual(res_fin.get("status"), "unsupported")
+        # 1. 港股财报三张表 (支持利润表、资产负债表等)
+        res_fin = fin_gw.stock_financials({"symbol": "02357", "report_type": "income", "limit_periods": 2})
+        self.assertEqual(res_fin.get("market"), "香港交易所 (HKEX)")
         self.assertEqual(res_fin.get("symbol"), "02357")
-        self.assertIn("暂未收录港股", res_fin.get("message", ""))
-        self.assertEqual(res_fin.get("statements"), [])
+        self.assertIn("source", res_fin)
+        self.assertIsInstance(res_fin.get("statements"), list)
 
-        # 2. 港股 F10
+        # 2. 港股 F10 (公司概况与工商)
         res_f10 = fin_gw.stock_f10({"symbol": "02357", "category": "summary"})
-        self.assertEqual(res_f10.get("status"), "unsupported")
+        self.assertEqual(res_f10.get("market"), "香港交易所 (HKEX)")
         self.assertEqual(res_f10.get("symbol"), "02357")
-        self.assertIn("暂未收录港股标的之深度 F10", res_f10.get("message", ""))
-        self.assertEqual(res_f10.get("formatted_tables"), {})
+        self.assertIn("source", res_f10)
 
     def test_hk_kline_unadjusted_support(self) -> None:
         """测试港股 K 线支持 adjust='none' 不复权模式并正确路由"""
@@ -468,7 +468,142 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertEqual(len(news_items), 1)
             self.assertIn("新华保险增持中航科工", news_items[0]["title"])
 
+    def test_market_context_post_trading_reference_date(self) -> None:
+        """测试交易日收盘后 (15:00后) reference_trading_date 准确指向当日，而非前一日"""
+        import datetime
+        from mcp_gateway.finance import get_market_context
+        # 模拟工作日周三 17:00
+        mock_cst = datetime.datetime(2026, 10, 21, 17, 0, 0, tzinfo=datetime.timezone.utc)
+        with unittest.mock.patch("datetime.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_cst - datetime.timedelta(hours=8)
+            mock_dt.timezone = datetime.timezone
+            mock_dt.timedelta = datetime.timedelta
+            ctx = get_market_context()
+            self.assertEqual(ctx["market_status"], "closed_today")
+            self.assertEqual(ctx["reference_trading_date"], "2026-10-21")
+
+    def test_financials_type_consistency_and_n_isolation(self) -> None:
+        """测试财报字段数值类型一致性（防负数转str与int漂移）及现金流量表补充资料物理隔离"""
+        fin_gw = FinanceGateway()
+        mock_raw_cw = {
+            "ErrorCode": 0,
+            "ResultSets": [
+                {"ColName": ["isjr"], "Content": [[0]]},
+                {
+                    "ColName": ["N001", "N011", "N035", "N038", "N054", "N063", "Tdate"],
+                    "Content": [
+                        ["2026中报", "70690750119.06", "-375742600", "46033330566.78", "70690750119.06", "58385486034.9", "2026-06-30"]
+                    ],
+                },
+            ],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_raw_cw):
+            res = fin_gw.stock_financials({"symbol": "600519", "report_type": "cashflow", "limit_periods": 1})
+            stmt = res["statements"][0]
+            # 验证负数字符串已统一转为 float，无类型漂移
+            self.assertIsInstance(stmt["现金及现金等价物净增加额"], float)
+            self.assertEqual(stmt["现金及现金等价物净增加额"], -375742600.0)
+            # 验证主表中无任何未映射的 N 码泄露
+            raw_n_keys = [k for k in stmt.keys() if k.startswith("N0")]
+            self.assertEqual(len(raw_n_keys), 0)
+            # 验证补充资料已独立收纳于二级字典，主表中不包含 N054 等重复科目，杜绝双计
+            self.assertIn("补充资料_间接法", stmt)
+            self.assertEqual(stmt["补充资料_间接法"]["补充资料_经营活动现金流量净额"], 70690750119.06)
+
+    def test_kline_float32_price_normalization(self) -> None:
+        """测试 K 线价格 float32 舍入归一化（彻底消除 1309.689941 等精度漂移）"""
+        fin_gw = FinanceGateway()
+        mock_pbfxt = {
+            "AttachInfo": {"Name": "贵州茅台"},
+            "ListItem": [
+                {"Item": ["20261021", "1500", "1331.880005", "1331.979980", "1302.359985", "1309.689941", "3500000000.12", "20000", "20000"]},
+            ],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_pbfxt):
+            res = fin_gw.stock_kline({"symbol": "600519", "period": "day", "count": 1, "with_indicators": False})
+            bar = res["klines"][0]
+            self.assertEqual(bar["open"], 1331.88)
+            self.assertEqual(bar["high"], 1331.98)
+            self.assertEqual(bar["low"], 1302.36)
+            self.assertEqual(bar["close"], 1309.69)
+
+    def test_limit_up_empty_records_annotation(self) -> None:
+        """测试涨停分析 limit_up 无记录时保留官方数据源并注入明确的无记录说明"""
+        fin_gw = FinanceGateway()
+        mock_empty_limit_up = {
+            "ErrorCode": 0,
+            "ResultSets": [
+                {
+                    "Count": 0,
+                    "ResultSetKey": "table0",
+                    "ColName": ["currq", "lx", "sT002", "T011", "fdje", "zt", "yy", "N005"],
+                    "Content": [],
+                }
+            ],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_empty_limit_up):
+            res = fin_gw.stock_f10({"symbol": "600519", "category": "limit_up"})
+            self.assertEqual(res["source"], "tdx_official_vip (通达信官方授权专线)")
+            self.assertIn("无记录说明", res)
+            self.assertIn("无涨停或异动记录", res["无记录说明"])
+
+    def test_hk_stock_financials_dual_source(self) -> None:
+        """测试港股财务报表双源获取：新浪主力解析与东财备份切换"""
+        fin_gw = FinanceGateway()
+        # 1. 模拟新浪港股利润表 HTML 响应
+        mock_sina_html = """
+        <html><body>
+        <table class="tab05"><tr><td>指标</td></tr></table>
+        <table class="tab05"><tr><td>资产负债</td></tr></table>
+        <table class="tab05"><tr><td>现金流</td></tr></table>
+        <table class="tab05">
+            <tr><td>截止日</td><td>2026-06-30</td><td>2025-12-31</td></tr>
+            <tr><td>报告期</td><td>中报</td><td>年报</td></tr>
+            <tr><td>营业额</td><td>58,911.89</td><td>106,955.10</td></tr>
+            <tr><td>除税后溢利</td><td>17,232.52</td><td>32,694.20</td></tr>
+        </table>
+        </body></html>
+        """
+        with unittest.mock.patch("mcp_gateway.finance._SECURE_OPENER.open") as mock_open:
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.read.return_value = mock_sina_html.encode("gbk")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_open.return_value = mock_resp
+
+            res = fin_gw.stock_financials({"symbol": "00700", "report_type": "income", "limit_periods": 2})
+            self.assertEqual(res["market"], "香港交易所 (HKEX)")
+            self.assertIn("sina_hk_f10", res["source"])
+            self.assertEqual(res["period_count"], 2)
+            self.assertEqual(res["statements"][0]["截止日期"], "2026-06-30")
+            self.assertEqual(res["statements"][0]["营业额"], 58911.89)
+
+    def test_hk_stock_f10_profile(self) -> None:
+        """测试港股 F10 公司概况新浪主力专线获取"""
+        fin_gw = FinanceGateway()
+        mock_info_html = """
+        <html><body>
+        <table>
+            <tr><td>证券代码</td><td>00700</td></tr>
+            <tr><td>公司名称(中文)</td><td>腾讯控股有限公司</td></tr>
+            <tr><td>主席</td><td>马化腾</td></tr>
+            <tr><td>公司业务</td><td>提供增值服务与社交平台</td></tr>
+        </table>
+        </body></html>
+        """
+        with unittest.mock.patch("mcp_gateway.finance._SECURE_OPENER.open") as mock_open:
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.read.return_value = mock_info_html.encode("gbk")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_open.return_value = mock_resp
+
+            res = fin_gw.stock_f10({"symbol": "00700", "category": "summary"})
+            self.assertEqual(res["market"], "香港交易所 (HKEX)")
+            self.assertIn("sina_hk_f10", res["source"])
+            self.assertIn("腾讯控股有限公司", str(res["data"]))
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 
