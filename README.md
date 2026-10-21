@@ -1,8 +1,8 @@
-# Local MCP Search, Coding & Finance Fallback Gateway (v1.8.0)
+# Local MCP Search, Coding & Finance Fallback Gateway (v1.8.1)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 68 Passed](https://img.shields.io/badge/Tests-68%20Passed-success.svg)](tests/)
+[![Tests: 70 Passed](https://img.shields.io/badge/Tests-70%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 > **🙏 致谢与数据源声明 (Special Thanks & Acknowledgments)**  
@@ -22,7 +22,7 @@ MCPHub 统一服务网关 (12 大标准 MCP 工具)
 │   └── fallback_web_extract   长文正文智能提取 (30分钟落盘缓存 + read_file 联动翻页)
 ├── 💻 开发者编程文档切片层 (官方权威 API 索引)
 │   └── code_docs_search       基于 Context7 驱动的编程语言与开源框架文档代码切片检索
-└── 📈 专业证券量化与金融层 (A股+港股双轨智能路由，由 TDX-finance-mcp-plugin-v3 提供支持)
+└── 📈 专业证券与金融服务层 (A股+港股双轨智能路由，由 TDX-finance-mcp-plugin-v3 提供支持)
     ├── stock_lookup           股票名称/拼音代码语义智能检索 (AI RAG 驱动)
     ├── market_context         A股与港股交易日历感知与市场交易时钟判定
     ├── stock_quotes           实时行情与 Level-1 基础五档买卖委托盘口
@@ -43,12 +43,12 @@ MCPHub 统一服务网关 (12 大标准 MCP 工具)
 | **`multi_web_search`** | 全网搜索 | `query`, `max_results` | 多源并发检索，URL 规范化清洗，多源共同印证条目置顶加权 |
 | **`fallback_web_extract`** | 正文提取 | `urls`, `max_characters` | Markdown 纯净提取，30 分钟落盘缓存，超长截断自动注入 `paging_hint` |
 | **`code_docs_search`** | 编程文档 | `query`, `limit` | Context7 官方原厂驱动，检索编程库 API 文档与精选代码切片，零废弃 Token |
-| **`stock_lookup`** | 证券金融 | `query`, `range` | 输入自然语言公司名/拼音，反查标准 A 股 6 位代码或港股 5 位代码 |
+| **`stock_lookup`** | 证券金融 | `query`, `range` | 输入自然语言公司名/拼音/纯代码反查，**内置纯代码三轨正主保全层（如 002698 自动置顶博实股份，杜绝基金挤占）** |
 | **`market_context`** | 证券金融 | `{}` (缺省) | 毫秒级识别当前是否处于盘前集合竞价、早盘/午后盘中、已收盘或节假日 |
 | **`stock_quotes`** | 证券金融 | `symbol`, `setcode` | 现价、涨跌幅、日内真实振幅 (最高-最低)/昨收、动态市盈率 PE (附年化 EPS 与报告期单期 EPS 口径说明)、市净率 PB 及 **Level-1 基础五档买卖委托挂单** |
 | **`stock_kline`** | 证券金融 | `symbol`, `period`, `count` | 多周期行情，**服务端纯 Python 原生计算 MA/MACD/KDJ/BOLL**，彻底杜绝大模型心算幻觉 |
 | **`stock_financials`** | 证券金融 | `symbol`, `report_type` | 资产负债表、利润表、现金流量表，**80 列映射彻底校准，无字段漂移** |
-| **`stock_f10`** | 证券金融 | `symbol`, `category` | 支持题材概念、主力资金流向、股东户数、十大股东、解禁、两融等 11 类深度数据 |
+| **`stock_f10`** | 证券金融 | `symbol`, `category` | 支持题材概念、主力资金流向、股东户数、十大股东、解禁、两融等 11 类深度数据（内置防幻觉审计层：亏损标的同比“利润变动方向”校准与隔日风格标签盘中动态PB重算） |
 | **`stock_screener`** | 证券金融 | `message`, `filter_st` | 中文自然语言条件选股，**自动清洗杂质表头并默认剔除 ST/\*ST 风险股** |
 | **`stock_news`** | 证券金融 | `symbol`, `limit` | 新浪财经主力 + 东财公告备份三轨引擎，支持代码与中文简称 URL 编码检索 |
 
@@ -63,7 +63,7 @@ MCPHub 统一服务网关 (12 大标准 MCP 工具)
 - **`[1] 一键生成并查看 Hermes Desktop 挂载配置`**：自动识别本机实际 Python 绝对路径与配置文件路径，输出零歧义配置；
 - **`[2] 启动可视化引擎与能力配置向导 (GUI)`**：原生 Windows 窗口，免手动编辑 JSON 即可添加引擎或自定义能力分类；
 - **`[3] 快捷配置/编辑 API 密钥 (.env)`**：快速配置并管理搜索及通达信专线密钥；
-- **`[4] 运行服务健康检查与全部测试套件`**：一键运行全量 68 项自动化单元测试。
+- **`[4] 运行服务健康检查与全部测试套件`**：一键运行全量 70 项自动化单元测试。
 
 ### 2. 配置 Hermes Desktop
 直接打开 Hermes 的用户配置文件 `config.yaml`（或在设置界面中以 stdio 模式添加）：
@@ -115,10 +115,10 @@ python -m unittest discover tests
 ```
 执行结果：
 ```text
-Ran 68 tests in 1.048s
+Ran 70 tests in 1.746s
 OK
 ```
-测试全量覆盖：搜索多源融合降级、Context7 适配、通达信行情/K线/F10协议解析、资产负债表 80 列对齐、选股杂质过滤、腾讯港股分流、SSRF 安全防御等 68 个关键场景。
+测试全量覆盖：搜索多源融合降级、Context7 适配、通达信行情/K线/F10协议解析、资产负债表 80 列对齐、选股杂质过滤、腾讯港股分流、SSRF 安全防御等 70 个关键场景。
 
 ---
 

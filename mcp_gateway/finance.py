@@ -78,6 +78,37 @@ EXT_FIELD_MAP: dict[str, str] = {
 }
 
 # =========================================================================
+# 【功能块 1.1：F10 深度基本面关键财务与估值指标映射表】
+# - 输入：通达信 F10 摘要表底层英文缩写代码（如 mgjzc, gmjlr, gmjlrtbzzl, sjl）
+# - 功能：将底层缩写规范化映射为清晰、标准的中文金融业务指标
+# - 输出：dict 映射字典
+# =========================================================================
+F10_TABLE4_FINANCIAL_MAP: dict[str, str] = {
+    "mgsy": "每股收益_EPS",
+    "mgjzc": "每股净资产_BPS",
+    "yysr": "营业收入_元",
+    "gmjlr": "归母净利润_元",
+    "mll": "毛利率_pct",
+    "zcfzl": "资产负债率_pct",
+    "kfjlrtbzzl": "扣非净利润同比增减_pct",
+    "yysrtbzzl": "营业收入同比增减_pct",
+    "gmjlrtbzzl": "归母净利润同比增减_pct",
+    "mgzbgj": "每股资本公积",
+    "mgwfplr": "每股未分配利润",
+    "mgjjxjl": "每股经营现金流",
+    "bgq": "报告期",
+}
+
+F10_TABLE6_VALUATION_MAP: dict[str, str] = {
+    "sylttm": "动态市盈率_PE_TTM",
+    "syllyr": "静态市盈率_PE_LYR",
+    "sjl": "市净率_PB_昨收",
+    "zsz": "总市值_元",
+    "zgb": "总股本_股",
+    "ltag": "流通A股_股",
+}
+
+# =========================================================================
 # 【功能块 2：三大财务报表科目字段映射表（非金融实体企业）】
 # - 输入：通达信 CW 财报原始列代码（如 N001, N002）
 # - 功能：将资产负债表、利润表、现金流量表代码精确转换为会计科目名称
@@ -458,9 +489,128 @@ class TdxClient:
         except URLError as exc:
             raise RuntimeError(f"TDX API network connection error ({exc.reason})") from exc
 
+    # =========================================================================
+    # 【功能块 3.5：纯数字证券代码正主实体精准反查与保全解析器】
+    # - 输入参数：clean_code (str): 6位A股纯数字代码或5位港股纯数字代码
+    # - 实现功能：
+    #     解决 A 股代码与公募基金/债券等同名代码碰撞时，RAG 向量库遗漏股票正主或被挤占排名的缺陷
+    #     （典型案例如：002698 既是博实股份也是博时纯债基金，RAG 仅返回基金而漏掉博实股份；
+    #      000001 平安银行被华夏成长挤占等）。
+    #     采用三轨防御反查：
+    #     1. 第一轨：腾讯实时行情专线 (qt.gtimg.cn)，毫秒级覆盖沪深北全市场股票名称；
+    #     2. 第二轨：新浪财经公开行情专线 (hq.sinajs.cn) 备份兜底；
+    #     3. 第三轨：通达信官方专线 F10 摘要表 (table8.name) 权威反查。
+    # - 输出结果：dict[str, Any] | None: 标准股票实体字典（含 entity_code, entity_name, entity_type, entity_setcode, aliases）
+    # =========================================================================
+    def _resolve_exact_security_entity(self, clean_code: str) -> dict[str, Any] | None:
+        clean_code = clean_code.strip()
+        if clean_code.isdigit() and len(clean_code) == 6:
+            # A 股 6 位数字代码
+            if clean_code.startswith(("60", "68", "90")):
+                prefix = "sh"
+                setcode = 1
+            elif clean_code.startswith(("00", "30", "20")):
+                prefix = "sz"
+                setcode = 0
+            else:
+                prefix = "bj"
+                setcode = 2
+
+            # 第一轨：腾讯官方公开快速行情提取证券名称
+            url = f"http://qt.gtimg.cn/q={prefix}{clean_code}"
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            try:
+                with _SECURE_OPENER.open(req, timeout=3) as resp:
+                    raw = resp.read().decode("gb18030", errors="replace")
+                if "~" in raw and "none_match" not in raw:
+                    parts = raw.split("~")
+                    if len(parts) > 1 and parts[1].strip():
+                        name = parts[1].strip()
+                        return {
+                            "entity_code": clean_code,
+                            "entity_name": name,
+                            "entity_type": "A股代码",
+                            "entity_setcode": setcode,
+                            "aliases": [name],
+                        }
+            except Exception:
+                pass
+
+            # 第二轨：新浪财经公开快速行情提取证券名称
+            try:
+                sina_url = f"http://hq.sinajs.cn/list={prefix}{clean_code}"
+                sina_req = Request(
+                    sina_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                        "Referer": "https://finance.sina.com.cn",
+                    },
+                )
+                with _SECURE_OPENER.open(sina_req, timeout=3) as resp:
+                    raw = resp.read().decode("gbk", errors="replace")
+                if '="' in raw and '=""' not in raw:
+                    payload = raw.split('="', 1)[1]
+                    name = payload.split(",", 1)[0].strip()
+                    if name:
+                        return {
+                            "entity_code": clean_code,
+                            "entity_name": name,
+                            "entity_type": "A股代码",
+                            "entity_setcode": setcode,
+                            "aliases": [name],
+                        }
+            except Exception:
+                pass
+
+            # 第三轨：通达信官方专线 F10 摘要表 table8.name 权威兜底
+            try:
+                f10_res = self.get_f10(symbol=clean_code, category="summary")
+                tables = f10_res.get("formatted_tables", {})
+                if "table8" in tables and tables["table8"]:
+                    t8_name = tables["table8"][0].get("name")
+                    if t8_name and str(t8_name).strip():
+                        name = str(t8_name).strip()
+                        return {
+                            "entity_code": clean_code,
+                            "entity_name": name,
+                            "entity_type": "A股代码",
+                            "entity_setcode": setcode,
+                            "aliases": [name],
+                        }
+            except Exception:
+                pass
+
+        elif clean_code.isdigit() and len(clean_code) == 5:
+            # 港股 5 位数字代码
+            url = f"https://qt.gtimg.cn/q=r_hk{clean_code}"
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            try:
+                with _SECURE_OPENER.open(req, timeout=3) as resp:
+                    raw = resp.read().decode("gb18030", errors="replace")
+                if "~" in raw and "none_match" not in raw:
+                    parts = raw.split("~")
+                    if len(parts) > 1 and parts[1].strip():
+                        name = parts[1].strip()
+                        return {
+                            "entity_code": clean_code,
+                            "entity_name": name,
+                            "entity_type": "港股代码",
+                            "entity_setcode": 31,
+                            "aliases": [name],
+                        }
+            except Exception:
+                pass
+
+        return None
+
     def lookup_stock(self, query: str, market_range: str = "AG") -> list[dict[str, Any]]:
         """AI RAG 语义代码检索 (支持 A股, 港股 HK-GP, 美股 MG-GP, 基金 JJ, 指数 ZS)"""
-        req_body = {"query": query.strip(), "range": market_range}
+        raw_query = query.strip()
+        # 清洗可能带有的交易所前缀或后缀（如 sh600519 -> 600519, 002698.sz -> 002698）
+        clean_code = re.sub(r"^(sh|sz|bj|hk)", "", raw_query, flags=re.I)
+        clean_code = re.sub(r"\.(sh|sz|bj|hk|ss)$", "", clean_code, flags=re.I)
+
+        req_body = {"query": raw_query, "range": market_range}
         resp = self._post(self.rag_endpoint, req_body)
         entities: list[dict[str, Any]] = []
         if isinstance(resp, dict) and "retrieved_entities" in resp:
@@ -471,13 +621,38 @@ class TdxClient:
         # 智能全市场双重嗅探：如果默认搜 AG 返回为空，但用户可能问的是港股（如“腾讯”、“阿里”、“美团”），自动降级尝试 HK-GP
         if not entities and market_range == "AG":
             try:
-                hk_resp = self._post(self.rag_endpoint, {"query": query.strip(), "range": "HK-GP"})
+                hk_resp = self._post(self.rag_endpoint, {"query": raw_query, "range": "HK-GP"})
                 if isinstance(hk_resp, dict) and "retrieved_entities" in hk_resp:
                     hk_entities = hk_resp["retrieved_entities"]
                     if isinstance(hk_entities, list) and hk_entities:
                         entities = hk_entities
             except Exception:
                 pass
+
+        # 纯数字代码正主保全与首位置顶逻辑（解决基金/债券等同名代码挤占或遗漏股票正主的问题）
+        if clean_code.isdigit() and len(clean_code) in (5, 6) and market_range in ("AG", "all", "ALL", ""):
+            exact_target = self._resolve_exact_security_entity(clean_code)
+            if exact_target:
+                target_code = exact_target["entity_code"]
+                target_type = exact_target["entity_type"]
+
+                # 检查 RAG 返回列表中是否已存在该股票正主
+                found_idx = -1
+                for idx, item in enumerate(entities):
+                    if (
+                        item.get("entity_code") == target_code
+                        and item.get("entity_type") == target_type
+                    ):
+                        found_idx = idx
+                        break
+
+                if found_idx > 0:
+                    # 正主排在基金等其他实体之后，将其移至首位置顶
+                    exact_item = entities.pop(found_idx)
+                    entities.insert(0, exact_item)
+                elif found_idx < 0:
+                    # 正主被 RAG 完全漏掉，将解析出的权威正主直接置顶插入第 0 位
+                    entities.insert(0, exact_target)
 
         return entities
 
@@ -1468,6 +1643,9 @@ class FinanceGateway:
                         table_rows.append(row_dict)
                     formatted_tables[t_key] = table_rows
                 tdx_res["formatted_tables"] = formatted_tables
+                # 增强 F10 摘要表：汉化关键财务与估值指标、依据“利润变动方向”精确校准亏损标的同比含义、注入隔日风格标签与破净动态复核指引
+                if category == "summary" or ("table3" in formatted_tables and "table4" in formatted_tables):
+                    self._enrich_f10_summary_tables(formatted_tables, tdx_res)
                 return tdx_res
         except Exception:
             pass
@@ -1494,6 +1672,124 @@ class FinanceGateway:
             "category_name": category_names.get(category, category),
             "source": "public_f10_fallback",
             "data": fallback_data if fallback_data is not None else {"status": "暂无数据"},
+        }
+
+    # =========================================================================
+    # 【功能块 8.5：F10 摘要表业务增强与防幻觉校准处理器】
+    # - 输入：formatted_tables (各表行对象字典列表), tdx_res (F10 返回字典)
+    # - 功能：
+    #   1. 解决隔日标签盘中失效问题：提取清算基准日 (gxrq)、每股净资产 (mgjzc) 与破净股等风格标签，
+    #      注入隔日时效警示与盘中动态复核指引，引导大模型按 [现价/BPS] 重算 PB，杜绝颠倒结论。
+    #   2. 解决亏损标的同比记号歧义问题：针对当期净利润为负的标的，依据“利润变动方向”法则
+    #      将同比负号精准判定为【亏损扩大 XX%】，同比正号判定为【亏损收窄/减亏 XX%】，
+    #      彻底杜绝大模型将两负数相除误读为“盈利增长”。
+    # - 输出：原地更新 formatted_tables 与 tdx_res，注入汉化字段与防幻觉业务提示
+    # =========================================================================
+    def _enrich_f10_summary_tables(
+        self, formatted_tables: dict[str, list[dict[str, Any]]], tdx_res: dict[str, Any]
+    ) -> None:
+        gxrq = ""
+        if "table8" in formatted_tables and formatted_tables["table8"]:
+            gxrq = str(formatted_tables["table8"][0].get("gxrq", "") or "")
+
+        mgjzc = None
+        if "table4" in formatted_tables and formatted_tables["table4"]:
+            mgjzc = formatted_tables["table4"][0].get("mgjzc")
+
+        sjl = None
+        if "table6" in formatted_tables and formatted_tables["table6"]:
+            sjl = formatted_tables["table6"][0].get("sjl")
+
+        # 1. 增强 table4 (关键财务指标映射与亏损同比方向精确判定)
+        if "table4" in formatted_tables:
+            for row in formatted_tables["table4"]:
+                for ok, cn in F10_TABLE4_FINANCIAL_MAP.items():
+                    if ok in row and row[ok] is not None:
+                        row[cn] = row[ok]
+
+                g_profit = row.get("gmjlr")
+                g_tb = row.get("gmjlrtbzzl")
+                if g_profit is not None and g_tb is not None:
+                    try:
+                        p_val = float(g_profit)
+                        tb_val = float(g_tb)
+                        if p_val < 0:
+                            if tb_val < 0:
+                                row["归母净利润变动方向判定"] = f"亏损扩大 {abs(tb_val):.2f}%"
+                                row["亏损标的同比解读警示"] = (
+                                    f"【方向判定警示】该标的报告期归母净利润为负({p_val:,.2f}元)，"
+                                    f"通达信同比记号按利润变动方向记负号，表达【亏损扩大 {abs(tb_val):.2f}%】。"
+                                    "数学上两负数相除切勿误读为盈利增长！"
+                                )
+                            else:
+                                row["归母净利润变动方向判定"] = f"亏损收窄 {abs(tb_val):.2f}% (减亏)"
+                                row["亏损标的同比解读警示"] = (
+                                    f"【方向判定警示】该标的报告期归母净利润为负({p_val:,.2f}元)，"
+                                    f"同比正号表达【亏损收窄/减亏 {abs(tb_val):.2f}%】，非普通盈利增长。"
+                                )
+                        else:
+                            if tb_val >= 0:
+                                row["归母净利润变动方向判定"] = f"盈利同比增长 {tb_val:.2f}%"
+                            else:
+                                row["归母净利润变动方向判定"] = f"盈利同比下滑 {abs(tb_val):.2f}%"
+                    except (ValueError, TypeError):
+                        pass
+
+                # 扣非净利润变动方向判定
+                k_tb = row.get("kfjlrtbzzl")
+                k_profit = row.get("kfjlr")
+                if k_profit is None and "table0" in formatted_tables and formatted_tables["table0"]:
+                    k_profit = formatted_tables["table0"][0].get("kfjlr")
+                if k_tb is not None:
+                    try:
+                        tb_k_val = float(k_tb)
+                        if k_profit is not None and float(k_profit) < 0:
+                            if tb_k_val < 0:
+                                row["扣非净利润变动方向判定"] = f"扣非亏损扩大 {abs(tb_k_val):.2f}%"
+                            else:
+                                row["扣非净利润变动方向判定"] = f"扣非亏损收窄 {abs(tb_k_val):.2f}% (减亏)"
+                        else:
+                            if tb_k_val >= 0:
+                                row["扣非净利润变动方向判定"] = f"扣非净利润同比增长 {tb_k_val:.2f}%"
+                            else:
+                                row["扣非净利润变动方向判定"] = f"扣非净利润同比下滑 {abs(tb_k_val):.2f}%"
+                    except (ValueError, TypeError):
+                        pass
+
+        # 2. 增强 table3 (概念与风格标签隔日状态及破净动态复核指南)
+        if "table3" in formatted_tables:
+            for row in formatted_tables["table3"]:
+                tags = [v for v in row.values() if isinstance(v, str) and v.strip()]
+                row["有效风格标签"] = tags
+                row["隔日状态与时效警示"] = (
+                    f"【核心时效警示】上述风格标签（如 {tags}）及静态估值由通达信服务端于上一清算日（{gxrq or '前一交易日'}）批处理生成，具有隔日滞后性！"
+                    "盘中股价异动（如大涨、涨停或大跌）时可能产生完全相反的结论。"
+                )
+                if "破净股" in tags and mgjzc is not None:
+                    row["破净动态复核指引"] = (
+                        f"该标的前一交易日清算 PB={sjl or '未知'}（昨收价 < BPS {mgjzc}元）。"
+                        f"盘中若股价上涨且最新现价 >= {mgjzc}元（即即时 PB >= 1.0），则已脱离破净状态！"
+                        "盘中必须调用 stock_quotes 取得最新价核算，严禁直接盲从隔日静态标签。"
+                    )
+
+        # 3. 增强 table6 (估值指标映射与盘中重算提示)
+        if "table6" in formatted_tables:
+            for row in formatted_tables["table6"]:
+                for ok, cn in F10_TABLE6_VALUATION_MAP.items():
+                    if ok in row and row[ok] is not None:
+                        row[cn] = row[ok]
+                row["估值时效提示"] = f"市净率(PB)/市盈率(PE)基于上一交易日清算日({gxrq or '前一交易日'})，盘中请结合 stock_quotes 实时现价动态重算。"
+
+        # 4. 在根对象注入顶层审计警示字典
+        tdx_res["f10_audit_notice"] = {
+            "隔日概念标签提示": (
+                f"F10 摘要与概念标签（如破净股、绩优等）生成于上一交易日清算({gxrq or '昨日'})，盘中股价波动会导致标签反转失效。"
+                "盘中研判必须按 [stock_quotes 最新现价 ÷ 每股净资产] 动态重算即时 PB，严禁盲从静态标签。"
+            ),
+            "亏损公司同比记号规则": (
+                "亏损标的(净利润<0)的同比增减率记号代表'利润变动方向'：负号表示亏损扩大(恶化)，正号表示亏损收窄/减亏(改善)。"
+                "严禁使用两个负数相除计算得出正数并误读为盈利增长！"
+            ),
         }
 
     def stock_screener(self, arguments: dict[str, Any]) -> dict[str, Any]:

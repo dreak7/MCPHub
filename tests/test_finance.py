@@ -155,6 +155,125 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertEqual(k_res["klines"][-1]["close"], 410.4)
             self.assertIn("ma5", k_res["klines"][-1])
 
+    def test_f10_summary_enrichment_loss_and_profit(self) -> None:
+        """测试 F10 摘要表防幻觉增强：隔日风格标签时效警示、破净动态复核与亏损公司同比变动方向判定"""
+        fin_gw = FinanceGateway()
+
+        # 1. 模拟亏损标的 (如 600271: 归母净利润 < 0, 同比增减率 -24.78%)
+        loss_tables = {
+            "table3": [{"T060": None, "T063": "破净股"}],
+            "table4": [{
+                "mgsy": -0.2,
+                "mgjzc": 6.9427,
+                "gmjlr": -376941479.96,
+                "gmjlrtbzzl": -24.7834,
+                "kfjlrtbzzl": -15.5923,
+            }],
+            "table6": [{"sjl": 0.9694, "sylttm": -15.2}],
+            "table8": [{"name": "航天信息", "gxrq": "2026-10-20"}],
+        }
+        tdx_res_loss = {"symbol": "600271", "category": "summary", "formatted_tables": loss_tables}
+        fin_gw._enrich_f10_summary_tables(loss_tables, tdx_res_loss)
+
+        # 验证亏损标的同比方向判定
+        t4_loss = loss_tables["table4"][0]
+        self.assertEqual(t4_loss["归母净利润_元"], -376941479.96)
+        self.assertEqual(t4_loss["每股净资产_BPS"], 6.9427)
+        self.assertIn("亏损扩大 24.78%", t4_loss["归母净利润变动方向判定"])
+        self.assertIn("亏损标的同比解读警示", t4_loss)
+        self.assertIn("两负数相除切勿误读为盈利增长", t4_loss["亏损标的同比解读警示"])
+
+        # 验证隔日风格标签与破净动态复核指引
+        t3_loss = loss_tables["table3"][0]
+        self.assertEqual(t3_loss["有效风格标签"], ["破净股"])
+        self.assertIn("隔日状态与时效警示", t3_loss)
+        self.assertIn("破净动态复核指引", t3_loss)
+        self.assertIn("6.9427", t3_loss["破净动态复核指引"])
+
+        # 验证估值表与根级风险提示
+        self.assertIn("估值时效提示", loss_tables["table6"][0])
+        self.assertIn("f10_audit_notice", tdx_res_loss)
+
+        # 2. 模拟盈利标的 (如 300371: 归母净利润 > 0, 同比增减率 -61.98%)
+        profit_tables = {
+            "table3": [{"T060": None, "T063": None}],
+            "table4": [{
+                "mgsy": 0.079,
+                "mgjzc": 5.7525,
+                "gmjlr": 15799658.14,
+                "gmjlrtbzzl": -61.9816,
+                "kfjlrtbzzl": -68.3834,
+            }],
+            "table6": [{"sjl": 1.6549, "sylttm": 47.3551}],
+            "table8": [{"name": "汇中股份", "gxrq": "2026-10-20"}],
+        }
+        tdx_res_profit = {"symbol": "300371", "category": "summary", "formatted_tables": profit_tables}
+        fin_gw._enrich_f10_summary_tables(profit_tables, tdx_res_profit)
+
+        # 验证盈利标的正常判定为“下滑”，且不触发亏损警示
+        t4_profit = profit_tables["table4"][0]
+        self.assertIn("盈利同比下滑 61.98%", t4_profit["归母净利润变动方向判定"])
+        self.assertNotIn("亏损标的同比解读警示", t4_profit)
+
+    def test_stock_lookup_pure_code_pinning(self) -> None:
+        """测试纯数字证券代码正主保全与首位置顶逻辑（解决基金/债券代码碰撞挤占股票正主缺陷）"""
+        fin_gw = FinanceGateway()
+
+        # 1. 模拟 002698：RAG 仅返回基金“博时裕利纯债债券A”，A股正主“博实股份”被漏掉
+        mock_rag_response_002698 = {
+            "retrieved_entities": [
+                {"entity_code": "002698", "entity_name": "博时裕利纯债债券A", "entity_type": "基金代码", "entity_setcode": 33},
+                {"entity_code": "002667", "entity_name": "前海沪港深创新C", "entity_type": "基金代码", "entity_setcode": 33},
+            ]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_rag_response_002698):
+            with unittest.mock.patch.object(
+                fin_gw.tdx_client,
+                "_resolve_exact_security_entity",
+                return_value={
+                    "entity_code": "002698",
+                    "entity_name": "博实股份",
+                    "entity_type": "A股代码",
+                    "entity_setcode": 0,
+                    "aliases": ["博实股份"],
+                },
+            ):
+                res = fin_gw.stock_lookup({"query": "002698"})
+                entities = res.get("entities", [])
+                self.assertGreaterEqual(len(entities), 2)
+                # 验证正主“博实股份”被精确补齐并置于第 0 位
+                self.assertEqual(entities[0]["entity_code"], "002698")
+                self.assertEqual(entities[0]["entity_name"], "博实股份")
+                self.assertEqual(entities[0]["entity_type"], "A股代码")
+                # 验证原基金实体保留在第 1 位
+                self.assertEqual(entities[1]["entity_name"], "博时裕利纯债债券A")
+
+        # 2. 模拟 002594：RAG 返回比亚迪，但排在同代码基金后面（第 1 位）
+        mock_rag_response_002594 = {
+            "retrieved_entities": [
+                {"entity_code": "002594", "entity_name": "工银现代服务业混合A", "entity_type": "基金代码", "entity_setcode": 33},
+                {"entity_code": "002594", "entity_name": "比亚迪", "entity_type": "A股代码", "entity_setcode": 0},
+            ]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_rag_response_002594):
+            with unittest.mock.patch.object(
+                fin_gw.tdx_client,
+                "_resolve_exact_security_entity",
+                return_value={
+                    "entity_code": "002594",
+                    "entity_name": "比亚迪",
+                    "entity_type": "A股代码",
+                    "entity_setcode": 0,
+                    "aliases": ["比亚迪"],
+                },
+            ):
+                res_byd = fin_gw.stock_lookup({"query": "002594"})
+                entities_byd = res_byd.get("entities", [])
+                # 验证“比亚迪”被自动上浮并置于第 0 位
+                self.assertEqual(entities_byd[0]["entity_name"], "比亚迪")
+                self.assertEqual(entities_byd[0]["entity_type"], "A股代码")
+                self.assertEqual(entities_byd[1]["entity_name"], "工银现代服务业混合A")
+
 
 if __name__ == "__main__":
     unittest.main()
