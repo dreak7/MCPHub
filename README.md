@@ -8,7 +8,7 @@
 > **🙏 致谢与数据源声明 (Special Thanks & Acknowledgments)**  
 > 本项目的证券金融专用工具集底层数据接口由开源项目 [TDX-finance-mcp-plugin-v3](https://github.com/adambbhe/TDX-finance-mcp-plugin-v3) 提供支持，特此致谢！
 
-**MCPHub** 是专为 **Hermes Desktop** 及主流 MCP 客户端打造的本地高可用服务聚合网关。原生提供 **12 大生产级标准 MCP 工具**，无缝覆盖全网高可用搜索、官方编程文档切片以及 A 股/港股双轨专业证券金融分析能力。
+**MCPHub** 是适配 Hermes agent 的自定义 MCP 聚合服务脚本。原生提供 **12 大生产级标准 MCP 工具**，无缝覆盖全网高可用搜索、官方编程文档切片以及 A 股/港股双轨专业证券金融分析能力。
 
 ---
 
