@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import datetime
+import gzip
 import json
 import logging
 import math
 import os
 import re
 import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -115,37 +117,82 @@ BALANCE_FIELDS_NON_FINANCE: dict[str, str] = {
     "N002": "货币资金",
     "N003": "交易性金融资产",
     "N004": "应收票据及账款",
+    "N005": "应收票据",
     "N006": "应收账款",
     "N007": "预付款项",
     "N008": "其他应收款",
+    "N009": "应收利息",
+    "N010": "应收股利",
     "N011": "存货",
+    "N012": "一年内到期的非流动资产",
     "N013": "合同资产",
+    "N014": "其他流动资产",
     "N015": "流动资产合计",
+    "N016": "可供出售金融资产",
+    "N017": "债权投资",
+    "N018": "其他债权投资",
+    "N019": "其他权益工具投资",
+    "N020": "其他非流动金融资产",
+    "N021": "持有至到期投资",
+    "N022": "长期应收款",
     "N023": "长期股权投资",
+    "N024": "投资性房地产",
     "N025": "固定资产",
+    "N026": "固定资产清理",
     "N027": "在建工程",
-    "N031": "无形资产",
-    "N033": "商誉",
+    "N028": "工程物资",
+    "N029": "生产性生物资产",
+    "N030": "油气资产",
+    "N031": "使用权资产",
+    "N032": "无形资产",
+    "N033": "开发支出",
+    "N034": "商誉",
+    "N035": "长期待摊费用",
+    "N036": "递延所得税资产",
     "N037": "非流动资产合计",
     "N038": "资产总计",
     "N039": "短期借款",
+    "N040": "交易性金融负债",
+    "N041": "衍生金融负债",
+    "N042": "应付票据及应付账款",
+    "N043": "应付票据",
     "N044": "应付账款",
     "N045": "预收款项",
-    "N046": "应付职工薪酬",
-    "N047": "应交税费",
-    "N054": "合同负债",
-    "N056": "流动负债合计",
-    "N057": "长期借款",
-    "N058": "应付债券",
+    "N046": "合同负债",
+    "N047": "应付职工薪酬",
+    "N048": "应交税费",
+    "N049": "应付利息",
+    "N050": "应付股利",
+    "N051": "其他应付款",
+    "N052": "一年内到期的非流动负债",
+    "N053": "其他流动负债",
+    "N054": "流动负债合计",
+    "N055": "长期借款",
+    "N056": "应付债券",
+    "N057": "流动负债合计",
+    "N058": "长期应付款",
+    "N059": "专项应付款",
+    "N060": "预计负债",
+    "N061": "递延所得税负债",
+    "N062": "递延收益",
+    "N063": "租赁负债",
+    "N064": "其他非流动负债",
     "N065": "非流动负债合计",
-    "N066": "负债合计",
-    "N067": "实收资本_股本",
-    "N068": "资本公积",
-    "N071": "盈余公积",
-    "N072": "未分配利润",
-    "N073": "归母所有者权益合计",
-    "N074": "少数股东权益",
-    "N075": "所有者权益合计",
+    "N066": "非流动负债合计",
+    "N067": "负债合计",
+    "N068": "实收资本_股本",
+    "N069": "其他权益工具",
+    "N070": "资本公积",
+    "N071": "其他综合收益",
+    "N072": "专项储备",
+    "N073": "盈余公积",
+    "N074": "库存股",
+    "N075": "一般风险准备",
+    "N076": "未分配利润",
+    "N077": "所有者权益合计",
+    "N078": "归母所有者权益合计",
+    "N079": "少数股东权益",
+    "N080": "负债和所有者权益总计",
     "Tdate": "报告期日期",
 }
 
@@ -513,12 +560,12 @@ class TdxClient:
             },
             "五档深度盘口": {
                 "买一": {"价格": _safe_float(parts[9] if len(parts) > 9 else 0), "委托量": int(_safe_float(parts[10] if len(parts) > 10 else 0))},
-                "买二": {"价格": None, "委托量": None},
+                "买二": {"价格": None, "委托量": None, "说明": "港交所公开免费源仅提供即时买一/卖一撮合盘口"},
                 "买三": {"价格": None, "委托量": None},
                 "买四": {"价格": None, "委托量": None},
                 "买五": {"价格": None, "委托量": None},
                 "卖一": {"价格": _safe_float(parts[19] if len(parts) > 19 else 0), "委托量": int(_safe_float(parts[20] if len(parts) > 20 else 0))},
-                "卖二": {"价格": None, "委托量": None},
+                "卖二": {"价格": None, "委托量": None, "说明": "港交所公开免费源仅提供即时买一/卖一撮合盘口"},
                 "卖三": {"价格": None, "委托量": None},
                 "卖四": {"价格": None, "委托量": None},
                 "卖五": {"价格": None, "委托量": None},
@@ -683,20 +730,42 @@ class TdxClient:
             mapped_ext = {EXT_FIELD_MAP.get(k, k): v for k, v in ext_raw.items()}
             result["估值与基本盘面"] = mapped_ext
 
-        # 3. 五档盘口中文化整理
-        bsp_raw = raw.get("BspInfo", {})
-        if isinstance(bsp_raw, dict):
+        # 3. 五档深度买卖盘口整理（通达信官方 BspInfo 返回 5 项明细数组）
+        bsp_raw = raw.get("BspInfo", [])
+        if isinstance(bsp_raw, list) and bsp_raw:
+            bsp_dict = {}
+            buy_names = ["买一", "买二", "买三", "买四", "买五"]
+            sell_names = ["卖一", "卖二", "卖三", "卖四", "卖五"]
+            for idx, item in enumerate(bsp_raw[:5]):
+                if isinstance(item, dict):
+                    b_label = buy_names[idx] if idx < len(buy_names) else f"买{idx+1}"
+                    s_label = sell_names[idx] if idx < len(sell_names) else f"卖{idx+1}"
+                    b_price = item.get("BuyP")
+                    s_price = item.get("SellP")
+                    b_vol = item.get("BuyV")
+                    s_vol = item.get("SellV")
+                    bsp_dict[b_label] = {
+                        "价格": float(b_price) if b_price is not None and str(b_price).strip() else None,
+                        "委托量_手": int(b_vol) if (b_vol is not None and str(b_vol).isdigit()) else b_vol,
+                    }
+                    bsp_dict[s_label] = {
+                        "价格": float(s_price) if s_price is not None and str(s_price).strip() else None,
+                        "委托量_手": int(s_vol) if (s_vol is not None and str(s_vol).isdigit()) else s_vol,
+                    }
+            if bsp_dict:
+                result["五档深度盘口"] = bsp_dict
+        elif isinstance(bsp_raw, dict) and bsp_raw:
             bsp_dict = {
-                "买一": {"价格": bsp_raw.get("BuyPrice1"), "委托量": bsp_raw.get("BuyVol1")},
-                "买二": {"价格": bsp_raw.get("BuyPrice2"), "委托量": bsp_raw.get("BuyVol2")},
-                "买三": {"价格": bsp_raw.get("BuyPrice3"), "委托量": bsp_raw.get("BuyVol3")},
-                "买四": {"价格": bsp_raw.get("BuyPrice4"), "委托量": bsp_raw.get("BuyVol4")},
-                "买五": {"价格": bsp_raw.get("BuyPrice5"), "委托量": bsp_raw.get("BuyVol5")},
-                "卖一": {"价格": bsp_raw.get("SellPrice1"), "委托量": bsp_raw.get("SellVol1")},
-                "卖二": {"价格": bsp_raw.get("SellPrice2"), "委托量": bsp_raw.get("SellVol2")},
-                "卖三": {"价格": bsp_raw.get("SellPrice3"), "委托量": bsp_raw.get("SellVol3")},
-                "卖四": {"价格": bsp_raw.get("SellPrice4"), "委托量": bsp_raw.get("SellVol4")},
-                "卖五": {"价格": bsp_raw.get("SellPrice5"), "委托量": bsp_raw.get("SellVol5")},
+                "买一": {"价格": bsp_raw.get("BuyPrice1") or bsp_raw.get("BuyP1"), "委托量_手": bsp_raw.get("BuyVol1") or bsp_raw.get("BuyV1")},
+                "买二": {"价格": bsp_raw.get("BuyPrice2") or bsp_raw.get("BuyP2"), "委托量_手": bsp_raw.get("BuyVol2") or bsp_raw.get("BuyV2")},
+                "买三": {"价格": bsp_raw.get("BuyPrice3") or bsp_raw.get("BuyP3"), "委托量_手": bsp_raw.get("BuyVol3") or bsp_raw.get("BuyV3")},
+                "买四": {"价格": bsp_raw.get("BuyPrice4") or bsp_raw.get("BuyP4"), "委托量_手": bsp_raw.get("BuyVol4") or bsp_raw.get("BuyV4")},
+                "买五": {"价格": bsp_raw.get("BuyPrice5") or bsp_raw.get("BuyP5"), "委托量_手": bsp_raw.get("BuyVol5") or bsp_raw.get("BuyV5")},
+                "卖一": {"价格": bsp_raw.get("SellPrice1") or bsp_raw.get("SellP1"), "委托量_手": bsp_raw.get("SellVol1") or bsp_raw.get("SellV1")},
+                "卖二": {"价格": bsp_raw.get("SellPrice2") or bsp_raw.get("SellP2"), "委托量_手": bsp_raw.get("SellVol2") or bsp_raw.get("SellV2")},
+                "卖三": {"价格": bsp_raw.get("SellPrice3") or bsp_raw.get("SellP3"), "委托量_手": bsp_raw.get("SellVol3") or bsp_raw.get("SellV3")},
+                "卖四": {"价格": bsp_raw.get("SellPrice4") or bsp_raw.get("SellP4"), "委托量_手": bsp_raw.get("SellVol4") or bsp_raw.get("SellV4")},
+                "卖五": {"价格": bsp_raw.get("SellPrice5") or bsp_raw.get("SellP5"), "委托量_手": bsp_raw.get("SellVol5") or bsp_raw.get("SellV5")},
             }
             result["五档深度盘口"] = bsp_dict
 
@@ -873,17 +942,30 @@ class TdxClient:
         clean_code = re.sub(r"[^\d]", "", symbol)
         cat = category.lower()
 
+        # 通达信 PCCW 接口严格参数规范映射表：
+        # - concepts (热点题材): [code, "zttzbkz"]
+        # - events (事件驱动): [code, "sjcd"]
+        # - forecast (机构盈利预测): [code, "yzyq"]
+        # - shareholders (股东人数筹码): [code, "gdrs", "", "", "1", "1", "10"]
+        # - top_holders (十大流通股东): [code, "ltgd", "", "", "1", "1", "10"]
+        # - margin_trading (融资融券): [code, "rzrq", ""]
+        # - capital_flow (主力资金流向): [code, "zjlx", ""]
+        # - limit_up (涨停分析异动): [code, "ztfx", ""]
+        # - unlocks (限售解禁日程): [code, "xslt"]
+        # - summary (公司概要提示): [code, "gsgy", ""]
+        # - basic_info (公司基本工商): ["0", clean_code, ""]
         cat_configs: dict[str, tuple[str, list[str], str]] = {
-            "concepts": ("TdxSharePCCW.tdxf10_gg_rdtc", ["zttzbkz", clean_code], "热点题材板块族谱"),
-            "events": ("TdxSharePCCW.tdxf10_gg_rdtc", ["sjcd", clean_code], "事件驱动催化"),
-            "forecast": ("TdxSharePCCW.tdxf10_gg_ybpj", ["yzyq", clean_code], "机构盈利预测"),
-            "shareholders": ("TdxSharePCCW.tdxf10_gg_gdyj", ["gdrs", clean_code], "股东人数与筹码集中度"),
-            "top_holders": ("TdxSharePCCW.tdxf10_gg_gdyj", ["ltgd", clean_code], "十大流通股东"),
-            "margin_trading": ("TdxSharePCCW.tdxf10_gg_jyds", ["rzrq", clean_code], "融资融券交易数据"),
-            "capital_flow": ("TdxSharePCCW.tdxf10_gg_jyds", ["zjlx", clean_code], "主力资金流向"),
-            "limit_up": ("TdxSharePCCW.tdxf10_gg_jyds", ["ztfx", clean_code], "涨停分析与异动"),
-            "unlocks": ("TdxSharePCCW.tdxf10_gg_gbjg", ["xslt", clean_code], "限售解禁日程表"),
-            "summary": ("TdxSharePCCW.tdxf10_gg_zxts", ["gsgy", clean_code], "公司概要与最新提示"),
+            "concepts": ("TdxSharePCCW.tdxf10_gg_rdtc", [clean_code, "zttzbkz"], "热点题材板块族谱"),
+            "events": ("TdxSharePCCW.tdxf10_gg_rdtc", [clean_code, "sjcd"], "事件驱动催化"),
+            "forecast": ("TdxSharePCCW.tdxf10_gg_ybpj", [clean_code, "yzyq"], "机构盈利预测"),
+            "shareholders": ("TdxSharePCCW.tdxf10_gg_gdyj", [clean_code, "gdrs", "", "", "1", "1", "10"], "股东人数与筹码集中度"),
+            "top_holders": ("TdxSharePCCW.tdxf10_gg_gdyj", [clean_code, "ltgd", "", "", "1", "1", "10"], "十大流通股东"),
+            "margin_trading": ("TdxSharePCCW.tdxf10_gg_jyds", [clean_code, "rzrq", ""], "融资融券交易数据"),
+            "capital_flow": ("TdxSharePCCW.tdxf10_gg_jyds", [clean_code, "zjlx", ""], "主力资金流向"),
+            "limit_up": ("TdxSharePCCW.tdxf10_gg_jyds", [clean_code, "ztfx", ""], "涨停分析与异动"),
+            "unlocks": ("TdxSharePCCW.tdxf10_gg_gbjg", [clean_code, "xslt"], "限售解禁日程表"),
+            "summary": ("TdxSharePCCW.tdxf10_gg_zxts", [clean_code, "gsgy", ""], "公司概要与最新提示"),
+            "basic_info": ("TdxSharePCCW.tdxf10_gg_gsgk", ["0", clean_code, ""], "公司基本工商与发行信息"),
         }
 
         if cat not in cat_configs:
@@ -901,29 +983,91 @@ class TdxClient:
             "data": raw,
         }
 
-    def screener(self, message: str, limit: int = 10, page: int = 1) -> dict[str, Any]:
+    def screener(self, message: str, limit: int = 10, page: int = 1, filter_st: bool = True) -> dict[str, Any]:
         """通达信自然语言智能选股 (输入中文自然语言条件，如'主板 绩优 储能 连板')"""
+        # 如果开启过滤 ST，向底层多请求适量候选以补齐过滤损耗
+        fetch_size = max(1, min(limit * 2 if filter_st else limit, 50))
         req_body = [{
             "message": message.strip(),
             "rang": "AG",
             "pageNo": str(page),
-            "pageSize": str(max(1, min(limit, 50))),
+            "pageSize": str(fetch_size),
         }]
         url = f"{self.api_endpoint}?Entry=JNLPSE:wendaQuery"
         raw = self._post(url, req_body)
 
         results: list[dict[str, Any]] = []
-        if isinstance(raw, list) and len(raw) > 1:
-            for item in raw[1:]:
-                if isinstance(item, list) and len(item) >= 3:
-                    results.append({
-                        "code": str(item[0]),
-                        "name": str(item[1]),
-                        "raw_info": item[2:],
-                    })
+        headers: list[str] = []
+        if isinstance(raw, list) and len(raw) >= 3:
+            # 通达信 wendaQuery 原生二维数组结构说明：
+            # - Row 0: 查询元信息 [0, '', 31, session_id, count]
+            # - Row 1: 列标题表头 ['POS', 'market', 'sec_code', 'sec_name', 'now_price', 'chg', ...]
+            # - Row 2: 数据类型行 ['', '', '', '', '2|0|0', ...]
+            # - Row 3 起: 真实股票数据行 [序号, 市场代码, 股票代码, 股票名称, 现价, 涨跌幅, 业务指标...]
+            raw_headers = raw[1] if isinstance(raw[1], list) else []
+            headers = [str(h).strip() for h in raw_headers]
+
+            data_rows = raw[3:] if len(raw) > 3 else []
+            for item in data_rows:
+                if not isinstance(item, list) or len(item) < 4:
+                    continue
+                # 剔除表头行残留或空行
+                if str(item[0]).strip().upper() in ("POS", ""):
+                    continue
+
+                market_val = str(item[1]).strip()
+                sec_code = str(item[2]).strip()
+                sec_name = str(item[3]).strip()
+
+                # 必须符合 6 位标准证券代码
+                if not re.match(r"^\d{6}$", sec_code):
+                    continue
+
+                is_st = ("ST" in sec_name.upper()) or ("退" in sec_name)
+                if filter_st and is_st:
+                    continue
+
+                now_price = None
+                try:
+                    now_price = round(float(item[4]), 2) if len(item) > 4 and str(item[4]).strip() != "" else None
+                except (ValueError, TypeError):
+                    pass
+
+                chg_pct = None
+                try:
+                    chg_pct = round(float(item[5]), 2) if len(item) > 5 and str(item[5]).strip() != "" else None
+                except (ValueError, TypeError):
+                    pass
+
+                # 动态提取后续业务指标列（如 ROE、流通市值、概念匹配等）
+                dynamic_indicators: dict[str, Any] = {}
+                for col_idx in range(6, len(item)):
+                    col_name = headers[col_idx] if col_idx < len(headers) else f"指标_{col_idx}"
+                    clean_col_name = re.sub(r"[0-9#|]+$", "", col_name).strip()
+                    val_str = str(item[col_idx]).strip()
+                    try:
+                        dynamic_indicators[clean_col_name] = round(float(val_str), 4) if "." in val_str else (int(val_str) if val_str.isdigit() else val_str)
+                    except Exception:
+                        dynamic_indicators[clean_col_name] = val_str
+
+                market_name = "深市" if market_val == "0" else ("沪市" if market_val == "1" else ("北交所" if market_val == "2" else market_val))
+
+                results.append({
+                    "code": sec_code,
+                    "name": sec_name,
+                    "market": market_name,
+                    "price": now_price,
+                    "change_pct": chg_pct,
+                    "is_st": is_st,
+                    "indicators": dynamic_indicators,
+                })
+
+                if len(results) >= limit:
+                    break
 
         return {
             "query": message,
+            "filter_st": filter_st,
             "matched_count": len(results),
             "stocks": results,
             "raw_summary": raw[0] if (isinstance(raw, list) and raw) else None,
@@ -941,30 +1085,256 @@ class PublicFallbackClient:
     def __init__(self, timeout: int = 10):
         self.timeout = timeout
 
+    # =========================================================================
+    # 【功能块：个股最新新闻资讯与重大公告双轨获取引擎】
+    # - 输入：symbol (str): 证券代码；limit (int): 返回条目上限 (1-10)
+    # - 功能：新浪财经为主力通道（低频控、原生标准JSON、高可用），东方财富为备用通道
+    # - 输出：list[dict[str, Any]]: 结构化新闻列表（标题、时间、媒体、链接、正文摘要）
+    # =========================================================================
     def get_news(self, symbol: str, limit: int = 5) -> list[dict[str, Any]]:
-        """从东方财富公开资讯接口获取个股最新新闻与公告"""
+        raw_query = symbol.strip()
+        clean_code = re.sub(r"[^\d]", "", raw_query)
+        # 智能确定检索词：若有 6 位代码优先用代码，若传入中文名称（如'贵州茅台'）则直接使用名称
+        search_term = clean_code if clean_code else raw_query
+        req_limit = max(1, min(limit, 10))
+
+        # 1. 主力通道：新浪财经新闻搜索接口（风控宽松、响应极速、原生标准 JSON）
+        try:
+            encoded_q = urllib.parse.quote(search_term)
+            sina_url = f"https://search.sina.com.cn/api/news?q={encoded_q}&size={req_limit}&page=1"
+            req = Request(
+                sina_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+                    "Referer": "https://search.sina.com.cn/",
+                },
+                method="GET",
+            )
+            with urlopen(req, timeout=self.timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                data = json.loads(raw)
+                items = data.get("data", {}).get("list", [])
+                if items and isinstance(items, list):
+                    news_list: list[dict[str, Any]] = []
+                    for item in items[:req_limit]:
+                        title = re.sub(r"<[^>]+>", "", item.get("title", "")).strip()
+                        snippet = re.sub(r"<[^>]+>", "", item.get("intro", "")).strip()
+                        media_name = item.get("media", "").strip() or "新浪财经"
+                        news_list.append({
+                            "title": title,
+                            "source": media_name,
+                            "time": item.get("dataTime", ""),
+                            "url": item.get("url", ""),
+                            "snippet": snippet[:150] + "..." if len(snippet) > 150 else snippet,
+                        })
+                    if news_list:
+                        return news_list
+        except Exception:
+            pass
+
+        # 2. 备用通道一：东方财富全文检索 JSONP 接口
+        try:
+            em_params = {
+                "cb": "jQuery_news",
+                "param": json.dumps({
+                    "code": clean_code if clean_code else search_term,
+                    "type": ["cmsArticleWebOld"],
+                    "pageindex": 1,
+                    "pagesize": req_limit,
+                    "keyword": search_term,
+                }, ensure_ascii=False),
+            }
+            em_url = "https://search-api-web.eastmoney.com/search/jsonp?" + urllib.parse.urlencode(em_params)
+            req = Request(
+                em_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                method="GET",
+            )
+            with urlopen(req, timeout=self.timeout) as resp:
+                raw_text = resp.read().decode("utf-8", errors="replace")
+                match = re.search(r"jQuery_news\((.*)\)", raw_text, re.DOTALL)
+                if match:
+                    data = json.loads(match.group(1))
+                    articles = data.get("result", {}).get("cmsArticleWebOld", [])
+                    news_list = []
+                    for item in articles[:req_limit]:
+                        title = re.sub(r"<[^>]+>", "", item.get("title", "")).strip()
+                        snippet = re.sub(r"<[^>]+>", "", item.get("content", "")).strip()
+                        media_name = item.get("mediaName", "").strip() or "东方财富"
+                        news_list.append({
+                            "title": title,
+                            "source": media_name,
+                            "time": item.get("date", ""),
+                            "url": item.get("url", ""),
+                            "snippet": snippet[:150] + "..." if len(snippet) > 150 else snippet,
+                        })
+                    if news_list:
+                        return news_list
+        except Exception:
+            pass
+
+        # 3. 备用通道二：东方财富官方权威上市公司重大公告专线（重大公告兜底，100% 有数据）
+        if clean_code:
+            try:
+                ann_url = f"https://np-anotice-stock.eastmoney.com/api/security/ann?page_size={req_limit}&page_index=1&ann_type=A&client_source=web&stock_list={clean_code}"
+                req = Request(
+                    ann_url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                    method="GET",
+                )
+                with urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    ann_items = data.get("data", {}).get("list", [])
+                    if ann_items and isinstance(ann_items, list):
+                        ann_list = []
+                        for item in ann_items[:req_limit]:
+                            ann_title = (item.get("title_ch") or item.get("title") or "").strip()
+                            art_code = item.get("art_code", "")
+                            ann_url_link = f"https://data.eastmoney.com/notices/detail/{clean_code}/{art_code}.html" if art_code else ""
+                            ann_list.append({
+                                "title": ann_title,
+                                "source": "上市公司官方公告",
+                                "time": (item.get("notice_date") or "")[:19],
+                                "url": ann_url_link,
+                                "snippet": f"【上市公司法定公告】{ann_title}",
+                            })
+                        if ann_list:
+                            return ann_list
+            except Exception:
+                pass
+
+        return []
+
+    # =========================================================================
+    # 【功能块：公开数据中心 F10 深度资料自动高可用降级引擎】
+    # - 输入：symbol (str): 证券代码；category (str): 分类 (shareholders, top_holders, concepts, summary, unlocks)
+    # - 功能：当通达信官方专线 PCCW 库未开放或返回错误码时，自动从公开数据中心获取结构化基本面
+    # - 输出：dict[str, Any] | list[Any] | None: 结构化 F10 数据字典或列表
+    # =========================================================================
+    def get_f10(self, symbol: str, category: str = "concepts") -> dict[str, Any] | list[Any] | None:
         clean_code = re.sub(r"[^\d]", "", symbol)
-        url = f"https://search-api-web.eastmoney.com/search/json?keywords={clean_code}&pageindex=1&pagesize={max(1, min(limit, 10))}&type=news"
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, method="GET")
+        cat = category.lower()
+
+        # 根据代码前缀推导市场后缀 (.SH / .SZ / .BJ) 与前缀 (SH / SZ / BJ)
+        if clean_code.startswith(("60", "68", "90")):
+            secucode_dot = f"{clean_code}.SH"
+            secucode_pre = f"SH{clean_code}"
+        elif clean_code.startswith(("00", "30", "20")):
+            secucode_dot = f"{clean_code}.SZ"
+            secucode_pre = f"SZ{clean_code}"
+        elif clean_code.startswith(("8", "4", "92")):
+            secucode_dot = f"{clean_code}.BJ"
+            secucode_pre = f"BJ{clean_code}"
+        else:
+            secucode_dot = f"{clean_code}.SH"
+            secucode_pre = f"SH{clean_code}"
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+            "Referer": "https://emweb.securities.eastmoney.com/",
+        }
 
         try:
-            with urlopen(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
-                items = data.get("Data", [])
-                news_list: list[dict[str, Any]] = []
-                for item in items:
-                    title = re.sub(r"<[^>]+>", "", item.get("Title", ""))
-                    snippet = re.sub(r"<[^>]+>", "", item.get("Content", ""))
-                    news_list.append({
-                        "title": title,
-                        "source": item.get("MediaName", "东方财富"),
-                        "time": item.get("ShowTime", ""),
-                        "url": item.get("Url", ""),
-                        "snippet": snippet[:150] + "..." if len(snippet) > 150 else snippet,
-                    })
-                return news_list
+            # 1. 股东人数与筹码集中度
+            if cat == "shareholders":
+                url = f"https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_HOLDERNUMLATEST&columns=ALL&filter=(SECUCODE=%22{secucode_dot}%22)"
+                req = Request(url, headers=headers)
+                with urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    items = data.get("result", {}).get("data", [])
+                    if items:
+                        item = items[0]
+                        return {
+                            "最新股东户数": item.get("HOLDER_NUM"),
+                            "较上期增减户数": item.get("HOLDER_NUM_CHANGE"),
+                            "户数变动比例_pct": item.get("HOLDER_NUM_RATIO"),
+                            "户均持股市值_元": item.get("AVG_MARKET_CAP"),
+                            "户均持股数量": item.get("AVG_HOLD_NUM"),
+                            "统计截止日期": (item.get("END_DATE") or "")[:10],
+                            "公告日期": (item.get("HOLD_NOTICE_DATE") or "")[:10],
+                        }
+
+            # 2. 十大流通股东
+            elif cat == "top_holders":
+                url = f"https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_F10_EH_FREEHOLDERS&columns=ALL&filter=(SECUCODE=%22{secucode_dot}%22)&pageSize=10"
+                req = Request(url, headers=headers)
+                with urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    items = data.get("result", {}).get("data", [])
+                    if items:
+                        holders = []
+                        for h in items[:10]:
+                            holders.append({
+                                "名次": h.get("HOLDER_RANK"),
+                                "股东名称": h.get("HOLDER_NAME"),
+                                "持股数": h.get("HOLD_NUM"),
+                                "占流通盘比例_pct": h.get("FREE_HOLDNUM_RATIO"),
+                                "持股变动": h.get("HOLD_CHANGE"),
+                            })
+                        return {"前十大流通股东": holders, "报告期": (items[0].get("END_DATE") or "")[:10]}
+
+            # 3. 热点题材与板块族谱
+            elif cat == "concepts":
+                url = f"http://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax?code={secucode_pre}"
+                req = Request(url, headers=headers)
+                with urlopen(req, timeout=self.timeout) as resp:
+                    raw = resp.read()
+                    try:
+                        raw = gzip.decompress(raw)
+                    except Exception:
+                        pass
+                    data = json.loads(raw.decode("utf-8", errors="replace"))
+                    boards = [x.get("BOARD_NAME") for x in data.get("ssbk", []) if x.get("BOARD_NAME")]
+                    topics = [
+                        {"主题": x.get("KEYWORD"), "核心要点": x.get("MAINPOINT_CONTENT")}
+                        for x in data.get("hxtc", [])
+                        if x.get("KEYWORD")
+                    ]
+                    return {"所属板块": boards, "核心题材": topics[:8]}
+
+            # 4. 公司概要与基本面信息
+            elif cat == "summary":
+                url = f"http://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax?code={secucode_pre}"
+                req = Request(url, headers=headers)
+                with urlopen(req, timeout=self.timeout) as resp:
+                    raw = resp.read()
+                    try:
+                        raw = gzip.decompress(raw)
+                    except Exception:
+                        pass
+                    data = json.loads(raw.decode("utf-8", errors="replace"))
+                    jbzl = data.get("jbzl", [{}])[0]
+                    return {
+                        "公司全称": jbzl.get("ORG_NAME"),
+                        "所属行业": jbzl.get("INDUSTRYCSRC1"),
+                        "法定代表人": jbzl.get("LEGAL_PERSON"),
+                        "董事长": jbzl.get("CHAIRMAN"),
+                        "注册资本_万元": jbzl.get("REG_CAPITAL"),
+                        "员工总数": jbzl.get("EMP_NUM"),
+                        "主营业务": jbzl.get("MAIN_BUSINESS"),
+                        "经营范围": jbzl.get("BUSINESS_SCOPE"),
+                        "公司简介": (jbzl.get("ORG_PROFILE") or "").strip()[:300],
+                    }
+
+            # 5. 限售解禁日程
+            elif cat == "unlocks":
+                url = f"https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_LIFT_STAGE&columns=ALL&filter=(SECURITY_CODE=%22{clean_code}%22)&pageNumber=1&pageSize=5"
+                req = Request(url, headers=headers)
+                with urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    items = data.get("result", {}).get("data", []) if data.get("result") else []
+                    return [
+                        {
+                            "解禁日期": (x.get("FREE_DATE") or "")[:10],
+                            "解禁股数_万股": x.get("FREE_SHARES"),
+                            "解禁类型": x.get("LIMITED_TYPE_NAME"),
+                        }
+                        for x in items
+                    ]
         except Exception:
-            return []
+            return None
+
+        return None
 
 
 # =========================================================================
@@ -1044,7 +1414,67 @@ class FinanceGateway:
         if not symbol:
             raise ValueError("symbol 不能为空")
         category = arguments.get("category", "concepts")
-        return self.tdx_client.get_f10(symbol=symbol, category=category)
+
+        # 1. 首先尝试通达信官方专线获取（优先官方授权渠道）
+        try:
+            tdx_res = self.tdx_client.get_f10(symbol=symbol, category=category)
+            raw_data = tdx_res.get("data", {})
+            need_fallback = False
+            # 检查通达信服务端是否返回了 -1005 等数据库执行错误，或空的占位结构 [[0]]
+            if not raw_data or (isinstance(raw_data, dict) and raw_data.get("ErrorCode", 0) != 0):
+                need_fallback = True
+            elif isinstance(raw_data, dict) and "ResultSets" in raw_data:
+                rs = raw_data.get("ResultSets", [])
+                if not rs:
+                    need_fallback = True
+                elif len(rs) == 1:
+                    first_table = rs[0]
+                    if first_table.get("ColName") == ["0"] or not first_table.get("Content") or first_table.get("Content") == [[0]]:
+                        need_fallback = True
+            if not need_fallback:
+                tdx_res["source"] = "tdx_official_vip (通达信官方授权专线)"
+                # 将 ResultSets 中的各表结构化转换为行对象字典列表，便于大模型与前端直观阅读
+                formatted_tables = {}
+                for idx, table in enumerate(raw_data.get("ResultSets", [])):
+                    t_key = table.get("ResultSetKey", f"table{idx}")
+                    cols = table.get("ColName", [])
+                    rows = table.get("Content", [])
+                    table_rows = []
+                    for row in rows:
+                        row_dict = {}
+                        for c_idx, val in enumerate(row):
+                            col_title = cols[c_idx] if c_idx < len(cols) else f"col_{c_idx}"
+                            row_dict[col_title] = val
+                        table_rows.append(row_dict)
+                    formatted_tables[t_key] = table_rows
+                tdx_res["formatted_tables"] = formatted_tables
+                return tdx_res
+        except Exception:
+            pass
+
+        # 2. 通达信未开放或异常时，自动平滑降级至公开数据中心高可用 F10
+        fallback_data = self.fallback_client.get_f10(symbol=symbol, category=category)
+        clean_code = re.sub(r"[^\d]", "", symbol)
+        category_names = {
+            "concepts": "热点题材板块族谱",
+            "events": "事件驱动催化",
+            "forecast": "机构盈利预测",
+            "shareholders": "股东人数与筹码集中度",
+            "top_holders": "十大流通股东",
+            "margin_trading": "融资融券交易数据",
+            "capital_flow": "主力资金流向",
+            "limit_up": "涨停分析与异动",
+            "summary": "公司概要与最新提示",
+            "unlocks": "限售解禁日程表",
+            "basic_info": "公司基本工商与发行信息",
+        }
+        return {
+            "symbol": clean_code,
+            "category": category,
+            "category_name": category_names.get(category, category),
+            "source": "public_f10_fallback",
+            "data": fallback_data if fallback_data is not None else {"status": "暂无数据"},
+        }
 
     def stock_screener(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """工具 6：自然语言智能选股 (如'主板 小盘 绩优 储能 连板')"""
@@ -1053,7 +1483,8 @@ class FinanceGateway:
             raise ValueError("message 不能为空，请输入自然语言选股条件")
         limit = int(arguments.get("limit", 10))
         page = int(arguments.get("page", 1))
-        return self.tdx_client.screener(message=message, limit=limit, page=page)
+        filter_st = bool(arguments.get("filter_st", True))
+        return self.tdx_client.screener(message=message, limit=limit, page=page, filter_st=filter_st)
 
     def stock_news(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """工具 7：个股最新新闻资讯与重大公告"""
@@ -1164,7 +1595,8 @@ STOCK_SCREENER_SCHEMA = {
         "properties": {
             "message": {"type": "string", "description": "自然语言选股条件，如'主板 绩优 储能'、'低市盈率 连板'"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "最多返回标的数量（1-50）"},
-            "page": {"type": "integer", "minimum": 1, "maximum": 20, "default": 1, "description": "分页页码"}
+            "page": {"type": "integer", "minimum": 1, "maximum": 20, "default": 1, "description": "分页页码"},
+            "filter_st": {"type": "boolean", "default": True, "description": "是否自动过滤 ST/*ST 风险警示股票，默认为 true"}
         },
         "required": ["message"],
         "additionalProperties": False
