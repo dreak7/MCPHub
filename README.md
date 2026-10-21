@@ -5,6 +5,9 @@
 [![Tests: 68 Passed](https://img.shields.io/badge/Tests-68%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
+> **🙏 致谢与数据源声明 (Special Thanks & Acknowledgments)**  
+> 本项目的证券金融专用工具集底层数据接口由开源项目 [TDX-finance-mcp-plugin-v3](https://github.com/adambbhe/TDX-finance-mcp-plugin-v3) 提供支持，特此致谢！
+
 **MCPHub** 是专为 **Hermes Desktop** 及主流 MCP 客户端打造的本地高可用服务聚合网关。原生提供 **12 大生产级标准 MCP 工具**，无缝覆盖全网高可用搜索、官方编程文档切片以及 A 股/港股双轨专业证券金融分析能力。
 
 ---
@@ -123,12 +126,6 @@ OK
 
 - **本地详尽版全景使用手册**：本地专属文档 [README_DETAILED.md](README_DETAILED.md) 包含了全量历史更新日志（v1.0.0 至 v1.8.0）、完整参数与字段结构说明、高级排障指南。
 - **证券金融调用规程 (Skill)**：详见 [mcphub-finance/SKILL.md](mcphub-finance/SKILL.md)，包含面向大模型与智能体的严格数据源分级、标的代码预解析、选股防 ST 过滤与标准证券分析 SOP 实战工作流。
-
----
-
-## 🙏 鸣谢与数据源声明 (Acknowledgments)
-
-- **证券数据 MCP 提供者**：金融证券能力组底层数据接口由开源项目 [TDX-finance-mcp-plugin-v3](https://github.com/adambbhe/TDX-finance-mcp-plugin-v3) 提供支持，特此致谢！
 
 ---
 
