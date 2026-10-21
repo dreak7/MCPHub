@@ -950,6 +950,222 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertIn("比亚迪", res["股本口径说明"])
             self.assertIn("实时法定总股本", res["股本口径说明"])
 
+    def test_hk_cashflow_statement_not_balance(self) -> None:
+        """测试港股现金流量表返回真实现金流而非资产负债表 (P0 H1)"""
+        fin_gw = FinanceGateway()
+        mock_em_cf = [
+            {"截止日期": "2026-06-30", "报告期": "中报", "经营业务现金净额": 154061000000.0, "期末现金": 206930000000.0, "币种": "CNY"}
+        ]
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_get_eastmoney_hk_financials", return_value=mock_em_cf):
+            res = fin_gw.stock_financials({"symbol": "00700", "report_type": "cashflow", "limit_periods": 1})
+            self.assertIn("现金流量表", res["statement_type"])
+            self.assertEqual(res["period_count"], 1)
+            stmt = res["statements"][0]
+            self.assertIn("经营业务现金净额", stmt)
+            self.assertIn("期末现金", stmt)
+
+    def test_hk_f10_category_routing(self) -> None:
+        """测试港股 F10 分类多路路由（主要股东、回购、分红、概念、龙虎榜等） (P0 H2)"""
+        fin_gw = FinanceGateway()
+        # 1. 测试 top_holders
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_get_sina_hk_table", return_value=[{"主要股东": "Naspers", "持股比例": 28.86}]):
+            res_th = fin_gw.stock_f10({"symbol": "00700", "category": "top_holders"})
+            self.assertEqual(res_th["category"], "top_holders")
+            self.assertIn("major_shareholders", res_th["formatted_tables"])
+
+        # 2. 测试 repurchases
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_get_sina_hk_table", return_value=[{"回购日期": "2026-10-15", "回购股数": 240000}]):
+            res_rep = fin_gw.stock_f10({"symbol": "00700", "category": "repurchases"})
+            self.assertEqual(res_rep["category"], "repurchases")
+            self.assertIn("repurchases", res_rep["formatted_tables"])
+
+        # 3. 测试 lhb 港股机制自陈
+        res_lhb = fin_gw.stock_f10({"symbol": "00700", "category": "lhb"})
+        self.assertIn("lhb_rules", res_lhb["formatted_tables"])
+        self.assertIn("港股市场不设通达信 A 股交易所席位龙虎榜披露机制", res_lhb["无记录说明"])
+
+        # 4. 测试 unlocks 港股全流通自陈
+        res_unl = fin_gw.stock_f10({"symbol": "00700", "category": "unlocks"})
+        self.assertIn("unlocks_rules", res_unl["formatted_tables"])
+        self.assertIn("全流通", res_unl["无记录说明"])
+
+    def test_hk_income_currency_and_eps(self) -> None:
+        """测试港股利润表单位百万元声明、美元每股盈利转美分及跨期币种变动警示 (P0 H3, P1 H4, P1 H5, P1 H7)"""
+        fin_gw = FinanceGateway()
+        mock_sina_html = """
+        <html><body>
+        <table class="tab05"><tr><td>指标</td></tr></table>
+        <table class="tab05"><tr><td>资产负债</td></tr></table>
+        <table class="tab05"><tr><td>现金流</td></tr></table>
+        <table class="tab05">
+            <tr><td>报告期</td><td>2026-06-30</td><td>2024-12-31</td></tr>
+            <tr><td>报表类型</td><td>中报</td><td>年报</td></tr>
+            <tr><td>营业额</td><td>3,641.10</td><td>38,297.85</td></tr>
+            <tr><td>基本每股盈利(仙)</td><td>11.31</td><td>75.00</td></tr>
+            <tr><td>币种</td><td>美元</td><td>人民币</td></tr>
+        </table>
+        </body></html>
+        """
+        with unittest.mock.patch("mcp_gateway.finance._SECURE_OPENER.open") as mock_open:
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.read.return_value = mock_sina_html.encode("gbk")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_open.return_value = mock_resp
+
+            res = fin_gw.stock_financials({"symbol": "01133", "report_type": "income", "limit_periods": 2})
+            stmts = res["statements"]
+            self.assertEqual(len(stmts), 2)
+            # 语义校准与单位
+            self.assertEqual(stmts[0]["截止日期"], "2026-06-30")
+            self.assertEqual(stmts[0]["金额单位"], "百万元")
+            self.assertEqual(stmts[0]["报告币种"], "美元")
+            self.assertEqual(stmts[0]["每股收益币种单位"], "美分")
+            self.assertEqual(stmts[0]["基本每股盈利(美分)"], 11.31)
+            self.assertEqual(stmts[0]["基本每股盈利_折合美元"], 0.1131)
+
+            # 跨期货币变动
+            self.assertEqual(stmts[1]["报告币种"], "人民币")
+            self.assertIn("跨期币种变动说明", stmts[0])
+            self.assertIn("跨期币种变动说明", stmts[1])
+
+    def test_hk_quotes_volume_int_and_shares(self) -> None:
+        """测试港股盘口成交量为 int 类型、自算总股本与换手率及52周说明 (P2 H10, P3 H11, P3 H12)"""
+        fin_gw = FinanceGateway()
+        mock_raw = 'v_r_hk00700="100~腾讯控股~00700~393.800~390.000~392.000~37783835.0~0~0~393.800~100~0~0~0~0~0~0~0~0~394.000~200~0~0~0~0~0~0~0~0~37783835.0~2026/10/21 16:08:26~3.800~0.97~396.000~391.200~393.800~37783835.0~14880000000.000~0~20.50~~0~0~1.23~35806.8353~35806.8353~TENCENT~0.00~450.000~260.000~0.00~66.67~0~0~0~0~0~0~0~0~0~0~0~GP~0~0~0~0~0~9092644829.00~9092644829.00~0~0~0~0~HKD~1~50";'
+        with unittest.mock.patch("mcp_gateway.finance._SECURE_OPENER.open") as mock_open:
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.read.return_value = mock_raw.encode("gbk")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_open.return_value = mock_resp
+
+            res = fin_gw.stock_quotes({"symbol": "00700"})
+            hq = res["盘口核心行情"]
+            ext = res["估值与基本盘面"]
+            # P2 H10: 成交量_股 为 int
+            self.assertIsInstance(hq["成交量_股"], int)
+            self.assertEqual(hq["成交量_股"], 37783835)
+            # P3 H11: 自算总股本与换手率
+            self.assertEqual(ext["总股本_股"], 9092644829)
+            self.assertEqual(ext["流通股本_股"], 9092644829)
+            self.assertEqual(hq["换手率_pct"], 0.416)
+            self.assertIn("涨跌停说明", hq)
+            # P3 H12: 52周说明
+            self.assertIn("52周价格区间说明", ext)
+
+
+    def test_skill_and_tools_interface_alignment(self) -> None:
+        """测试全部 8 大金融数据接口与 mcphub-finance/SKILL.md 契约完全对齐"""
+        fin_gw = FinanceGateway()
+
+        # 1. stock_lookup: 验证返回 entities 中同时包含 entity_code 与 code, name, setcode, market
+        mock_rag = {
+            "retrieved_entities": [
+                {"entity_code": "300750", "entity_name": "宁德时代", "entity_type": "A股代码", "entity_setcode": 0}
+            ]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_rag):
+            res_lookup = fin_gw.stock_lookup({"query": "宁德时代", "range": "AG"})
+            self.assertIn("query", res_lookup)
+            self.assertIn("range", res_lookup)
+            ent0 = res_lookup["entities"][0]
+            self.assertEqual(ent0["code"], "300750")
+            self.assertEqual(ent0["entity_code"], "300750")
+            self.assertEqual(ent0["name"], "宁德时代")
+            self.assertEqual(ent0["market"], "SZ")
+
+        # 2. market_context: 验证交易时钟状态
+        ctx = fin_gw.market_context({})
+        for key in ("current_cst_time", "market_status", "market_status_desc", "is_trading_time", "reference_trading_date"):
+            self.assertIn(key, ctx)
+
+        # 3. stock_quotes: 验证 A 股与港股通用字段最高/最低/涨跌额_元/更新时间及滚动市盈率_PETTM/总市值_元
+        res_q_a = fin_gw.stock_quotes({"symbol": "600519"})
+        hq_a = res_q_a["盘口核心行情"]
+        self.assertIn("最高", hq_a)
+        self.assertIn("最高价", hq_a)
+        self.assertIn("最低", hq_a)
+        self.assertIn("最低价", hq_a)
+        self.assertIn("涨跌额_元", hq_a)
+        self.assertIn("更新时间", hq_a)
+
+        mock_hk_raw = 'v_r_hk00700="100~腾讯控股~00700~393.800~390.000~392.000~37783835.0~0~0~393.800~100~0~0~0~0~0~0~0~0~394.000~200~0~0~0~0~0~0~0~0~37783835.0~2026/10/21 16:08:26~3.800~0.97~396.000~391.200~393.800~37783835.0~14880000000.000~0~20.50~~0~0~1.23~35806.8353~35806.8353~TENCENT~0.00~450.000~260.000~0.00~66.67~0~0~0~0~0~0~0~0~0~0~0~GP~0~0~0~0~0~9092644829.00~9092644829.00~0~0~0~0~HKD~1~50";'
+        with unittest.mock.patch("mcp_gateway.finance._SECURE_OPENER.open") as mock_open:
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.read.return_value = mock_hk_raw.encode("gbk")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_open.return_value = mock_resp
+
+            res_q_hk = fin_gw.stock_quotes({"symbol": "00700"})
+            hq_hk = res_q_hk["盘口核心行情"]
+            ext_hk = res_q_hk["估值与基本盘面"]
+            self.assertIn("最高价", hq_hk)
+            self.assertIn("最高", hq_hk)
+            self.assertIn("涨跌额_元", hq_hk)
+            self.assertIn("日内振幅_pct", hq_hk)
+            self.assertIn("更新时间", hq_hk)
+            self.assertIn("滚动市盈率_PETTM", ext_hk)
+            self.assertIn("动态市盈率_PE", ext_hk)
+            self.assertIn("总市值_元", ext_hk)
+            self.assertIn("总股本_万股", ext_hk)
+
+        # 4. stock_kline: 验证 indicators_included 与 datetime / macd_hist / boll_upper / rsi
+        res_k = fin_gw.stock_kline({"symbol": "600519", "count": 2})
+        self.assertTrue(res_k.get("indicators_included"))
+        bar0 = res_k["klines"][-1]
+        self.assertIn("datetime", bar0)
+        self.assertIn("time", bar0)
+        self.assertIn("macd_hist", bar0)
+        self.assertIn("boll_upper", bar0)
+        self.assertIn("boll_lower", bar0)
+        self.assertIn("rsi6", bar0)
+
+        # 5. stock_financials: 验证 period_type 与 会计口径与说明
+        res_fin = fin_gw.stock_financials({"symbol": "600519", "report_type": "income", "limit_periods": 1})
+        self.assertEqual(res_fin.get("period_type"), "report")
+        self.assertIn("会计口径与说明", res_fin)
+        self.assertIn("会计口径与合并说明", res_fin)
+
+        # 6. stock_f10: 验证 category 别名 (industry, dividends, repurchases, lhb)
+        res_f10_ind = fin_gw.stock_f10({"symbol": "600519", "category": "industry"})
+        self.assertEqual(res_f10_ind["category"], "concepts")
+        res_f10_rep = fin_gw.stock_f10({"symbol": "600519", "category": "buyback"})
+        self.assertEqual(res_f10_rep["category"], "repurchases")
+
+        # 7. stock_screener: 验证 top-level message 与 stock 列表中 symbol, matched_indicators
+        mock_raw_screener = [
+            [0, "", 10, "sess_123", 1],
+            ["POS", "MARKET", "CODE", "NAME", "PRICE", "CHG", "ROE"],
+            ["--", "--", "--", "--", "--", "--", "--"],
+            ["1", "0", "002594", "比亚迪", "285.5", "2.15", "18.2"],
+        ]
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_raw_screener):
+            res_scr = fin_gw.stock_screener({"message": "主板 绩优 储能", "limit": 5})
+            self.assertIn("message", res_scr)
+            self.assertEqual(res_scr["message"], "主板 绩优 储能")
+            self.assertEqual(res_scr["stocks"][0]["symbol"], "002594")
+            self.assertIn("matched_indicators", res_scr["stocks"][0])
+
+        # 8. stock_news: 验证 news 项目中同时包含 datetime 与 summary
+        with unittest.mock.patch.object(
+            fin_gw.fallback_client,
+            "get_news",
+            return_value=[{
+                "title": "测试新闻",
+                "source": "官方公告",
+                "time": "2026-10-21 16:00:00",
+                "datetime": "2026-10-21 16:00:00",
+                "url": "https://test.com",
+                "snippet": "测试正文摘要",
+                "summary": "测试正文摘要",
+            }]
+        ):
+            res_news = fin_gw.stock_news({"symbol": "600519", "limit": 1})
+            n0 = res_news["news"][0]
+            self.assertIn("datetime", n0)
+            self.assertIn("time", n0)
+            self.assertIn("summary", n0)
+            self.assertIn("snippet", n0)
+
 
 if __name__ == "__main__":
     unittest.main()

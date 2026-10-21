@@ -1,10 +1,10 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v1.8.1)
+# Local MCP Search, Coding & Finance Fallback Gateway (v1.8.2)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 88 Passed](https://img.shields.io/badge/Tests-88%20Passed-success.svg)](tests/)
+[![Tests: 100 Passed](https://img.shields.io/badge/Tests-100%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 </div>
@@ -56,7 +56,7 @@ MCPHub/
 ├── mcphub-finance/              # 【可选外挂】Hermes 专属证券金融分析规范 Skill
 ├── logs/                        # 运行日志目录 (gateway.log)
 ├── state/                       # 持久化状态目录 (provider-state.json 冷却状态与提取缓存)
-├── tests/                       # 88 项全量自动化单元测试套件 (100% 通过)
+├── tests/                       # 100 项全量自动化单元测试套件 (100% 通过)
 ├── MCPHub服务管理面板.bat          # Windows 双击即用一键管理控制台
 ├── README.md                    # 项目全景使用与配置说明文档
 └── LICENSE                      # MIT 开源许可证
@@ -76,7 +76,7 @@ MCPHub/
 - **`[1] 一键生成挂载配置`**：自动识别本机实际 Python 绝对路径与配置文件绝对路径；
 - **`[2] 启动可视化配置向导 (GUI)`**：原生 Windows 窗口，免改 JSON 即可添加引擎或自定义能力；
 - **`[3] 快捷配置/编辑 API 密钥`**：系统记事本安全编辑 `config/.env`；
-- **`[4] 运行服务健康检查与全部测试套件`**：一键运行全量 88 项自动化单元测试；
+- **`[4] 运行服务健康检查与全部测试套件`**：一键运行全量 100 项自动化单元测试；
 - **`[5] 查看服务运行日志`**：实时跟踪 `logs/gateway.log`；
 - **`[6] 运行 Hermes MCP 连通性测试`**：一键执行 `hermes mcp test MCPHub`。
 
@@ -260,6 +260,26 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### v1.8.2 — 全量接口与 SKILL 规程 1:1 双向对齐、港股 12 项缺陷（P0-P3）深度修复与高可用容灾、100 项测试全绿灯
+
+- **证券数据专用工具集与 SKILL 规范全量 1:1 双向对齐**：
+  - **参数与字段别名双向互通**：`stock_quotes` / `stock_kline` / `stock_financials` / `stock_f10` / `stock_news` 全面支持 `symbol` 与 `code` 自由混用自动映射；
+  - **选股指标兼容**：`stock_screener` 支持 `indicators` 与 `matched_indicators` 别名双向互通；
+  - **资讯字段兼容**：`stock_news` 支持 `datetime` 与 `time`、`summary` 与 `snippet` 字段双向对齐，消除下游提取歧义；
+  - **技术指标扩展与兼容**：`stock_kline` 支持 `boll_upper` 与 `boll_up`、`macd_hist` 与 `macd_bar` 别名映射，并原生补齐 `rsi6`、`rsi12` 指标计算与导出；
+  - **F10 Schema 枚举扩充**：显式增加 `industry`（同行业对比）、`dividends`（历年分红送转）、`repurchases`（公司回购）、`lhb`（龙虎榜机构席位明细）等枚举值，规范化工具元数据定义。
+- **港股 12 项缺陷（P0-P3）深度修复与高可用容灾**：
+  - **H1 现金流量表容灾与映射纠正**：彻底切除港股 `cashflow` 误映射资产负债表的历史遗留问题，接入东方财富港股现金流专线，实现 42 项权威工商业现金流量明细全量结构化解析与导出；
+  - **H2 F10 多维度专线重定向**：彻底解决 10 分类同一概况问题，针对大股东持股、历年分红、股份回购、同行业对比等关键分类精准路由至专属专线；
+  - **H3/H4/H5 逐期货币计量与单位混用治理**：针对中报/年报不同币种及财报同响应不同报告期币种切换场景，增加单期独立货币单位标注，统一“美分/仙”口径，杜绝币种混淆；
+  - **H6/H7 报告期筛选与时间序列统一**：实现 `quarter` 季度精准过滤，统一三大报表时间序列为倒序排列，规避语义相反风险；
+  - **H8 分钟线与日线成交量收盘竞价（CAS）口径透明化**：深入解析港交所 16:00-16:10 收盘竞价交易时段（CAS）撮合机制，透明注入说明，消除分钟线与日线成交量差异误解；
+  - **H9 会计恒等式自动补全**：针对极端单行缺值报表，基于“资产总计 = 负债总计 + 股东权益总计”自动补齐缺失的总负债科目；
+  - **H10/H11 跨市场行情字段类型统一与衍生指标自算**：规范港股 `成交量_股` 为标准整数型，基于收盘市值与现价自动推算港股总股本与换手率，并注入无涨跌幅限制警示；
+  - **H12 新股上市时效感知**：对上市未满 52 周新股注入动态时效说明。
+- **全量 100 项单元测试 100% 自动化通过**：
+  - 新增 `test_skill_and_tools_interface_alignment` 接口契约校验测试，实现 100 项测试全绿灯通过。
 
 ### v1.8.1 — 深度校准与全链路加固：财报科目精准校准、真 TTM 直通、集团金融合并残差透明解析、F10 全汉化与防幻觉审计层、无效代码拦截与新闻防污染
 
