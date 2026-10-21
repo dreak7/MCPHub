@@ -2048,9 +2048,9 @@ STOCK_F10_SCHEMA = {
             "symbol": {"type": "string", "description": "证券代码（如'600519'）"},
             "category": {
                 "type": "string",
-                "enum": ["concepts", "events", "forecast", "shareholders", "top_holders", "margin_trading", "capital_flow", "limit_up", "unlocks", "summary"],
+                "enum": ["concepts", "events", "forecast", "shareholders", "top_holders", "margin_trading", "capital_flow", "limit_up", "unlocks", "summary", "basic_info"],
                 "default": "concepts",
-                "description": "基本面分类：concepts=热点题材板块族谱, forecast=机构盈利预测, shareholders=股东人数筹码, top_holders=十大流通股东, capital_flow=主力资金流向, margin_trading=融资融券, limit_up=涨停分析, unlocks=限售解禁, summary=公司概要"
+                "description": "基本面分类：concepts=热点题材板块族谱, events=事件驱动催化, forecast=机构盈利预测, shareholders=股东人数筹码, top_holders=十大流通股东, capital_flow=主力资金流向, margin_trading=融资融券, limit_up=涨停分析, unlocks=限售解禁, summary=公司概要, basic_info=公司基本工商与发行信息"
             }
         },
         "required": ["symbol"],
