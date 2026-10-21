@@ -19,7 +19,7 @@ MCPHub 统一服务网关 (12 大标准 MCP 工具)
 │   └── fallback_web_extract   长文正文智能提取 (30分钟落盘缓存 + read_file 联动翻页)
 ├── 💻 开发者编程文档切片层 (官方权威 API 索引)
 │   └── code_docs_search       基于 Context7 驱动的编程语言与开源框架文档代码切片检索
-└── 📈 专业证券量化与金融层 (A股+港股双轨智能路由)
+└── 📈 专业证券量化与金融层 (A股+港股双轨智能路由，由 TDX-finance-mcp-plugin-v3 提供支持)
     ├── stock_lookup           股票名称/拼音代码语义智能检索 (AI RAG 驱动)
     ├── market_context         A股与港股交易日历感知与市场交易时钟判定
     ├── stock_quotes           实时行情与 Level-1 基础五档买卖委托盘口
@@ -123,6 +123,12 @@ OK
 
 - **本地详尽版全景使用手册**：本地专属文档 [README_DETAILED.md](README_DETAILED.md) 包含了全量历史更新日志（v1.0.0 至 v1.8.0）、完整参数与字段结构说明、高级排障指南。
 - **证券金融调用规程 (Skill)**：详见 [mcphub-finance/SKILL.md](mcphub-finance/SKILL.md)，包含面向大模型与智能体的严格数据源分级、标的代码预解析、选股防 ST 过滤与标准证券分析 SOP 实战工作流。
+
+---
+
+## 🙏 鸣谢与数据源声明 (Acknowledgments)
+
+- **证券数据 MCP 提供者**：金融证券能力组底层数据接口由开源项目 [TDX-finance-mcp-plugin-v3](https://github.com/adambbhe/TDX-finance-mcp-plugin-v3) 提供支持，特此致谢！
 
 ---
 
