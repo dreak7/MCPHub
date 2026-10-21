@@ -1,5 +1,5 @@
 """通达信金融数据专线与多源高可用金融服务适配器 (Finance Gateway)
-提供 A 股/港股/美股/ETF 的实体检索、实时盘口、多周期K线（含内置量化指标计算）、
+提供 A 股/港股/美股/ETF 的实体检索、实时盘口、多周期K线（含内置技术指标计算）、
 三大财务报表、F10 深度基本面、自然语言智能选股与市场交易时钟。
 """
 
@@ -36,7 +36,7 @@ _SECURE_OPENER = build_opener(NoRedirectHandler)
 
 
 # =========================================================================
-# 【功能块 1：高频盘口与量化行情数据字段映射表】
+# 【功能块 1：高频盘口与技术指标行情数据字段映射表】
 # - 输入：通达信原始盘口英文缩写
 # - 功能：将底层十六进制与英文缩写规范化映射为清晰、标准的中文金融业务指标
 # - 输出：dict 映射字典
@@ -174,51 +174,51 @@ BALANCE_FIELDS_NON_FINANCE: dict[str, str] = {
     "N028": "工程物资",
     "N029": "生产性生物资产",
     "N030": "油气资产",
-    "N031": "使用权资产",
-    "N032": "无形资产",
-    "N033": "开发支出",
-    "N034": "商誉",
-    "N035": "长期待摊费用",
-    "N036": "递延所得税资产",
+    "N031": "无形资产",
+    "N032": "开发支出",
+    "N033": "商誉",
+    "N034": "长期待摊费用",
+    "N035": "递延所得税资产",
+    "N036": "其他非流动资产",
     "N037": "非流动资产合计",
     "N038": "资产总计",
     "N039": "短期借款",
     "N040": "交易性金融负债",
-    "N041": "衍生金融负债",
-    "N042": "吸收存款及同业存放",
+    "N041": "衍生金融负债_备用",
+    "N042": "衍生金融负债",
     "N043": "应付票据及应付账款合计",
     "N044": "应付票据",
     "N045": "应付账款",
     "N046": "预收款项",
-    "N047": "合同负债",
-    "N048": "应付职工薪酬",
-    "N049": "应交税费",
-    "N050": "应付利息",
-    "N051": "其他应付款",
+    "N047": "应付职工薪酬",
+    "N048": "应交税费",
+    "N049": "应付利息",
+    "N050": "应付股利",
+    "N051": "其他应付款合计",
     "N052": "一年内到期的非流动负债",
-    "N053": "其他流动负债",
+    "N053": "预计流动负债",
     "N054": "待转销项税额",
-    "N055": "长期借款",
-    "N056": "应付债券",
+    "N055": "合同负债",
+    "N056": "其他流动负债",
     "N057": "流动负债合计",
     "N058": "长期借款",
     "N059": "应付债券",
-    "N060": "租赁负债",
-    "N061": "长期应付款",
-    "N062": "专项应付款",
-    "N063": "预计负债",
-    "N064": "递延所得税负债",
+    "N060": "长期应付款",
+    "N061": "专项应付款",
+    "N062": "预计负债",
+    "N063": "递延所得税负债",
+    "N064": "递延收益",
     "N065": "其他非流动负债",
     "N066": "非流动负债合计",
     "N067": "负债合计",
     "N068": "实收资本_股本",
-    "N069": "其他权益工具",
-    "N070": "资本公积",
-    "N071": "其他综合收益",
-    "N072": "专项储备",
-    "N073": "盈余公积",
-    "N074": "库存股",
-    "N075": "一般风险准备",
+    "N069": "资本公积",
+    "N070": "盈余公积",
+    "N071": "库存股",
+    "N072": "其他综合收益",
+    "N073": "专项储备",
+    "N074": "一般风险准备",
+    "N075": "外币报表折算差额",
     "N076": "未分配利润",
     "N077": "所有者权益合计",
     "N078": "归母所有者权益合计",
@@ -331,7 +331,7 @@ def infer_market_setcode(symbol: str) -> str:
 
 
 # =========================================================================
-# 【功能块 4：纯 Python 原生轻量量化指标计算引擎 (Zero-Dependency)】
+# 【功能块 4：纯 Python 原生轻量技术指标计算引擎 (Zero-Dependency)】
 # - 输入：kline_list (list[dict]): 包含 open, close, high, low, volume 的 K 线列表
 # - 功能：为历史 K 线滚动计算常用趋势与摆动指标：
 #         1. 移动平均线: MA5, MA10, MA20
@@ -339,7 +339,7 @@ def infer_market_setcode(symbol: str) -> str:
 #         3. 随机指标: KDJ (9, 3, 3)
 #         4. 布林线: BOLL (20日中轨、上轨、下轨)
 #         5. 相对强弱指标: RSI (6, 12)
-# - 输出：list[dict]: 附加了量化计算字段的 K 线字典数组，杜绝大模型计算幻觉
+# - 输出：list[dict]: 附加了技术指标计算字段的 K 线字典数组，杜绝大模型计算幻觉
 # =========================================================================
 def calculate_indicators(kline_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not kline_list:
@@ -778,8 +778,8 @@ class TdxClient:
             },
             "估值与基本盘面": {
                 "市盈率_TTM": _safe_opt_float(parts[39] if len(parts) > 39 else None),
-                "总市值_亿港元": _safe_opt_float(parts[44] if len(parts) > 44 else None),
-                "流通市值_亿港元": _safe_opt_float(parts[45] if len(parts) > 45 else None),
+                "总市值_亿港元": _safe_opt_float(parts[45] if len(parts) > 45 else None),
+                "流通市值_亿港元": _safe_opt_float(parts[44] if len(parts) > 44 else None),
                 "52周最高": _safe_opt_float(parts[48] if len(parts) > 48 else None),
                 "52周最低": _safe_opt_float(parts[49] if len(parts) > 49 else None),
             },
@@ -799,12 +799,12 @@ class TdxClient:
         return result
 
     # =========================================================================
-    # 【功能块：腾讯免费公开港股多周期历史 K 线获取与量化指标计算】
+    # 【功能块：腾讯免费公开港股多周期历史 K 线获取与技术指标计算】
     # - 输入：clean_code (str): 5位港股数字代码（如 "00700"）
     #         period (str): 周期类型 ("day", "week", "month", "60m", "30m", "15m", "5m")
     #         count (int): 获取条数上限 (1-300)
     #         adjust (str): 复权方式 ("qfq", "hfq", "none")
-    #         with_indicators (bool): 是否在底层计算量化指标
+    #         with_indicators (bool): 是否在底层计算技术指标
     # - 功能：调用腾讯财经官方开放 K 线专线 (web.ifzq.gtimg.cn)，拉取历史行情数据，
     #         清洗时间、开高低收成交量，并在纯 Python 算法层原生计算 MA/MACD/KDJ/BOLL/RSI
     # - 输出：dict[str, Any]: 结构化港股 K 线与指标字典
@@ -829,8 +829,12 @@ class TdxClient:
         }
         p_str = period_map.get(period.lower(), "day")
         limit_cnt = max(1, min(int(count), 300))
-        adj_param = "qfq" if adjust == "qfq" else ("hfq" if adjust == "hfq" else "")
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get?_var=kline_{p_str}{adj_param}&param=hk{norm_code},{p_str},,,{limit_cnt},{adj_param}"
+        if adjust.lower() in ("qfq", "hfq"):
+            adj_param = adjust.lower()
+            url = f"https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get?_var=kline_{p_str}{adj_param}&param=hk{norm_code},{p_str},,,{limit_cnt},{adj_param}"
+        else:
+            adj_param = ""
+            url = f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline?_var=kline_{p_str}&param=hk{norm_code},{p_str},,,{limit_cnt}"
         req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         try:
             with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
@@ -900,7 +904,7 @@ class TdxClient:
         }
 
     def get_quotes(self, symbol: str, setcode: str | None = None) -> dict[str, Any]:
-        """获取实时盘口、深度量化指标与五档买卖盘（支持 A 股与港股）"""
+        """获取实时盘口、深度估值指标与五档买卖盘（支持 A 股与港股）"""
         clean_code = re.sub(r"[^\d]", "", symbol)
         if not clean_code:
             raise ValueError(f"无效的证券代码 '{symbol}'，证券标的代码必须包含有效数字编号（如 A股'600519'、港股'00700'）。若仅知道公司名称，请先调用 stock_lookup 工具查找对应代码。")
@@ -1051,7 +1055,7 @@ class TdxClient:
         setcode: str | None = None,
         with_indicators: bool = True,
     ) -> dict[str, Any]:
-        """获取多周期历史 K 线走势，并可选附加 MACD, KDJ, BOLL 等量化指标计算结果（支持 A 股与港股）"""
+        """获取多周期历史 K 线走势，并可选附加 MACD, KDJ, BOLL 等技术指标计算结果（支持 A 股与港股）"""
         clean_code = re.sub(r"[^\d]", "", symbol)
         if not clean_code:
             raise ValueError(f"无效的证券代码 '{symbol}'，证券标的代码必须包含有效数字编号（如 A股'600519'、港股'00700'）。若仅知道公司名称，请先调用 stock_lookup 工具查找对应代码。")
@@ -1127,7 +1131,7 @@ class TdxClient:
                 "amount": amt_val,
             })
 
-        # 按时间正序排列后计算量化指标
+        # 按时间正序排列后计算技术指标
         if with_indicators and parsed_bars:
             parsed_bars = calculate_indicators(parsed_bars)
 
@@ -1148,8 +1152,22 @@ class TdxClient:
         period_type: str = "report",
         limit_periods: int = 4,
     ) -> dict[str, Any]:
-        """获取三大财务报表 (资产负债表 balance, 利润表 income, 现金流量表 cashflow) 与经营构成"""
         clean_code = re.sub(r"[^\d]", "", symbol)
+        # 港股标的（5位代码）透明说明：通达信官方专线为国内 A 股专线，不支持港股财报三张表
+        if infer_market_setcode(symbol) == "31" or len(clean_code) == 5:
+            norm_code = clean_code.zfill(5)
+            return {
+                "symbol": norm_code,
+                "statement_type": report_type,
+                "market": "香港交易所 (HKEX)",
+                "status": "unsupported",
+                "message": (
+                    "通达信官方财务专用通道（TdxShareCW）目前专注覆盖国内 A 股市场（6 位代码），"
+                    "暂未收录港股（5 位代码）会计报表三张表数据。建议通过港交所披露易官方公告或 fallback_web_search 进行港股财报检索。"
+                ),
+                "period_count": 0,
+                "statements": [],
+            }
         rtype = report_type.lower()
         fixed_tag = "00102" if period_type.lower() == "quarter" else "00101"
 
@@ -1370,14 +1388,31 @@ class PublicFallbackClient:
     def get_news(self, symbol: str, limit: int = 5) -> list[dict[str, Any]]:
         raw_query = symbol.strip()
         clean_code = re.sub(r"[^\d]", "", raw_query)
-        # 智能确定检索词：若有 6 位代码优先用代码，若传入中文名称（如'贵州茅台'）则直接使用名称
-        search_term = clean_code if clean_code else raw_query
         req_limit = max(1, min(limit, 10))
+
+        # 智能确定检索词与港股标的名称解析（防 5 位数字代码直接检索命中双色球彩票噪声）
+        search_term = clean_code if clean_code else raw_query
+        if infer_market_setcode(raw_query) == "31" or (len(clean_code) == 5 and not raw_query.startswith(("60", "68"))):
+            norm_code = clean_code.zfill(5)
+            try:
+                hk_req = Request(f"http://qt.gtimg.cn/q=r_hk{norm_code}", headers={"User-Agent": "Mozilla/5.0"})
+                with urlopen(hk_req, timeout=3) as hk_resp:
+                    hk_raw = hk_resp.read().decode("gbk", errors="replace")
+                    hk_parts = hk_raw.split("~")
+                    if len(hk_parts) > 1 and hk_parts[1].strip():
+                        search_term = f"{hk_parts[1].strip()} {norm_code}"
+            except Exception:
+                search_term = f"港股 {norm_code}"
+
+        lottery_noise = (
+            "双色球", "大乐透", "福彩", "体彩", "开奖号码", "杀号", "预测奖号",
+            "排列三", "排列四", "排列五", "七星彩", "六合彩", "中奖", "彩票", "幸运飞艇",
+        )
 
         # 1. 主力通道：新浪财经新闻搜索接口（风控宽松、响应极速、原生标准 JSON）
         try:
             encoded_q = urllib.parse.quote(search_term)
-            sina_url = f"https://search.sina.com.cn/api/news?q={encoded_q}&size={req_limit}&page=1"
+            sina_url = f"https://search.sina.com.cn/api/news?q={encoded_q}&size={req_limit + 5}&page=1"
             req = Request(
                 sina_url,
                 headers={
@@ -1392,8 +1427,10 @@ class PublicFallbackClient:
                 items = data.get("data", {}).get("list", [])
                 if items and isinstance(items, list):
                     news_list: list[dict[str, Any]] = []
-                    for item in items[:req_limit]:
+                    for item in items:
                         title = re.sub(r"<[^>]+>", "", item.get("title", "")).strip()
+                        if any(k in title for k in lottery_noise):
+                            continue
                         snippet = re.sub(r"<[^>]+>", "", item.get("intro", "")).strip()
                         media_name = item.get("media", "").strip() or "新浪财经"
                         news_list.append({
@@ -1403,6 +1440,8 @@ class PublicFallbackClient:
                             "url": item.get("url", ""),
                             "snippet": snippet[:150] + "..." if len(snippet) > 150 else snippet,
                         })
+                        if len(news_list) >= req_limit:
+                            break
                     if news_list:
                         return news_list
         except Exception:
@@ -1416,7 +1455,7 @@ class PublicFallbackClient:
                     "code": clean_code if clean_code else search_term,
                     "type": ["cmsArticleWebOld"],
                     "pageindex": 1,
-                    "pagesize": req_limit,
+                    "pagesize": req_limit + 5,
                     "keyword": search_term,
                 }, ensure_ascii=False),
             }
@@ -1433,8 +1472,10 @@ class PublicFallbackClient:
                     data = json.loads(match.group(1))
                     articles = data.get("result", {}).get("cmsArticleWebOld", [])
                     news_list = []
-                    for item in articles[:req_limit]:
+                    for item in articles:
                         title = re.sub(r"<[^>]+>", "", item.get("title", "")).strip()
+                        if any(k in title for k in lottery_noise):
+                            continue
                         snippet = re.sub(r"<[^>]+>", "", item.get("content", "")).strip()
                         media_name = item.get("mediaName", "").strip() or "东方财富"
                         news_list.append({
@@ -1444,6 +1485,8 @@ class PublicFallbackClient:
                             "url": item.get("url", ""),
                             "snippet": snippet[:150] + "..." if len(snippet) > 150 else snippet,
                         })
+                        if len(news_list) >= req_limit:
+                            break
                     if news_list:
                         return news_list
         except Exception:
@@ -1643,7 +1686,7 @@ class FinanceGateway:
         return {"query": query, "range": market_range, "entities": entities}
 
     def stock_quotes(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """工具 2：实时盘口与完整量化行情"""
+        """工具 2：实时盘口与完整证券行情"""
         symbol = arguments.get("symbol", "").strip()
         if not symbol:
             raise ValueError("symbol 不能为空，请输入证券代码（如'600519'）")
@@ -1651,7 +1694,7 @@ class FinanceGateway:
         return self.tdx_client.get_quotes(symbol=symbol, setcode=setcode)
 
     def stock_kline(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """工具 3：多周期历史 K 线走势 + 内置量化指标计算 (MACD/KDJ/BOLL/MA)"""
+        """工具 3：多周期历史 K 线走势 + 内置技术指标计算 (MACD/KDJ/BOLL/MA)"""
         symbol = arguments.get("symbol", "").strip()
         if not symbol:
             raise ValueError("symbol 不能为空")
@@ -1690,6 +1733,22 @@ class FinanceGateway:
         if not symbol:
             raise ValueError("symbol 不能为空")
         category = arguments.get("category", "concepts")
+
+        # 港股标的（5位代码）透明说明：通达信官方专线为国内 A 股专线，不支持港股 F10
+        clean_code = re.sub(r"[^\d]", "", symbol)
+        if infer_market_setcode(symbol) == "31" or len(clean_code) == 5:
+            norm_code = clean_code.zfill(5)
+            return {
+                "symbol": norm_code,
+                "market": "香港交易所 (HKEX)",
+                "category": category,
+                "status": "unsupported",
+                "message": (
+                    "通达信官方 F10 专线目前专注覆盖国内 A 股市场，暂未收录港股标的之深度 F10（题材概念、两融、资金流向等）。"
+                    "港股建议使用 stock_quotes 获取实时盘口、stock_kline 获取走势，或使用 stock_news 与 fallback_web_search 检索相关公告与研报。"
+                ),
+                "formatted_tables": {},
+            }
 
         # 1. 首先尝试通达信官方专线获取（优先官方授权渠道）
         try:
@@ -1934,7 +1993,7 @@ STOCK_LOOKUP_SCHEMA = {
 
 STOCK_QUOTES_SCHEMA = {
     "name": "stock_quotes",
-    "description": "查询指定股票的实时五档盘口、买卖挂单、最新现价、涨跌幅、换手率、量比、内外盘强弱、总市值与动态市盈率等高频盘口与量化估值指标。全面支持 A 股（通达信官方专线）与港股（腾讯免费专线回退，如 '00700' 腾讯控股、'09988' 阿里巴巴）。数据全面中文化映射。",
+    "description": "查询指定股票的实时五档盘口、买卖挂单、最新现价、涨跌幅、换手率、量比、内外盘强弱、总市值与动态市盈率等高频盘口与专业估值指标。全面支持 A 股（通达信官方专线）与港股（腾讯免费专线回退，如 '00700' 腾讯控股、'09988' 阿里巴巴）。数据全面中文化映射。",
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -1948,7 +2007,7 @@ STOCK_QUOTES_SCHEMA = {
 
 STOCK_KLINE_SCHEMA = {
     "name": "stock_kline",
-    "description": "获取指定股票的多周期历史复权K线走势，并自动计算输出关键量化指标（MA5/MA10/MA20均线、MACD指标DIF/DEA/柱状图、KDJ随机指标、BOLL布林带上中下轨）。全面支持 A 股及港股（腾讯免费专线）。支持日线(day)、周线(week)、月线(month)、60分钟(60m)、15分钟(15m)、5分钟(5m)。",
+    "description": "获取指定股票的多周期历史复权K线走势，并自动计算输出关键技术指标（MA5/MA10/MA20均线、MACD指标DIF/DEA/柱状图、KDJ随机指标、BOLL布林带上中下轨）。全面支持 A 股及港股（腾讯免费专线）。支持日线(day)、周线(week)、月线(month)、60分钟(60m)、15分钟(15m)、5分钟(5m)。",
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -1957,7 +2016,7 @@ STOCK_KLINE_SCHEMA = {
             "count": {"type": "integer", "minimum": 1, "maximum": 300, "default": 30, "description": "请求K线根数（1-300），默认30根"},
             "adjust": {"type": "string", "enum": ["qfq", "hfq", "none"], "default": "qfq", "description": "复权方式：qfq=前复权(默认), hfq=后复权, none=不复权"},
             "setcode": {"type": "string", "description": "市场代码：0=深市，1=沪市，2=北交所，31=港交所。默认自动推导"},
-            "with_indicators": {"type": "boolean", "default": True, "description": "是否自动附带量化指标计算结果（MA、MACD、KDJ、BOLL），默认为 true"}
+            "with_indicators": {"type": "boolean", "default": True, "description": "是否自动附带技术指标计算结果（MA、MACD、KDJ、BOLL），默认为 true"}
         },
         "required": ["symbol"],
         "additionalProperties": False

@@ -1,7 +1,8 @@
 """金融网关核心功能单元测试套件 (Finance Gateway Tests)
-测试市场代码推导、内置量化指标计算引擎 (MA/MACD/KDJ/BOLL)、交易日历时钟以及网关分发。
+测试市场代码推导、内置技术指标计算引擎 (MA/MACD/KDJ/BOLL)、交易日历时钟以及网关分发。
 """
 
+import json
 import unittest
 from mcp_gateway.finance import (
     calculate_indicators,
@@ -35,7 +36,7 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertTrue(len(ctx["reference_trading_date"]) == 10)
 
     def test_calculate_indicators(self) -> None:
-        """测试纯 Python 原生量化指标计算引擎 (MA, MACD, KDJ, BOLL)"""
+        """测试纯 Python 原生技术指标计算引擎 (MA, MACD, KDJ, BOLL)"""
         # 构造模拟连续 30 根 K 线
         bars = []
         base_price = 10.0
@@ -346,16 +347,128 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertIn("事件库属性说明", res_ev)
 
     def test_balance_sheet_field_alignment(self) -> None:
-        """测试资产负债表科目的精准映射（应付票据与预收款项无重叠错位）"""
+        """测试资产负债表科目的精准映射（流动负债明细与所有者权益无重叠错位）"""
         from mcp_gateway.finance import BALANCE_FIELDS_NON_FINANCE
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N042"], "衍生金融负债")
         self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N043"], "应付票据及应付账款合计")
         self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N044"], "应付票据")
         self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N045"], "应付账款")
         self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N046"], "预收款项")
-        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N047"], "合同负债")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N047"], "应付职工薪酬")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N048"], "应交税费")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N051"], "其他应付款合计")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N052"], "一年内到期的非流动负债")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N055"], "合同负债")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N056"], "其他流动负债")
         self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N057"], "流动负债合计")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N058"], "长期借款")
         self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N066"], "非流动负债合计")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N067"], "负债合计")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N068"], "实收资本_股本")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N069"], "资本公积")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N070"], "盈余公积")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N076"], "未分配利润")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N077"], "所有者权益合计")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N080"], "负债和所有者权益总计")
+
+    def test_hk_quotes_market_cap_alignment(self) -> None:
+        """测试港股行情总市值与流通市值的正确映射（parts[45]为总市值，parts[44]为流通市值）"""
+        fin_gw = FinanceGateway()
+        # 模拟腾讯港股原始报文 (02357 中航科工: 总市值244.77亿，流通市值190.67亿)
+        raw_parts = [""] * 80
+        raw_parts[0] = 'v_r_hk02357="100'
+        raw_parts[1] = "中航科工"
+        raw_parts[2] = "02357"
+        raw_parts[3] = "3.070"
+        raw_parts[44] = "190.6673"  # 流通市值 (H股市值)
+        raw_parts[45] = "244.7666"  # 总市值
+        mock_raw = "~".join(raw_parts) + '";'
+
+        with unittest.mock.patch("urllib.request.OpenerDirector.open") as mock_open:
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.read.return_value = mock_raw.encode("gbk")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_open.return_value = mock_resp
+
+            res = fin_gw.stock_quotes({"symbol": "02357"})
+            valuation = res.get("估值与基本盘面", {})
+            self.assertEqual(valuation.get("总市值_亿港元"), 244.77)
+            self.assertEqual(valuation.get("流通市值_亿港元"), 190.67)
+            self.assertGreaterEqual(valuation.get("总市值_亿港元"), valuation.get("流通市值_亿港元"))
+
+    def test_hk_financials_and_f10_transparent_unsupported(self) -> None:
+        """测试港股代码调用 financials 与 f10 时显式返回 unsupported 状态与说明，杜绝静默空返回"""
+        fin_gw = FinanceGateway()
+        # 1. 港股财报三张表
+        res_fin = fin_gw.stock_financials({"symbol": "02357", "report_type": "income"})
+        self.assertEqual(res_fin.get("status"), "unsupported")
+        self.assertEqual(res_fin.get("symbol"), "02357")
+        self.assertIn("暂未收录港股", res_fin.get("message", ""))
+        self.assertEqual(res_fin.get("statements"), [])
+
+        # 2. 港股 F10
+        res_f10 = fin_gw.stock_f10({"symbol": "02357", "category": "summary"})
+        self.assertEqual(res_f10.get("status"), "unsupported")
+        self.assertEqual(res_f10.get("symbol"), "02357")
+        self.assertIn("暂未收录港股标的之深度 F10", res_f10.get("message", ""))
+        self.assertEqual(res_f10.get("formatted_tables"), {})
+
+    def test_hk_kline_unadjusted_support(self) -> None:
+        """测试港股 K 线支持 adjust='none' 不复权模式并正确路由"""
+        fin_gw = FinanceGateway()
+        mock_json = json.dumps({
+            "code": 0,
+            "data": {
+                "hk02357": {
+                    "day": [
+                        ["2026-10-20", "3.000", "3.050", "3.100", "2.980", "5000000.0"],
+                        ["2026-10-21", "3.080", "3.070", "3.125", "3.045", "10314000.0"],
+                    ]
+                }
+            }
+        })
+        mock_raw = f"kline_day={mock_json}"
+        with unittest.mock.patch("urllib.request.OpenerDirector.open") as mock_open:
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.read.return_value = mock_raw.encode("utf-8")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_open.return_value = mock_resp
+
+            res = fin_gw.stock_kline({"symbol": "02357", "period": "day", "adjust": "none", "count": 2})
+            self.assertEqual(res.get("adjust"), "none")
+            self.assertEqual(res.get("total_bars"), 2)
+            self.assertEqual(res.get("klines")[-1]["close"], 3.07)
+
+    def test_stock_news_noise_filtering(self) -> None:
+        """测试个股新闻资讯智能过滤双色球/彩票等非金融噪音"""
+        fin_gw = FinanceGateway()
+        mock_sina_json = json.dumps({
+            "data": {
+                "list": [
+                    {"title": "120期双色球预测奖号：02357命中红球", "intro": "体彩开奖预测...", "media": "彩票网", "dataTime": "2026-10-20"},
+                    {"title": "新华保险增持中航科工(02357)3100万股", "intro": "新华保险完成增持...", "media": "新浪财经", "dataTime": "2026-10-21"},
+                ]
+            }
+        })
+
+        def fake_urlopen(req, *args, **kwargs):
+            url_str = req.full_url if hasattr(req, "full_url") else str(req)
+            m = unittest.mock.MagicMock()
+            if "gtimg" in url_str:
+                m.read.return_value = 'v_r_hk02357="100~中航科工~02357~";'.encode("gbk")
+            else:
+                m.read.return_value = mock_sina_json.encode("utf-8")
+            m.__enter__.return_value = m
+            return m
+
+        with unittest.mock.patch("mcp_gateway.finance.urlopen", side_effect=fake_urlopen):
+            res = fin_gw.stock_news({"symbol": "02357", "limit": 5})
+            news_items = res.get("news", [])
+            # 验证噪音已过滤，仅保留新华保险增持
+            self.assertEqual(len(news_items), 1)
+            self.assertIn("新华保险增持中航科工", news_items[0]["title"])
 
 
 if __name__ == "__main__":
     unittest.main()
+
