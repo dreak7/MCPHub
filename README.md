@@ -124,7 +124,6 @@ OK
 
 ## 📖 深度文档与规范指引
 
-- **本地详尽版全景使用手册**：本地专属文档 [README_DETAILED.md](README_DETAILED.md) 包含了全量历史更新日志（v1.0.0 至 v1.8.0）、完整参数与字段结构说明、高级排障指南。
 - **证券金融调用规程 (Skill)**：详见 [mcphub-finance/SKILL.md](mcphub-finance/SKILL.md)，包含面向大模型与智能体的严格数据源分级、标的代码预解析、选股防 ST 过滤与标准证券分析 SOP 实战工作流。
 
 ---
