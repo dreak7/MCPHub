@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 70 Passed](https://img.shields.io/badge/Tests-70%20Passed-success.svg)](tests/)
+[![Tests: 73 Passed](https://img.shields.io/badge/Tests-73%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 > **🙏 致谢与数据源声明 (Special Thanks & Acknowledgments)**  
@@ -45,10 +45,10 @@ MCPHub 统一服务网关 (12 大标准 MCP 工具)
 | **`code_docs_search`** | 编程文档 | `query`, `limit` | Context7 官方原厂驱动，检索编程库 API 文档与精选代码切片，零废弃 Token |
 | **`stock_lookup`** | 证券金融 | `query`, `range` | 输入自然语言公司名/拼音/纯代码反查，**内置纯代码三轨正主保全层（如 002698 自动置顶博实股份，杜绝基金挤占）** |
 | **`market_context`** | 证券金融 | `{}` (缺省) | 毫秒级识别当前是否处于盘前集合竞价、早盘/午后盘中、已收盘或节假日 |
-| **`stock_quotes`** | 证券金融 | `symbol`, `setcode` | 现价、涨跌幅、日内真实振幅 (最高-最低)/昨收、动态市盈率 PE (附年化 EPS 与报告期单期 EPS 口径说明)、市净率 PB 及 **Level-1 基础五档买卖委托挂单** |
+| **`stock_quotes`** | 证券金融 | `symbol`, `setcode` | 现价、涨跌幅、日内真实振幅、**滚动市盈率 PETTM (真实TTM口径)**、动态市盈率 PE、静态市盈率、市净率 PB 及 **Level-1 基础五档买卖盘口深度** (含盘后状态自愈提示) |
 | **`stock_kline`** | 证券金融 | `symbol`, `period`, `count` | 多周期行情，**服务端纯 Python 原生计算 MA/MACD/KDJ/BOLL**，彻底杜绝大模型心算幻觉 |
-| **`stock_financials`** | 证券金融 | `symbol`, `report_type` | 资产负债表、利润表、现金流量表，**80 列映射彻底校准，无字段漂移** |
-| **`stock_f10`** | 证券金融 | `symbol`, `category` | 支持题材概念、主力资金流向、股东户数、十大股东、解禁、两融等 11 类深度数据（内置防幻觉审计层：亏损标的同比“利润变动方向”校准与隔日风格标签盘中动态PB重算） |
+| **`stock_financials`** | 证券金融 | `symbol`, `report_type` | 资产负债表、利润表、现金流量表，**80 列会计科目彻底校准（修复应付票据/账款错位，附带集团财务公司合并口径说明）** |
+| **`stock_f10`** | 证券金融 | `symbol`, `category` | 支持题材概念、主力资金流向 (全汉化主力/超大单/大单)、两融余额 (全汉化融资融券)、股东户数、解禁、事件驱动 (历史里程碑倒序) 等 11 类深度数据 |
 | **`stock_screener`** | 证券金融 | `message`, `filter_st` | 中文自然语言条件选股，**自动清洗杂质表头并默认剔除 ST/\*ST 风险股** |
 | **`stock_news`** | 证券金融 | `symbol`, `limit` | 新浪财经主力 + 东财公告备份三轨引擎，支持代码与中文简称 URL 编码检索 |
 
@@ -63,7 +63,7 @@ MCPHub 统一服务网关 (12 大标准 MCP 工具)
 - **`[1] 一键生成并查看 Hermes Desktop 挂载配置`**：自动识别本机实际 Python 绝对路径与配置文件路径，输出零歧义配置；
 - **`[2] 启动可视化引擎与能力配置向导 (GUI)`**：原生 Windows 窗口，免手动编辑 JSON 即可添加引擎或自定义能力分类；
 - **`[3] 快捷配置/编辑 API 密钥 (.env)`**：快速配置并管理搜索及通达信专线密钥；
-- **`[4] 运行服务健康检查与全部测试套件`**：一键运行全量 70 项自动化单元测试。
+- **`[4] 运行服务健康检查与全部测试套件`**：一键运行全量 73 项自动化单元测试。
 
 ### 2. 配置 Hermes Desktop
 直接打开 Hermes 的用户配置文件 `config.yaml`（或在设置界面中以 stdio 模式添加）：
@@ -95,7 +95,7 @@ hermes mcp test MCPHub
 1. **A 股专线与港股免费通道双轨智能路由（Dual-Market Routing）**：
    - 6 位数字代码标的自动直连**通达信官方专线**，提供 Level-1 基础五档买卖盘与权威财务报表；
    - 5 位数字代码（如 `00700` 腾讯控股、`09988` 阿里巴巴）自动路由至**腾讯免费行情接口**，免配置港股 Key 即享极速行情。
-2. **防计算幻觉量化算法引擎（Anti-Hallucination Quant）**：
+2. **防计算幻觉技术指标引擎（Anti-Hallucination Technical Indicators）**：
    - 在服务端纯 Python 进程内完成 MA、MACD、KDJ、BOLL 浮点数学计算，大模型专注趋势与逻辑解读，彻底告别“AI 心算金叉死叉”导致的数值幻觉。
 3. **分级智能冷却与自适应解冻（Auto-Healing Cooldown）**：
    - 区分短时限流（429 冷却 1 小时）与额度耗尽（402/432 冷却 3 天）；
@@ -115,10 +115,10 @@ python -m unittest discover tests
 ```
 执行结果：
 ```text
-Ran 70 tests in 1.746s
+Ran 73 tests in 1.746s
 OK
 ```
-测试全量覆盖：搜索多源融合降级、Context7 适配、通达信行情/K线/F10协议解析、资产负债表 80 列对齐、选股杂质过滤、腾讯港股分流、SSRF 安全防御等 70 个关键场景。
+测试全量覆盖：搜索多源融合降级、Context7 适配、通达信行情/K线/F10协议解析、资产负债表 80 列对齐、选股杂质过滤、腾讯港股分流、SSRF 安全防御等 73 个关键场景。
 
 ---
 

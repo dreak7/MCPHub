@@ -274,6 +274,88 @@ class TestFinanceGateway(unittest.TestCase):
                 self.assertEqual(entities_byd[0]["entity_type"], "A股代码")
                 self.assertEqual(entities_byd[1]["entity_name"], "工银现代服务业混合A")
 
+    def test_stock_quotes_pettm(self) -> None:
+        """测试 stock_quotes 从 ProInfo 中提取真实 PETTM 与 PEStatic"""
+        fin_gw = FinanceGateway()
+        mock_raw = {
+            "HQInfo": {"Now": 1309.69, "Close": 1331.88, "MaxP": 1331.98, "MinP": 1302.36},
+            "ExtInfo": {"SYL": 18.3887463, "MGJZC": 200.99, "MGSY": 35.57},
+            "ProInfo": {"PETTM": 20.1048641, "PEStatic": 19.8884583},
+            "BspInfo": [{"BuyP": 1309.69, "BuyV": "10"}, {}, {}, {}, {}],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_raw):
+            res = fin_gw.stock_quotes({"symbol": "600519"})
+            ext = res.get("估值与基本盘面", {})
+            self.assertEqual(ext.get("滚动市盈率_PETTM"), 20.10)
+            self.assertEqual(ext.get("静态市盈率_PEStatic"), 19.89)
+            self.assertEqual(ext.get("动态市盈率_PE"), 18.39)
+            self.assertIn("滚动市盈率_PETTM", ext.get("估值口径说明", ""))
+            self.assertIn("盘口深度说明", res)
+
+    def test_f10_margin_and_flow_column_mapping(self) -> None:
+        """测试 F10 margin_trading、capital_flow 及 events 的列名汉化与排序"""
+        fin_gw = FinanceGateway()
+        # 1. 模拟 margin_trading
+        mock_margin = {
+            "ResultSets": [{
+                "ResultSetKey": "table0",
+                "ColName": ["T001", "T003", "T004", "ClosePrice"],
+                "Content": [["20261020", "16634514788", "266624827", 1331.88]]
+            }]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "get_f10", return_value={"data": mock_margin}):
+            res_m = fin_gw.stock_f10({"symbol": "600519", "category": "margin_trading"})
+            row0 = res_m.get("formatted_tables", {}).get("table0", [])[0]
+            self.assertIn("交易日期", row0)
+            self.assertIn("融资余额_元", row0)
+            self.assertIn("融资买入额_元", row0)
+            self.assertIn("收盘价", row0)
+
+        # 2. 模拟 capital_flow
+        mock_flow = {
+            "ResultSets": [{
+                "ResultSetKey": "table0",
+                "ColName": ["rq", "N001", "N002", "N015"],
+                "Content": [["2026-10-20", 29867648, 0.66, 1331.88]]
+            }]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "get_f10", return_value={"data": mock_flow}):
+            res_cf = fin_gw.stock_f10({"symbol": "600519", "category": "capital_flow"})
+            row0_cf = res_cf.get("formatted_tables", {}).get("table0", [])[0]
+            self.assertIn("交易日期", row0_cf)
+            self.assertIn("主力净流入_元", row0_cf)
+            self.assertIn("主力净占比_pct", row0_cf)
+
+        # 3. 模拟 events
+        mock_events = {
+            "ResultSets": [{
+                "ResultSetKey": "table0",
+                "ColName": ["cjrq", "sjmc", "sjxz", "cjrzdf"],
+                "Content": [
+                    ["20160413", "历史旧事件", "利好", -1.09],
+                    ["20260901", "最新里程碑", "中性", 0.003],
+                ]
+            }]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "get_f10", return_value={"data": mock_events}):
+            res_ev = fin_gw.stock_f10({"symbol": "600519", "category": "events"})
+            rows_ev = res_ev.get("formatted_tables", {}).get("table0", [])
+            # 验证倒序：最新事件在第 0 行
+            self.assertEqual(rows_ev[0]["事件名称"], "最新里程碑")
+            self.assertEqual(rows_ev[1]["事件名称"], "历史旧事件")
+            self.assertIn("事件库属性说明", res_ev)
+
+    def test_balance_sheet_field_alignment(self) -> None:
+        """测试资产负债表科目的精准映射（应付票据与预收款项无重叠错位）"""
+        from mcp_gateway.finance import BALANCE_FIELDS_NON_FINANCE
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N043"], "应付票据及应付账款合计")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N044"], "应付票据")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N045"], "应付账款")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N046"], "预收款项")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N047"], "合同负债")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N057"], "流动负债合计")
+        self.assertEqual(BALANCE_FIELDS_NON_FINANCE["N066"], "非流动负债合计")
+
 
 if __name__ == "__main__":
     unittest.main()

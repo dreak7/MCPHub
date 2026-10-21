@@ -147,7 +147,7 @@ BALANCE_FIELDS_NON_FINANCE: dict[str, str] = {
     "N001": "截止日期",
     "N002": "货币资金",
     "N003": "交易性金融资产",
-    "N004": "应收票据及账款",
+    "N004": "应收票据及账款合计",
     "N005": "应收票据",
     "N006": "应收账款",
     "N007": "预付款项",
@@ -185,30 +185,30 @@ BALANCE_FIELDS_NON_FINANCE: dict[str, str] = {
     "N039": "短期借款",
     "N040": "交易性金融负债",
     "N041": "衍生金融负债",
-    "N042": "应付票据及应付账款",
-    "N043": "应付票据",
-    "N044": "应付账款",
-    "N045": "预收款项",
-    "N046": "合同负债",
-    "N047": "应付职工薪酬",
-    "N048": "应交税费",
-    "N049": "应付利息",
-    "N050": "应付股利",
+    "N042": "吸收存款及同业存放",
+    "N043": "应付票据及应付账款合计",
+    "N044": "应付票据",
+    "N045": "应付账款",
+    "N046": "预收款项",
+    "N047": "合同负债",
+    "N048": "应付职工薪酬",
+    "N049": "应交税费",
+    "N050": "应付利息",
     "N051": "其他应付款",
     "N052": "一年内到期的非流动负债",
     "N053": "其他流动负债",
-    "N054": "流动负债合计",
+    "N054": "待转销项税额",
     "N055": "长期借款",
     "N056": "应付债券",
     "N057": "流动负债合计",
-    "N058": "长期应付款",
-    "N059": "专项应付款",
-    "N060": "预计负债",
-    "N061": "递延所得税负债",
-    "N062": "递延收益",
-    "N063": "租赁负债",
-    "N064": "其他非流动负债",
-    "N065": "非流动负债合计",
+    "N058": "长期借款",
+    "N059": "应付债券",
+    "N060": "租赁负债",
+    "N061": "长期应付款",
+    "N062": "专项应付款",
+    "N063": "预计负债",
+    "N064": "递延所得税负债",
+    "N065": "其他非流动负债",
     "N066": "非流动负债合计",
     "N067": "负债合计",
     "N068": "实收资本_股本",
@@ -230,29 +230,79 @@ BALANCE_FIELDS_NON_FINANCE: dict[str, str] = {
 CASHFLOW_FIELDS_NON_FINANCE: dict[str, str] = {
     "N001": "截止日期",
     "N002": "销售商品提供劳务收到的现金",
+    "N003": "收到的税费返还",
+    "N004": "收到其他与经营活动有关的现金",
     "N005": "经营活动现金流入小计",
     "N006": "购买商品接受劳务支付的现金",
     "N007": "支付给职工以及为职工支付的现金",
     "N008": "支付的各项税费",
+    "N009": "支付其他与经营活动有关的现金",
     "N010": "经营活动现金流出小计",
     "N011": "经营活动现金流量净额",
     "N012": "收回投资收到的现金",
     "N013": "取得投资收益收到的现金",
+    "N014": "处置固定资产无形资产收回的现金净额",
+    "N015": "处置子公司及其他营业单位收到的现金净额",
+    "N016": "收到其他与投资活动有关的现金",
     "N017": "投资活动现金流入小计",
     "N018": "购建固定资产无形资产支付的现金",
     "N019": "投资支付的现金",
+    "N020": "取得子公司及其他营业单位支付的现金净额",
+    "N021": "支付其他与投资活动有关的现金",
     "N022": "投资活动现金流出小计",
     "N023": "投资活动现金流量净额",
     "N024": "吸收投资收到的现金",
     "N025": "取得借款收到的现金",
+    "N026": "发行债券收到的现金",
+    "N027": "收到其他与筹资活动有关的现金",
     "N028": "筹资活动现金流入小计",
     "N029": "偿还债务支付的现金",
     "N030": "分配股利利润或偿付利息支付的现金",
+    "N031": "支付其他与筹资活动有关的现金",
     "N032": "筹资活动现金流出小计",
     "N033": "筹资活动现金流量净额",
+    "N034": "汇率变动对现金及等价物的影响",
     "N035": "现金及现金等价物净增加额",
-    "N037": "期末现金及等价物余额",
+    "N036": "期初现金及现金等价物余额",
+    "N037": "期末现金及现金等价物余额",
     "Tdate": "报告期日期",
+}
+
+# 融资融券交易数据 (margin_trading) 表头汉化映射表
+MARGIN_TRADING_FIELDS: dict[str, str] = {
+    "T001": "交易日期",
+    "T003": "融资余额_元",
+    "T004": "融资买入额_元",
+    "T005": "融资偿还额_元",
+    "T006": "融券余量_股",
+    "T007": "融券卖出量_股",
+    "T008": "融券偿还量_股",
+    "bt009": "成交量_手",
+    "bt010": "成交金额_元",
+    "ClosePrice": "收盘价",
+}
+
+# 主力资金流向 (capital_flow) 表头汉化映射表
+CAPITAL_FLOW_FIELDS: dict[str, str] = {
+    "rq": "交易日期",
+    "N001": "主力净流入_元",
+    "N002": "主力净占比_pct",
+    "N003": "超大单净流入_元",
+    "N004": "超大单净占比_pct",
+    "N005": "大单净流入_元",
+    "N006": "大单净占比_pct",
+    "N007": "中单净流入_元",
+    "N008": "中单净占比_pct",
+    "N015": "收盘价",
+}
+
+# 历史重大事件驱动催化 (events) 表头汉化映射表
+EVENTS_FIELDS: dict[str, str] = {
+    "cjrq": "催化日期",
+    "sjmc": "事件名称",
+    "rec_id": "事件记录ID",
+    "sjxz": "事件性质",
+    "cjrzdf": "当日涨跌幅_pct",
 }
 
 
@@ -907,6 +957,7 @@ class TdxClient:
 
         # 2. 估值与股本指标中文化映射与年化口径对齐
         ext_raw = raw.get("ExtInfo", {})
+        pro_raw = raw.get("ProInfo", {})
         if isinstance(ext_raw, dict):
             mapped_ext = {EXT_FIELD_MAP.get(k, k): v for k, v in ext_raw.items()}
             # 计算市净率 PB、年化每股收益，并附加口径防幻觉说明
@@ -917,12 +968,30 @@ class TdxClient:
             if mgjzc > 0 and now_p > 0:
                 mapped_ext["市净率_PB"] = round(now_p / mgjzc, 2)
             if syl > 0 and now_p > 0:
+                mapped_ext["动态市盈率_PE"] = round(syl, 2)
                 annualized_eps = round(now_p / syl, 3)
                 mapped_ext["年化每股收益_EPS"] = annualized_eps
-                mapped_ext["估值口径说明"] = (
-                    f"动态市盈率_PE采用最新报告期年化折算口径(年化每股收益≈{annualized_eps}元，现价/年化EPS=动态市盈率)；"
-                    f"报告期每股收益_EPS({mgsy}元)为非年化单期累计值，两者口径不同，禁止直接互乘推导价格或市值。"
-                )
+
+            # 从 ProInfo 中提取真正滚动过去 4 季度的 TTM 滚动市盈率与静态市盈率
+            if isinstance(pro_raw, dict):
+                pe_ttm = pro_raw.get("PETTM")
+                pe_static = pro_raw.get("PEStatic")
+                if pe_ttm is not None and str(pe_ttm).strip() != "":
+                    try:
+                        mapped_ext["滚动市盈率_PETTM"] = round(float(pe_ttm), 2)
+                    except (ValueError, TypeError):
+                        pass
+                if pe_static is not None and str(pe_static).strip() != "":
+                    try:
+                        mapped_ext["静态市盈率_PEStatic"] = round(float(pe_static), 2)
+                    except (ValueError, TypeError):
+                        pass
+
+            ttm_note = f"滚动市盈率_PETTM为 {mapped_ext.get('滚动市盈率_PETTM')} 倍(按过去4季度滚动净利润测算的真实TTM口径)；" if "滚动市盈率_PETTM" in mapped_ext else ""
+            mapped_ext["估值口径说明"] = (
+                f"{ttm_note}动态市盈率_PE({mapped_ext.get('动态市盈率_PE')}倍)采用最新报告期年化折算口径(年化每股收益≈{mapped_ext.get('年化每股收益_EPS')}元，现价/年化EPS=动态市盈率)；"
+                f"报告期每股收益_EPS({mgsy}元)为非年化单期累计值，两者口径不同，禁止直接互乘推导价格或市值。"
+            )
             result["估值与基本盘面"] = mapped_ext
 
         # 3. 五档深度买卖盘口整理（通达信官方 BspInfo 返回 5 项明细数组）
@@ -949,6 +1018,13 @@ class TdxClient:
                     }
             if bsp_dict:
                 result["五档深度盘口"] = bsp_dict
+                # 检查是否处于盘后休市时段（交易所清空连续竞价撮合委托，盘口仅剩一档收盘撮合价）
+                valid_tiers = sum(1 for v in bsp_dict.values() if isinstance(v, dict) and v.get("价格") is not None)
+                if valid_tiers <= 1:
+                    result["盘口深度说明"] = (
+                        "当前处于休市/盘后时段，交易所撮合系统已清空连续竞价订单簿，仅保留收盘撮合价；"
+                        "完整五档买卖深度将在交易日 9:15-11:30、13:00-15:00 连续竞价期间动态全量呈现。"
+                    )
         elif isinstance(bsp_raw, dict) and bsp_raw:
             bsp_dict = {
                 "买一": {"价格": bsp_raw.get("BuyPrice1") or bsp_raw.get("BuyP1"), "委托量_手": bsp_raw.get("BuyVol1") or bsp_raw.get("BuyV1")},
@@ -1130,6 +1206,11 @@ class TdxClient:
             "statement_type": type_name,
             "period_count": len(result_periods),
             "statements": result_periods,
+            "会计口径与合并说明": (
+                "本表会计科目按工商业企业准则标准映射对齐。若查询标的属于大型集团且控股持牌金融机构（如贵州茅台控股贵州茅台集团财务有限公司、"
+                "大型央国企控股财务公司），其集团合并报表中包含拆出资金、吸收存款及同业存放、金融借贷等金融专属科目；"
+                "工商业明细科目加总若与流入/流出小计或流动资产合计产生残差，该差额属于集团财务公司金融合并口径，非数据错误。"
+            ),
         }
 
     def get_f10(self, symbol: str, category: str = "concepts") -> dict[str, Any]:
@@ -1638,11 +1719,26 @@ class FinanceGateway:
                     for row in rows:
                         row_dict = {}
                         for c_idx, val in enumerate(row):
-                            col_title = cols[c_idx] if c_idx < len(cols) else f"col_{c_idx}"
+                            col_raw = cols[c_idx] if c_idx < len(cols) else f"col_{c_idx}"
+                            if category == "margin_trading":
+                                col_title = MARGIN_TRADING_FIELDS.get(col_raw, col_raw)
+                            elif category == "capital_flow":
+                                col_title = CAPITAL_FLOW_FIELDS.get(col_raw, col_raw)
+                            elif category == "events":
+                                col_title = EVENTS_FIELDS.get(col_raw, col_raw)
+                            else:
+                                col_title = col_raw
                             row_dict[col_title] = val
                         table_rows.append(row_dict)
+                    if category == "events" and table_rows:
+                        table_rows = list(reversed(table_rows))
                     formatted_tables[t_key] = table_rows
                 tdx_res["formatted_tables"] = formatted_tables
+                if category == "events":
+                    tdx_res["事件库属性说明"] = (
+                        "本表为通达信收录的历史重大行业题材与宏观里程碑事件库（已按发生日期倒序排列，非实时个股公告）；"
+                        "如需获取上市公司最新分钟级法定披露公告与突发新闻，请调用 stock_news 工具。"
+                    )
                 # 增强 F10 摘要表：汉化关键财务与估值指标、依据“利润变动方向”精确校准亏损标的同比含义、注入隔日风格标签与破净动态复核指引
                 if category == "summary" or ("table3" in formatted_tables and "table4" in formatted_tables):
                     self._enrich_f10_summary_tables(formatted_tables, tdx_res)
