@@ -53,7 +53,7 @@ HQ_FIELD_MAP: dict[str, str] = {
     "Inside": "内盘_手",
     "Outside": "外盘_手",
     "InOutFlag": "内外盘强弱标志",
-    "Yield": "日内振幅_pct",
+    "Yield": "总股本_股",
     "CJBS": "成交笔数",
     "LB": "量比",
     "HSL": "换手率_pct",
@@ -67,8 +67,8 @@ EXT_FIELD_MAP: dict[str, str] = {
     "ZTPrice": "涨停价",
     "DTPrice": "跌停价",
     "ZSZ": "总市值_元",
-    "SYL": "动态市盈率_PE_TTM",
-    "MGSY": "每股收益_EPS",
+    "SYL": "动态市盈率_PE",
+    "MGSY": "报告期每股收益_EPS",
     "MGJZC": "每股净资产_BPS",
     "MGGX": "每股公积金",
     "ZGB": "总股本_万股",
@@ -716,18 +716,38 @@ class TdxClient:
         hq_raw = raw.get("HQInfo", {})
         if isinstance(hq_raw, dict):
             mapped_hq = {HQ_FIELD_MAP.get(k, k): v for k, v in hq_raw.items()}
-            # 自动计算涨跌幅
+            # 自动计算涨跌幅与日内真实振幅（遵循交易所标准公式：(最高-最低)/昨收*100，彻底避免通达信Yield字段污染）
             now_p = float(hq_raw.get("Now", 0.0) or 0.0)
             close_p = float(hq_raw.get("Close", 0.0) or 0.0)
+            high_p = float(hq_raw.get("MaxP", 0.0) or 0.0)
+            low_p = float(hq_raw.get("MinP", 0.0) or 0.0)
             if close_p > 0 and now_p > 0:
                 mapped_hq["涨跌幅_pct"] = round(((now_p - close_p) / close_p) * 100.0, 2)
                 mapped_hq["涨跌额"] = round(now_p - close_p, 3)
+            if close_p > 0 and high_p > 0 and low_p > 0:
+                amp_val = round(((high_p - low_p) / close_p) * 100.0, 2)
+                mapped_hq["日内振幅_pct"] = amp_val
+                mapped_hq["振幅_pct"] = amp_val
             result["盘口核心行情"] = mapped_hq
 
-        # 2. 估值与股本指标中文化映射
+        # 2. 估值与股本指标中文化映射与年化口径对齐
         ext_raw = raw.get("ExtInfo", {})
         if isinstance(ext_raw, dict):
             mapped_ext = {EXT_FIELD_MAP.get(k, k): v for k, v in ext_raw.items()}
+            # 计算市净率 PB、年化每股收益，并附加口径防幻觉说明
+            now_p = float(hq_raw.get("Now", 0.0) or 0.0) if isinstance(hq_raw, dict) else 0.0
+            mgjzc = float(ext_raw.get("MGJZC", 0.0) or 0.0)
+            syl = float(ext_raw.get("SYL", 0.0) or 0.0)
+            mgsy = float(ext_raw.get("MGSY", 0.0) or 0.0)
+            if mgjzc > 0 and now_p > 0:
+                mapped_ext["市净率_PB"] = round(now_p / mgjzc, 2)
+            if syl > 0 and now_p > 0:
+                annualized_eps = round(now_p / syl, 3)
+                mapped_ext["年化每股收益_EPS"] = annualized_eps
+                mapped_ext["估值口径说明"] = (
+                    f"动态市盈率_PE采用最新报告期年化折算口径(年化每股收益≈{annualized_eps}元，现价/年化EPS=动态市盈率)；"
+                    f"报告期每股收益_EPS({mgsy}元)为非年化单期累计值，两者口径不同，禁止直接互乘推导价格或市值。"
+                )
             result["估值与基本盘面"] = mapped_ext
 
         # 3. 五档深度买卖盘口整理（通达信官方 BspInfo 返回 5 项明细数组）

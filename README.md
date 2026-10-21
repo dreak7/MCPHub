@@ -45,7 +45,7 @@ MCPHub 统一服务网关 (12 大标准 MCP 工具)
 | **`code_docs_search`** | 编程文档 | `query`, `limit` | Context7 官方原厂驱动，检索编程库 API 文档与精选代码切片，零废弃 Token |
 | **`stock_lookup`** | 证券金融 | `query`, `range` | 输入自然语言公司名/拼音，反查标准 A 股 6 位代码或港股 5 位代码 |
 | **`market_context`** | 证券金融 | `{}` (缺省) | 毫秒级识别当前是否处于盘前集合竞价、早盘/午后盘中、已收盘或节假日 |
-| **`stock_quotes`** | 证券金融 | `symbol`, `setcode` | 现价、涨跌幅、估值比率及 **Level-1 基础五档买卖委托挂单**（A股五档，港股一档） |
+| **`stock_quotes`** | 证券金融 | `symbol`, `setcode` | 现价、涨跌幅、日内真实振幅 (最高-最低)/昨收、动态市盈率 PE (附年化 EPS 与报告期单期 EPS 口径说明)、市净率 PB 及 **Level-1 基础五档买卖委托挂单** |
 | **`stock_kline`** | 证券金融 | `symbol`, `period`, `count` | 多周期行情，**服务端纯 Python 原生计算 MA/MACD/KDJ/BOLL**，彻底杜绝大模型心算幻觉 |
 | **`stock_financials`** | 证券金融 | `symbol`, `report_type` | 资产负债表、利润表、现金流量表，**80 列映射彻底校准，无字段漂移** |
 | **`stock_f10`** | 证券金融 | `symbol`, `category` | 支持题材概念、主力资金流向、股东户数、十大股东、解禁、两融等 11 类深度数据 |
