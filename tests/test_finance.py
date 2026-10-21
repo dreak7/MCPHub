@@ -755,6 +755,102 @@ class TestFinanceGateway(unittest.TestCase):
             fin_gw.stock_news({"symbol": bad_code})
         self.assertIn("已拦截泛化模糊检索以避免返回无关误导资讯", str(cm_n.exception))
 
+    def test_screener_pagination_no_gap_and_st_accounting(self) -> None:
+        """测试智能选股分页严格对齐、无跨页跳过断裂，并清晰披露 ST 过滤数量与说明"""
+        fin_gw = FinanceGateway()
+        mock_screener_page1 = [
+            [0, "", 3, "session_1", 2],
+            ["POS", "market", "sec_code", "sec_name", "now_price", "chg"],
+            ["", "", "", "", "", ""],
+            [1, "0", "002223", "博实股份", "25.15", "-1.5"],
+            [2, "0", "002514", "*ST宝实", "5.10", "2.1"],
+        ]
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_screener_page1):
+            res = fin_gw.stock_screener({"message": "储能", "limit": 2, "page": 1, "filter_st": True})
+            self.assertEqual(res["page"], 1)
+            self.assertEqual(res["limit"], 2)
+            self.assertEqual(res["total_pages"], 2)
+            self.assertEqual(res["matched_count"], 3)
+            self.assertEqual(res["returned_count"], 1)
+            self.assertEqual(res["filtered_st_count"], 1)
+            self.assertIn("默认已过滤 ST/*ST 股", res["filter_st_note"])
+            self.assertEqual(res["stocks"][0]["code"], "002223")
+
+    def test_kline_week_month_volume_alignment(self) -> None:
+        """测试周线与月线成交量统一乘以 100 换算为【股】，消除跨周期 0.0100 漂移"""
+        fin_gw = FinanceGateway()
+        mock_pbfxt_week = {
+            "ListItem": [
+                {
+                    "Item": [
+                        "20261021", "0", "1322.5", "1348.6", "1302.36", "1309.69",
+                        "14238156800.0", "14238156800.0", "107378.0", "0.0", "0.0", "0.0"
+                    ]
+                }
+            ],
+            "AttachInfo": {"Name": "贵州茅台"},
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_pbfxt_week):
+            res = fin_gw.stock_kline({"symbol": "600519", "period": "week", "limit": 1})
+            bar = res["klines"][0]
+            # 原始 107378.0 手已自动换算为 10737800.0 股
+            self.assertEqual(bar["volume"], 10737800.0)
+
+    def test_quotes_ashare_top_level_name_and_market(self) -> None:
+        """测试 A 股盘口 quotes 返回顶层与港股对齐的 name 与 market 字段"""
+        fin_gw = FinanceGateway()
+        mock_pbhq = {
+            "HQInfo": {
+                "HQDate": "20261021", "HQTime": "150000", "Now": 1309.69,
+                "Close": 1331.88, "Open": 1331.88, "MaxP": 1331.98, "MinP": 1302.36,
+                "Volume": 33514, "Amount": 4403823104.0
+            },
+            "ExtInfo": {"ZGB": 125008.16, "LTGB": 125008.16, "ZSZ": 1637219372013.0, "SYL": 20.1},
+            "BaseInfo": {"Name": "贵州茅台", "Code": "600519", "Setcode": 1},
+            "BspInfo": [{"BuyP": 1309.59, "SellP": 1309.69, "BuyV": "2", "SellV": "46"}],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_pbhq):
+            res = fin_gw.stock_quotes({"symbol": "600519"})
+            self.assertEqual(res["name"], "贵州茅台")
+            self.assertIn("上海证券交易所", res["market"])
+            self.assertIn("股票名称", res["盘口核心行情"])
+            self.assertEqual(res["盘口核心行情"]["股票名称"], "贵州茅台")
+
+    def test_f10_raw_t_codes_mapped_and_empty_forecast_note(self) -> None:
+        """测试 F10 中 shareholders, forecast, summary, margin_trading 原始 T 码全归一，空预测注入说明"""
+        fin_gw = FinanceGateway()
+        # 1. 测试 shareholders 汉化
+        mock_sh_raw = {
+            "ErrorCode": 0,
+            "ResultSets": [
+                {
+                    "ResultSetKey": "table0",
+                    "ColName": ["T002", "T003", "T004", "T005", "T006", "T007", "T012"],
+                    "Content": [["2026-06-30", 296404, 4217.49, 21.89, -18.1, 1185.49, 53245]],
+                }
+            ],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_sh_raw):
+            res = fin_gw.stock_f10({"symbol": "600519", "category": "shareholders"})
+            row = res["formatted_tables"]["table0"][0]
+            self.assertIn("截止日期", row)
+            self.assertIn("股东户数_户", row)
+            self.assertIn("户均持股数_股", row)
+            self.assertNotIn("T002", row)
+
+        # 2. 测试 forecast 空表返回无记录说明
+        mock_fc_empty = {
+            "ErrorCode": 0,
+            "ResultSets": [
+                {"ResultSetKey": "table0", "ColName": ["defdate"], "Content": []},
+                {"ResultSetKey": "table1", "ColName": ["T026"], "Content": []},
+            ],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_fc_empty):
+            res_fc = fin_gw.stock_f10({"symbol": "002252", "category": "forecast"})
+            self.assertIn("无记录说明", res_fc)
+            self.assertIn("近期无卖方机构发布盈利预测报告", res_fc["无记录说明"])
+
 
 if __name__ == "__main__":
     unittest.main()

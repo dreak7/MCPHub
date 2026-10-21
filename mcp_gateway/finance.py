@@ -319,6 +319,8 @@ MARGIN_TRADING_FIELDS: dict[str, str] = {
     "bt009": "成交量_股",
     "bt010": "成交金额_元",
     "ClosePrice": "收盘价",
+    "bdrq": "变动日期",
+    "T033": "总股本_万股",
 }
 
 # 主力资金流向 (capital_flow) 表头汉化映射表
@@ -370,13 +372,61 @@ UNLOCKS_FIELDS: dict[str, str] = {
     "price": "参考股价_元",
 }
 
+# 股东人数与筹码集中度表 (shareholders) 表头汉化映射表
+SHAREHOLDERS_FIELDS: dict[str, str] = {
+    "T002": "截止日期",
+    "T003": "股东户数_户",
+    "T004": "户均持股数_股",
+    "T005": "股东户数增减_pct",
+    "T006": "户均持股增减_pct",
+    "T007": "参考股价_元",
+    "T012": "股东户数增减_户",
+}
+
+# 机构盈利预测与评级一致预期 (forecast) 表头汉化映射表
+FORECAST_FIELDS: dict[str, str] = {
+    "defdate": "预测报告期",
+    "mxdef": "基准报告期",
+    "T003": "预测发布日期",
+    "T005": "预测每股收益_当年_元",
+    "T006": "预测每股收益_次年_元",
+    "T007": "预测每股收益_后年_元",
+    "T024": "预测PEG",
+    "T025": "机构目标价_元",
+    "T026": "评级标志位",
+    "T030": "评级更新日期",
+    "T031": "预测区间下限",
+    "T032": "预测均值",
+    "T033": "预测区间上限",
+}
+
+# 公司概要与提示扩展表 (summary) 表头汉化映射表
+SUMMARY_FIELDS: dict[str, str] = {
+    "T017": "主营业务范围",
+    "hy1": "一级行业",
+    "hy2": "二级行业",
+    "rec_id": "板块ID",
+    "T002": "概念板块名称",
+    "T001": "成分股数量",
+    "T060": "概念标签1",
+    "T061": "概念标签2",
+    "T062": "概念标签3",
+    "T063": "概念标签4",
+    "T064": "概念标签5",
+    "T065": "概念标签6",
+    "zyrq": "质押统计日期",
+    "zygf": "质押股份比例_pct",
+    "zzygf": "质押总股数_万股",
+    "iscdr": "是否存托凭证CDR",
+}
+
 # 十大流通股东股本总额表 (top_holders.table0)
 TOP_HOLDERS_TOTALS_FIELDS: dict[str, str] = {
     "rq": "变动日期",
     "T004": "流通A股合计_股",
     "T013": "限售流通股合计_股",
-    "T016": "变动原因",
-    "T019": "总股本_股",
+    "T016": "其他流通股_股",
+    "T019": "统计流通总额_股",
 }
 
 # 十大流通股东持表明细表 (top_holders.table1)
@@ -1382,9 +1432,32 @@ class TdxClient:
         url = f"{self.api_endpoint}?Entry=TdxShare.PBHQInfo"
         raw = self._post(url, req_body)
 
+        base_info = raw.get("BaseInfo", {}) if isinstance(raw, dict) else {}
+        stock_name = base_info.get("Name", "") if isinstance(base_info, dict) else ""
+        if not stock_name:
+            entity = self._resolve_exact_security_entity(clean_code)
+            if entity and entity.get("entity_name"):
+                stock_name = entity.get("entity_name")
+
+        market_desc = (
+            "上海证券交易所 (SSE)"
+            if str(m_setcode) == "1"
+            else (
+                "深圳证券交易所 (SZSE)"
+                if str(m_setcode) == "0"
+                else (
+                    "北京证券交易所 (BSE)"
+                    if str(m_setcode) == "2"
+                    else f"市场代码_{m_setcode}"
+                )
+            )
+        )
+
         result: dict[str, Any] = {
             "symbol": clean_code,
+            "name": stock_name,
             "setcode": m_setcode,
+            "market": market_desc,
             "source": "tdx_official_专线",
         }
 
@@ -1406,6 +1479,8 @@ class TdxClient:
 
         if isinstance(hq_raw, dict):
             mapped_hq = {HQ_FIELD_MAP.get(k, k): v for k, v in hq_raw.items()}
+            if stock_name:
+                mapped_hq["股票名称"] = stock_name
             # 自动计算涨跌幅与日内真实振幅（遵循交易所标准公式：(最高-最低)/昨收*100，彻底避免通达信Yield字段污染）
             high_p = float(hq_raw.get("MaxP", 0.0) or 0.0)
             low_p = float(hq_raw.get("MinP", 0.0) or 0.0)
@@ -1599,6 +1674,9 @@ class TdxClient:
             close_p = round(float(raw_row[5]), price_dec)
             amt_val = round(float(raw_row[6]), 2) if len(raw_row) > 6 else 0.0
             vol_val = round(float(raw_row[8]), 2) if len(raw_row) > 8 else (round(float(raw_row[7]), 2) if len(raw_row) > 7 else 0.0)
+            # 周线与月线通达信底层上报单位为手 (1手=100股)，日线与分钟线底层为股。统一跨周期成交量单位为【股】消除漂移
+            if period.lower() in ("week", "month"):
+                vol_val = round(vol_val * 100.0, 2)
 
             parsed_bars.append({
                 "time": dt_str,
@@ -1709,9 +1787,40 @@ class TdxClient:
                     if rtype in ("cashflow", "cashflow_statement", "xjllb"):
                         period_dict["现金流量表加总纪律说明"] = (
                             "因上游数据模板中缺失'收到的税费返还'等流入细分项，流入/流出细项之和与小计可能存在不可闭合差额。"
-                            "量化与财报分析时禁止引用流入/流出小计，必须且只能引用三大活动净额（经营净额、投资净额、筹资净额）"
+                            "量化与财报分析时禁止机械累加细项计算小计，必须且只能引用三大活动净额（经营净额、投资净额、筹资净额）"
                             "与期末现金余额。"
                         )
+                        # 经营活动现金流入/流出不可加总差额自陈 (财务公司拆借/存贷款/税费返还等科目缺项)
+                        jy_in = period_dict.get("经营活动现金流入小计")
+                        if jy_in is not None and isinstance(jy_in, (int, float)):
+                            known_jy_in = ["销售商品提供劳务收到的现金", "收到的税费返还", "收到其他与经营活动有关的现金"]
+                            diff_jy_in = round(float(jy_in) - sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_jy_in), 2)
+                            if abs(diff_jy_in) > 0.01:
+                                period_dict["经营活动现金流入不可加总差额_收到的税费返还及金融拆借等"] = diff_jy_in
+
+                        jy_out = period_dict.get("经营活动现金流出小计")
+                        if jy_out is not None and isinstance(jy_out, (int, float)):
+                            known_jy_out = [
+                                "购买商品接受劳务支付的现金", "支付给职工以及为职工支付的现金",
+                                "支付的各项税费", "支付其他与经营活动有关的现金"
+                            ]
+                            diff_jy_out = round(float(jy_out) - sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_jy_out), 2)
+                            if abs(diff_jy_out) > 0.01:
+                                period_dict["经营活动现金流出不可加总差额_金融存贷款及细项等"] = diff_jy_out
+
+                        cz_in = period_dict.get("筹资活动现金流入小计")
+                        if cz_in is not None and isinstance(cz_in, (int, float)):
+                            known_cz_in = ["吸收投资收到的现金", "取得借款收到的现金", "收到其他与筹资活动有关的现金"]
+                            diff_cz_in = round(float(cz_in) - sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_cz_in), 2)
+                            if abs(diff_cz_in) > 0.01:
+                                period_dict["筹资活动现金流入不可加总差额_金融借款及发债细项等"] = diff_cz_in
+
+                        cz_out = period_dict.get("筹资活动现金流出小计")
+                        if cz_out is not None and isinstance(cz_out, (int, float)):
+                            known_cz_out = ["偿还债务支付的现金", "分配股利利润或偿付利息支付的现金", "支付其他与筹资活动有关的现金"]
+                            diff_cz_out = round(float(cz_out) - sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_cz_out), 2)
+                            if abs(diff_cz_out) > 0.01:
+                                period_dict["筹资活动现金流出不可加总差额_金融分红及利息细项等"] = diff_cz_out
 
                     # 针对利润表：注入营业利润核算口径说明与防加总幻觉提示
                     if rtype in ("income", "income_statement", "lyb"):
@@ -1721,8 +1830,9 @@ class TdxClient:
                             "切勿机械使用各成本费用科目做简单代数累加。"
                         )
 
-                    # 针对资产负债表：自动核算非流动负债明细与小计的不可加总差额（底层数据源缺失新租赁准则【租赁负债】、【长期应付职工薪酬】等科目）
+                    # 针对资产负债表：自动核算明细与小计的不可加总差额
                     if rtype in ("balance", "balance_sheet", "zcfzb"):
+                        # 1. 非流动负债不可加总差额（底层数据源缺失新租赁准则【租赁负债】、【长期应付职工薪酬】等科目）
                         non_curr_total = period_dict.get("非流动负债合计")
                         if non_curr_total is not None and isinstance(non_curr_total, (int, float)):
                             known_items = [
@@ -1733,6 +1843,32 @@ class TdxClient:
                             diff = round(float(non_curr_total) - sub_sum, 2)
                             if abs(diff) > 0.01:
                                 period_dict["非流动负债不可加总差额_新租赁准则租赁负债等"] = diff
+
+                        # 2. 流动资产不可加总差额 (拆出资金/金融衍生资产/买入返售金融资产等)
+                        curr_assets_total = period_dict.get("流动资产合计")
+                        if curr_assets_total is not None and isinstance(curr_assets_total, (int, float)):
+                            known_curr_assets = [
+                                "货币资金", "交易性金融资产", "应收票据", "应收账款", "预付款项",
+                                "应收利息", "应收股利", "其他应收款合计", "存货", "合同资产",
+                                "持有待售资产", "一年内到期的非流动资产", "其他流动资产"
+                            ]
+                            sub_ca = sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_curr_assets)
+                            diff_ca = round(float(curr_assets_total) - sub_ca, 2)
+                            if abs(diff_ca) > 0.01:
+                                period_dict["流动资产不可加总差额_拆出资金及金融细项等"] = diff_ca
+
+                        # 3. 流动负债不可加总差额 (吸收存款及同业存放/卖出回购金融资产款等)
+                        curr_liab_total = period_dict.get("流动负债合计")
+                        if curr_liab_total is not None and isinstance(curr_liab_total, (int, float)):
+                            known_curr_liab = [
+                                "短期借款", "交易性金融负债", "应付票据", "应付账款", "预收款项",
+                                "合同负债", "应付职工薪酬", "应交税费", "其他应付款合计",
+                                "持有待售负债", "一年内到期的非流动负债", "其他流动负债"
+                            ]
+                            sub_cl = sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_curr_liab)
+                            diff_cl = round(float(curr_liab_total) - sub_cl, 2)
+                            if abs(diff_cl) > 0.01:
+                                period_dict["流动负债不可加总差额_吸收存款及金融细项等"] = diff_cl
 
                     if period_dict:
                         result_periods.append(period_dict)
@@ -1811,8 +1947,8 @@ class TdxClient:
 
     def screener(self, message: str, limit: int = 10, page: int = 1, filter_st: bool = True) -> dict[str, Any]:
         """通达信自然语言智能选股 (输入中文自然语言条件，如'主板 绩优 储能 连板')"""
-        # 如果开启过滤 ST，向底层多请求适量候选以补齐过滤损耗
-        fetch_size = max(1, min(limit * 2 if filter_st else limit, 50))
+        # 严格与下游请求分页参数 1:1 对齐，直接请求所指定的单页条数，避免放大 pageSize 导致跳页或数据断裂
+        fetch_size = max(1, min(limit, 100))
         req_body = [{
             "message": message.strip(),
             "rang": "AG",
@@ -1824,6 +1960,7 @@ class TdxClient:
 
         results: list[dict[str, Any]] = []
         headers: list[str] = []
+        filtered_st_count = 0
         if isinstance(raw, list) and len(raw) >= 3:
             # 通达信 wendaQuery 原生二维数组结构说明：
             # - Row 0: 查询元信息 [0, '', 31, session_id, count]
@@ -1851,6 +1988,7 @@ class TdxClient:
 
                 is_st = ("ST" in sec_name.upper()) or ("退" in sec_name)
                 if filter_st and is_st:
+                    filtered_st_count += 1
                     continue
 
                 now_price = None
@@ -1899,11 +2037,18 @@ class TdxClient:
             except (ValueError, TypeError):
                 total_hits = len(results)
 
+        total_pages = math.ceil(total_hits / limit) if limit > 0 else 1
+
         return {
             "query": message,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
             "filter_st": filter_st,
             "matched_count": total_hits,
             "returned_count": len(results),
+            "filtered_st_count": filtered_st_count,
+            "filter_st_note": "默认已过滤 ST/*ST 股；若需获取全部股票（含风险警示股）请将 filter_st 设为 False。",
             "stocks": results,
             "raw_summary": raw[0] if (isinstance(raw, list) and raw) else None,
         }
@@ -2367,6 +2512,12 @@ class FinanceGateway:
                                 col_title = LIMIT_UP_FIELDS.get(col_raw, col_raw)
                             elif category == "unlocks":
                                 col_title = UNLOCKS_FIELDS.get(col_raw, col_raw)
+                            elif category == "shareholders":
+                                col_title = SHAREHOLDERS_FIELDS.get(col_raw, col_raw)
+                            elif category == "forecast":
+                                col_title = FORECAST_FIELDS.get(col_raw, col_raw)
+                            elif category == "summary":
+                                col_title = SUMMARY_FIELDS.get(col_raw, col_raw)
                             elif category == "top_holders" and t_key == "table0":
                                 col_title = TOP_HOLDERS_TOTALS_FIELDS.get(col_raw, col_raw)
                             elif category == "top_holders" and t_key == "table1":
@@ -2374,6 +2525,15 @@ class FinanceGateway:
                             else:
                                 col_title = col_raw
                             row_dict[col_title] = val
+
+                        # 针对 margin_trading：清洗数字字符串类型漂移，统一规范为 float
+                        if category == "margin_trading":
+                            for num_k in ("融资余额_元", "融资买入额_元", "融资偿还额_元", "融券余量_股", "融券卖出量_股", "融券偿还量_股", "成交量_股", "成交金额_元", "收盘价", "总股本_万股"):
+                                if num_k in row_dict and row_dict[num_k] is not None:
+                                    try:
+                                        row_dict[num_k] = float(row_dict[num_k])
+                                    except (ValueError, TypeError):
+                                        pass
 
                         # 自动补齐 top_holders 中持股比例整列为 null 的缺陷（采用 持股数量/总流通股本 测算）
                         if category == "top_holders" and t_key == "table1":
@@ -2392,10 +2552,34 @@ class FinanceGateway:
                         "本表为通达信收录的历史重大行业题材与宏观里程碑事件库（已按发生日期倒序排列，非实时个股公告）；"
                         "如需获取上市公司最新分钟级法定披露公告与突发新闻，请调用 stock_news 工具。"
                     )
+                elif category == "top_holders":
+                    tdx_res["股本口径说明"] = (
+                        "十大流通股东表中的股本字段仅为流通股统计口径；"
+                        "上市公司真实基准总股本请以 quotes 工具返回的【总股本_万股】× 10000（或财务报表归母权益）为准。"
+                    )
+                elif category == "forecast":
+                    has_records = any(len(rows) > 0 for rows in formatted_tables.values())
+                    if not has_records:
+                        tdx_res["无记录说明"] = "该标的近期无卖方机构发布盈利预测报告或未覆盖业绩一致预期数据。"
                 elif category == "limit_up":
                     has_records = any(len(rows) > 0 for rows in formatted_tables.values())
                     if not has_records:
                         tdx_res["无记录说明"] = "该股票在近期统计周期内无涨停或异动记录（白马蓝筹股/低波动标的未触发涨停机制属于常态）。"
+                    else:
+                        t0_data = formatted_tables.get("table0", [])
+                        if t0_data and (t0_data[0].get("当日标志") == "1" or str(t0_data[0].get("currq")) == "1"):
+                            latest_row = t0_data[0]
+                            if latest_row.get("当日成交金额_万元") in (0, 0.0, "0", None):
+                                try:
+                                    q = self.tdx_client.get_quotes(clean_code)
+                                    amt = q.get("盘口核心行情", {}).get("成交额_元")
+                                    if amt and float(amt) > 0:
+                                        latest_row["当日成交金额_万元"] = round(float(amt) / 10000.0, 2)
+                                        latest_row["成交额说明"] = "盘口实时成交额补充(盘中清算前)"
+                                except Exception:
+                                    pass
+                            if latest_row.get("封板时间") == "--":
+                                latest_row["封板说明"] = "盘中超涨10%异动，未触发封死涨停板"
                 elif category == "unlocks":
                     t0_data = formatted_tables.get("table0", [])
                     if t0_data:
@@ -2405,6 +2589,16 @@ class FinanceGateway:
                             tdx_res["解禁状态说明"] = (
                                 f"该标的最近一次限售解禁已于 {latest_date_str} 实施完成，当前股票处于全流通状态或近期无待解禁日程。"
                             )
+                    try:
+                        fb_unlocks = self.fallback_client.get_f10(symbol=clean_code, category="unlocks")
+                        if fb_unlocks and isinstance(fb_unlocks, list) and len(fb_unlocks) > 1:
+                            tdx_res["多阶段解禁明细"] = fb_unlocks
+                    except Exception:
+                        pass
+                elif category == "summary":
+                    t5_rows = formatted_tables.get("table5", [])
+                    if not t5_rows:
+                        tdx_res["质押状态说明"] = "该公司当前无股东股权质押记录（质押股份比例为0%，股权质押风险低）。"
 
                 # 增强 F10 摘要表：汉化关键财务与估值指标、依据“利润变动方向”精确校准亏损标的同比含义、注入隔日风格标签与破净动态复核指引
                 if category == "summary" or ("table3" in formatted_tables and "table4" in formatted_tables):
@@ -2457,6 +2651,8 @@ class FinanceGateway:
         }
         if category == "limit_up":
             fallback_res["无记录说明"] = "该股票在近期统计周期内无涨停或异动记录（白马蓝筹股/低波动标的未触发涨停机制属于常态）。"
+        elif category == "forecast":
+            fallback_res["无记录说明"] = "该标的近期无卖方机构发布盈利预测报告或未覆盖业绩一致预期数据。"
         return fallback_res
 
     # =========================================================================
@@ -2706,7 +2902,7 @@ STOCK_SCREENER_SCHEMA = {
         "type": "object",
         "properties": {
             "message": {"type": "string", "description": "自然语言选股条件，如'主板 绩优 储能'、'低市盈率 连板'"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "最多返回标的数量（1-50）"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10, "description": "最多返回标的数量（1-100）"},
             "page": {"type": "integer", "minimum": 1, "maximum": 20, "default": 1, "description": "分页页码"},
             "filter_st": {"type": "boolean", "default": True, "description": "是否自动过滤 ST/*ST 风险警示股票，默认为 true"}
         },
