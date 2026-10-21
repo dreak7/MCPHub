@@ -602,8 +602,163 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertIn("腾讯控股有限公司", str(res["data"]))
 
 
+    def test_quote_total_shares_and_loss_eps(self) -> None:
+        """测试盘口中禁用 Yield 假股本、基于万股计算总股本_股，以及亏损标的负市盈率安全计算 EPS 且无 None 泄漏"""
+        fin_gw = FinanceGateway()
+        mock_raw = {
+            "HQInfo": {"Now": 3.12, "Close": 3.10, "Yield": 17.02},
+            "ExtInfo": {"SYL": -84.25, "ZGB": 165765.375, "LTGB": 165765.375, "MGSY": -0.02, "MGJZC": 1.715},
+            "ProInfo": {"PETTM": -20.67},
+            "BspInfo": [],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_raw):
+            res = fin_gw.stock_quotes({"symbol": "600217"})
+            hq = res["盘口核心行情"]
+            ext = res["估值与基本盘面"]
+            # 1. 核心行情中彻底移除以 Yield 映射的假股本
+            self.assertNotIn("总股本_股", hq)
+            # 2. 估值盘面由 万股*10000 安全导出真实股本
+            self.assertEqual(ext["总股本_股"], 1657653750)
+            self.assertEqual(ext["流通股本_股"], 1657653750)
+            # 3. 亏损标的负PE安全计算出负数年化EPS，且口径说明无 None 泄漏
+            self.assertEqual(ext["动态市盈率_PE"], -84.25)
+            self.assertEqual(ext["年化每股收益_EPS"], -0.037)
+            self.assertNotIn("None", ext["估值口径说明"])
+            self.assertIn("-0.037", ext["估值口径说明"])
+
+    def test_kline_adjust_and_minute_time(self) -> None:
+        """测试 K 线复权参数 TQFlag 映射 (qfq=1, hfq=2, none=0) 及分钟线时分格式化"""
+        fin_gw = FinanceGateway()
+        captured_body = {}
+
+        def mock_post(url, req_body):
+            captured_body.update(req_body)
+            return {
+                "ListItem": [
+                    {"Item": ["20261021", "53400", "25.12", "25.15", "25.08", "25.10", "1000", "1000", "400"]},
+                    {"Item": ["20261021", "53700", "25.12", "25.23", "25.10", "25.20", "2000", "2000", "800"]},
+                ],
+                "AttachInfo": {"Name": "博实股份"},
+            }
+
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", side_effect=mock_post):
+            # 1. 测试前复权 TQFlag 应为 1
+            res_qfq = fin_gw.stock_kline({"symbol": "002223", "period": "5m", "adjust": "qfq"})
+            self.assertEqual(captured_body["TQFlag"], 1)
+            # 2. 测试后复权 TQFlag 应为 2
+            fin_gw.stock_kline({"symbol": "002223", "period": "5m", "adjust": "hfq"})
+            self.assertEqual(captured_body["TQFlag"], 2)
+            # 3. 测试不复权 TQFlag 应为 0
+            fin_gw.stock_kline({"symbol": "002223", "period": "5m", "adjust": "none"})
+            self.assertEqual(captured_body["TQFlag"], 0)
+            # 4. 验证 5m 分钟线包含具体时分
+            self.assertEqual(res_qfq["klines"][0]["time"], "2026-10-21 14:50")
+            self.assertEqual(res_qfq["klines"][1]["time"], "2026-10-21 14:55")
+
+    def test_screener_matched_count_and_f10_enhancements(self) -> None:
+        """测试智能选股全量命中数提取、F10 无关表净化、十大流通股东比例补齐及限售解禁表头汉化"""
+        fin_gw = FinanceGateway()
+        # 1. 测试选股 matched_count 来自 raw[0][2]
+        mock_screener_raw = [
+            [0, "", 31, "session_id", 1],
+            ["POS", "market", "sec_code", "sec_name", "now_price", "chg"],
+            ["", "", "", "", "", ""],
+            [1, "0", "002223", "博实股份", "25.15", "-1.5"],
+        ]
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_screener_raw):
+            s_res = fin_gw.stock_screener({"message": "储能", "limit": 1})
+            self.assertEqual(s_res["matched_count"], 31)
+            self.assertEqual(s_res["returned_count"], 1)
+
+        # 2. 测试 F10 过滤无关复权因子表并补齐十大股东持股比例
+        mock_f10_raw = {
+            "ErrorCode": 0,
+            "ResultSets": [
+                {
+                    "ResultSetKey": "table0",
+                    "ColName": ["rq", "T004", "T013", "T016", "T019"],
+                    "Content": [["2026-09-16", 100000000, None, None, 100000000]],
+                },
+                {
+                    "ResultSetKey": "table1",
+                    "ColName": ["rq", "gd", "cgs", "pos"],
+                    "Content": [["2026-09-16", "华泰医疗ETF", 1939000, None]],
+                },
+                {
+                    "ResultSetKey": "table2",
+                    "ColName": ["EndDate", "AdjustingFactor", "AdjustingConst"],
+                    "Content": [["20260901", 8.23, 46.7]],
+                },
+            ],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_f10_raw):
+            f_res = fin_gw.stock_f10({"symbol": "002223", "category": "top_holders"})
+            tables = f_res["formatted_tables"]
+            self.assertIn("table0", tables)
+            self.assertIn("table1", tables)
+            # 无关复权因子 table2 已被彻底剔除
+            self.assertNotIn("table2", tables)
+            # table1 中为 null 的 pos 自动计算为 1.939%
+            self.assertEqual(tables["table1"][0]["持股比例_pct"], 1.939)
+            self.assertEqual(tables["table1"][0]["股东名称"], "华泰医疗ETF")
+
+    def test_financial_statements_discipline_and_no_raw_n_codes(self) -> None:
+        """测试利润表完全消除原始 N 码泄露、过滤 N027 净利润双计，以及注入加总纪律说明"""
+        fin_gw = FinanceGateway()
+        mock_income_raw = {
+            "ResultSets": [
+                {"ColName": ["isjr"], "Content": [[0]]},
+                {
+                    "ColName": ["N001", "N002", "N003", "N019", "N024", "N027", "N035", "Tdate"],
+                    "Content": [["2026中报", "92278072083.21", "90703260964.48", "61411291686.27", "46033330566.78", "46033330566.78", "44464207646.01", "2026-06-30"]],
+                },
+            ]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_income_raw):
+            res = fin_gw.stock_financials({"symbol": "600519", "report_type": "income", "limit_periods": 1})
+            p_row = res["statements"][0]
+            # 验证无任何原始 N 编码泄露
+            self.assertEqual([k for k in p_row.keys() if k.startswith("N0")], [])
+            # 验证 N027 已被过滤，防止与 N024 净利润双计
+            self.assertIn("净利润", p_row)
+            self.assertNotIn("重复核对_净利润", p_row)
+            # 验证利润表与加总说明存在
+            self.assertIn("利润表加总纪律说明", p_row)
+
+    def test_invalid_symbol_explicit_rejection_all_tools(self) -> None:
+        """测试对不存在或非上市标的代码在 quotes/kline/financials/f10/news 五大工具中均显式报错，杜绝伪装空壳与无关新闻"""
+        fin_gw = FinanceGateway()
+        bad_code = "123456"
+
+        # 1. 验证 stock_quotes 显式报错（不再返回 ErrorCode:0 与静默空核心盘口）
+        with self.assertRaises(ValueError) as cm_q:
+            fin_gw.stock_quotes({"symbol": bad_code})
+        self.assertIn("未查询到证券代码 '123456' 的有效盘口行情", str(cm_q.exception))
+
+        # 2. 验证 stock_kline 显式报错（不再返回 total_bars: 0 与静默空）
+        with self.assertRaises(ValueError) as cm_k:
+            fin_gw.stock_kline({"symbol": bad_code})
+        self.assertIn("未查询到证券代码 '123456' 的历史 K 线数据", str(cm_k.exception))
+
+        # 3. 验证 stock_financials 显式报错（不再返回 period_count: 0 与空表壳）
+        with self.assertRaises(ValueError) as cm_f:
+            fin_gw.stock_financials({"symbol": bad_code})
+        self.assertIn("未查询到证券代码 '123456' 的财务报表数据", str(cm_f.exception))
+
+        # 4. 验证 stock_f10 显式报错（不再返回 ErrorCode: 0 假成功空表）
+        with self.assertRaises(ValueError) as cm_f10:
+            fin_gw.stock_f10({"symbol": bad_code})
+        self.assertIn("未查询到证券代码 '123456' 的 F10 基本面资料", str(cm_f10.exception))
+
+        # 5. 验证 stock_news 拦截模糊搜索（不再返回巴菲特减持比亚迪等无关他股新闻）
+        with self.assertRaises(ValueError) as cm_n:
+            fin_gw.stock_news({"symbol": bad_code})
+        self.assertIn("已拦截泛化模糊检索以避免返回无关误导资讯", str(cm_n.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

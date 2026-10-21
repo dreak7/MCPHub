@@ -53,7 +53,7 @@ HQ_FIELD_MAP: dict[str, str] = {
     "Inside": "内盘_手",
     "Outside": "外盘_手",
     "InOutFlag": "内外盘强弱标志",
-    "Yield": "总股本_股",
+    "Yield": "收益率_Yield",
     "CJBS": "成交笔数",
     "LB": "量比",
     "HSL": "换手率_pct",
@@ -125,10 +125,14 @@ INCOME_FIELDS_NON_FINANCE: dict[str, str] = {
     "N008": "管理费用",
     "N009": "研发费用",
     "N010": "财务费用",
+    "N011": "其中_利息费用",
     "N012": "资产减值损失",
     "N013": "信用减值损失",
     "N014": "公允价值变动净收益",
     "N015": "投资收益",
+    "N016": "资产处置收益",
+    "N017": "汇兑收益",
+    "N018": "其他收益",
     "N019": "营业利润",
     "N020": "营业外收入",
     "N021": "营业外支出",
@@ -137,9 +141,17 @@ INCOME_FIELDS_NON_FINANCE: dict[str, str] = {
     "N024": "净利润",
     "N025": "归母净利润",
     "N026": "少数股东损益",
+    "N027": "重复核对_净利润",
+    "N028": "持续经营净利润",
     "N029": "基本每股收益_EPS",
     "N030": "稀释每股收益",
+    "N031": "其他综合收益税后净额",
+    "N032": "综合收益总额",
+    "N033": "归属于母公司所有者的综合收益总额",
+    "N034": "归属于少数股东的综合收益总额",
     "N035": "扣非净利润",
+    "N036": "扣除非经常性损益调整项",
+    "N037": "归属于母公司股东的其他综合收益",
     "Tdate": "报告期日期",
 }
 
@@ -304,7 +316,7 @@ MARGIN_TRADING_FIELDS: dict[str, str] = {
     "T006": "融券余量_股",
     "T007": "融券卖出量_股",
     "T008": "融券偿还量_股",
-    "bt009": "成交量_手",
+    "bt009": "成交量_股",
     "bt010": "成交金额_元",
     "ClosePrice": "收盘价",
 }
@@ -334,14 +346,54 @@ EVENTS_FIELDS: dict[str, str] = {
 
 # 涨停分析与异动复盘 (limit_up) 表头汉化映射表
 LIMIT_UP_FIELDS: dict[str, str] = {
-    "currq": "记录序号",
+    "currq": "当日标志",
     "lx": "异动类型",
     "sT002": "涨停日期",
     "T011": "封板时间",
     "fdje": "封单金额_万元",
-    "zt": "涨停板块与状态",
+    "zt": "涨停所属板块",
     "yy": "涨停原因与催化说明",
-    "N005": "连板与交易统计",
+    "N005": "当日成交金额_万元",
+}
+
+# 限售解禁日程表 (unlocks) 表头汉化映射表
+UNLOCKS_FIELDS: dict[str, str] = {
+    "T003": "解禁日期",
+    "T014": "占总股本比例_pct",
+    "T013": "限售起始日",
+    "T011": "公告日期",
+    "T012": "解禁进度",
+    "cur": "基准日期",
+    "T006": "限售股类型",
+    "T004": "解禁股数_万股",
+    "T010": "解禁后流通总股本_万股",
+    "price": "参考股价_元",
+}
+
+# 十大流通股东股本总额表 (top_holders.table0)
+TOP_HOLDERS_TOTALS_FIELDS: dict[str, str] = {
+    "rq": "变动日期",
+    "T004": "流通A股合计_股",
+    "T013": "限售流通股合计_股",
+    "T016": "变动原因",
+    "T019": "总股本_股",
+}
+
+# 十大流通股东持表明细表 (top_holders.table1)
+TOP_HOLDERS_FIELDS: dict[str, str] = {
+    "rq": "报告期",
+    "gd": "股东名称",
+    "isbgq": "是否定期报告",
+    "gdid": "股东代码",
+    "cgs": "持股数量_股",
+    "lb": "股东类型",
+    "pos": "持股比例_pct",
+    "xz": "股份性质",
+    "T009": "机构分类代码",
+    "tdxid": "通达信ID",
+    "zrr": "自然人标志",
+    "gfxz": "股份性质明细",
+    "sid": "序号",
 }
 
 
@@ -549,6 +601,7 @@ class TdxClient:
         self.rag_endpoint = rag_endpoint
         self.timeout = timeout
         self.logger = logger or logging.getLogger("mcp_gateway.finance")
+        self._entity_cache: dict[str, dict[str, Any] | None] = {}
 
     def _post(self, url: str, body: dict[str, Any] | list[Any]) -> Any:
         headers = {
@@ -591,6 +644,13 @@ class TdxClient:
     # =========================================================================
     def _resolve_exact_security_entity(self, clean_code: str) -> dict[str, Any] | None:
         clean_code = clean_code.strip()
+        if clean_code in self._entity_cache:
+            return self._entity_cache[clean_code]
+        res = self._do_resolve_exact_security_entity(clean_code)
+        self._entity_cache[clean_code] = res
+        return res
+
+    def _do_resolve_exact_security_entity(self, clean_code: str) -> dict[str, Any] | None:
         if clean_code.isdigit() and len(clean_code) == 6:
             # A 股 6 位数字代码
             if clean_code.startswith(("60", "68", "90")):
@@ -652,18 +712,23 @@ class TdxClient:
             # 第三轨：通达信官方专线 F10 摘要表 table8.name 权威兜底
             try:
                 f10_res = self.get_f10(symbol=clean_code, category="summary")
-                tables = f10_res.get("formatted_tables", {})
-                if "table8" in tables and tables["table8"]:
-                    t8_name = tables["table8"][0].get("name")
-                    if t8_name and str(t8_name).strip():
-                        name = str(t8_name).strip()
-                        return {
-                            "entity_code": clean_code,
-                            "entity_name": name,
-                            "entity_type": "A股代码",
-                            "entity_setcode": setcode,
-                            "aliases": [name],
-                        }
+                raw_data = f10_res.get("data", {})
+                for rs in raw_data.get("ResultSets", []):
+                    if rs.get("ResultSetKey") == "table8":
+                        cols = rs.get("ColName", [])
+                        contents = rs.get("Content", [])
+                        if "name" in cols and contents:
+                            name_idx = cols.index("name")
+                            t8_name = contents[0][name_idx]
+                            if t8_name and str(t8_name).strip():
+                                name = str(t8_name).strip()
+                                return {
+                                    "entity_code": clean_code,
+                                    "entity_name": name,
+                                    "entity_type": "A股代码",
+                                    "entity_setcode": setcode,
+                                    "aliases": [name],
+                                }
             except Exception:
                 pass
 
@@ -855,17 +920,66 @@ class TdxClient:
         with_indicators: bool = True,
     ) -> dict[str, Any]:
         norm_code = clean_code.zfill(5)
+        limit_cnt = max(1, min(int(count), 300))
+        klt_map = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "day": 101, "week": 102, "month": 103}
+        fqt_map = {"none": 0, "qfq": 1, "hfq": 2}
+        klt = klt_map.get(period.lower(), 101)
+        fqt = fqt_map.get(adjust.lower(), 1)
+
+        # 1. 优先使用东方财富高可用行情专线（原生支持 1m/5m/15m/30m/60m/日/周/月 与 前/后/不复权）
+        try:
+            em_url = (
+                f"http://push2his.eastmoney.com/api/qt/stock/kline/get?"
+                f"secid=116.{norm_code}&fields1=f1,f2,f3,f4,f5,f6&"
+                f"fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&"
+                f"klt={klt}&fqt={fqt}&end=20500101&lmt={limit_cnt}"
+            )
+            req = Request(em_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                raw_klines = data.get("data", {}).get("klines", [])
+                stock_name = data.get("data", {}).get("name", f"港股_{norm_code}")
+                if raw_klines and isinstance(raw_klines, list):
+                    parsed_bars: list[dict[str, Any]] = []
+                    for line_str in raw_klines[-limit_cnt:]:
+                        parts = line_str.split(",")
+                        if len(parts) < 7:
+                            continue
+                        parsed_bars.append({
+                            "time": parts[0],
+                            "open": round(float(parts[1]), 3),
+                            "close": round(float(parts[2]), 3),
+                            "high": round(float(parts[3]), 3),
+                            "low": round(float(parts[4]), 3),
+                            "volume": round(float(parts[5]), 2),
+                            "amount": round(float(parts[6]), 2),
+                        })
+                    if with_indicators and parsed_bars:
+                        parsed_bars = calculate_indicators(parsed_bars)
+                    return {
+                        "symbol": norm_code,
+                        "name": stock_name,
+                        "setcode": "31",
+                        "period": period,
+                        "adjust": adjust,
+                        "total_bars": len(parsed_bars),
+                        "klines": parsed_bars,
+                    }
+        except Exception:
+            pass
+
+        # 2. 备用通道：腾讯财经开放 K 线专线
         period_map = {
             "day": "day",
             "week": "week",
             "month": "month",
+            "1m": "m1",
             "5m": "m5",
             "15m": "m15",
             "30m": "m30",
             "60m": "m60",
         }
         p_str = period_map.get(period.lower(), "day")
-        limit_cnt = max(1, min(int(count), 300))
         if adjust.lower() in ("qfq", "hfq"):
             adj_param = adjust.lower()
             url = f"https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get?_var=kline_{p_str}{adj_param}&param=hk{norm_code},{p_str},,,{limit_cnt},{adj_param}"
@@ -878,7 +992,7 @@ class TdxClient:
                 raw_bytes = resp.read()
                 raw_text = raw_bytes.decode("utf-8", errors="replace")
         except Exception as exc:
-            raise RuntimeError(f"腾讯免费港股历史K线接口请求失败: {exc}") from exc
+            raise RuntimeError(f"港股历史K线接口请求失败: {exc}") from exc
 
         if "=" not in raw_text:
             return {
@@ -905,7 +1019,7 @@ class TdxClient:
             name = f"港股_{norm_code}"
             raw_klines = []
 
-        parsed_bars: list[dict[str, Any]] = []
+        parsed_bars = []
         for k in raw_klines:
             if not isinstance(k, list) or len(k) < 6:
                 continue
@@ -929,6 +1043,14 @@ class TdxClient:
 
         if with_indicators and parsed_bars:
             parsed_bars = calculate_indicators(parsed_bars)
+
+        if not parsed_bars:
+            entity = self._resolve_exact_security_entity(clean_code)
+            if entity is None:
+                raise ValueError(
+                    f"未查询到港股代码 '{clean_code}' 的历史 K 线走势数据（代码不存在或非上市标的）。"
+                    "建议先调用 stock_lookup 工具核对标准代码。"
+                )
 
         return {
             "symbol": norm_code,
@@ -1063,7 +1185,7 @@ class TdxClient:
             self.logger.warning(f"请求东方财富港股财报备份接口失败 ({clean_code}): {exc}")
             return []
 
-        data = js.get("result", {}).get("data", [])
+        data = (js.get("result") or {}).get("data", []) if isinstance(js, dict) else []
         if not isinstance(data, list) or not data:
             return []
 
@@ -1116,6 +1238,14 @@ class TdxClient:
                 statements = self._get_eastmoney_hk_financials(clean_code, report_type=report_type, limit_periods=limit_periods)
             except Exception:
                 statements = []
+
+        if not statements:
+            entity = self._resolve_exact_security_entity(clean_code)
+            if entity is None:
+                raise ValueError(
+                    f"未查询到港股代码 '{clean_code}' 的财务报表数据（代码不存在或非有效港股上市标的）。"
+                    "建议先调用 stock_lookup 工具核对标准代码。"
+                )
 
         type_names = {
             "income": "综合损益表 (利润表)",
@@ -1200,6 +1330,14 @@ class TdxClient:
         # 备份：调用东方财富主要财务指标作为 F10 备份
         source = "eastmoney_hk_f10 (东方财富港股F10备份专线)"
         em_data = self._get_eastmoney_hk_financials(clean_code, report_type="summary", limit_periods=1)
+        if not em_data:
+            entity = self._resolve_exact_security_entity(clean_code)
+            if entity is None:
+                raise ValueError(
+                    f"未查询到港股代码 '{clean_code}' 的 F10 基本面资料（代码不存在或非上市标的）。"
+                    "建议先调用 stock_lookup 工具核对标准代码。"
+                )
+
         return {
             "symbol": clean_code,
             "market": "香港交易所 (HKEX)",
@@ -1252,11 +1390,23 @@ class TdxClient:
 
         # 1. 核心行情字段中文化映射
         hq_raw = raw.get("HQInfo", {})
+        ext_raw = raw.get("ExtInfo", {})
+        now_p = float(hq_raw.get("Now", 0.0) or 0.0) if isinstance(hq_raw, dict) else 0.0
+        close_p = float(hq_raw.get("Close", 0.0) or 0.0) if isinstance(hq_raw, dict) else 0.0
+        zgb_wan = float(ext_raw.get("ZGB", 0.0) or 0.0) if isinstance(ext_raw, dict) else 0.0
+
+        # 防空壳/无效标的拦截：若通达信返回空盘口或现价/昨收/股本均无效，进行正主实体核验
+        if not hq_raw or (now_p <= 0 and close_p <= 0 and zgb_wan <= 0):
+            entity = self._resolve_exact_security_entity(clean_code)
+            if entity is None:
+                raise ValueError(
+                    f"未查询到证券代码 '{symbol}' 的有效盘口行情（代码不存在或非有效 A 股/港股标的）。"
+                    "若不确定代码，请先调用 stock_lookup 工具查询标准证券名称与代码。"
+                )
+
         if isinstance(hq_raw, dict):
             mapped_hq = {HQ_FIELD_MAP.get(k, k): v for k, v in hq_raw.items()}
             # 自动计算涨跌幅与日内真实振幅（遵循交易所标准公式：(最高-最低)/昨收*100，彻底避免通达信Yield字段污染）
-            now_p = float(hq_raw.get("Now", 0.0) or 0.0)
-            close_p = float(hq_raw.get("Close", 0.0) or 0.0)
             high_p = float(hq_raw.get("MaxP", 0.0) or 0.0)
             low_p = float(hq_raw.get("MinP", 0.0) or 0.0)
             if close_p > 0 and now_p > 0:
@@ -1278,9 +1428,15 @@ class TdxClient:
             mgjzc = float(ext_raw.get("MGJZC", 0.0) or 0.0)
             syl = float(ext_raw.get("SYL", 0.0) or 0.0)
             mgsy = float(ext_raw.get("MGSY", 0.0) or 0.0)
+            zgb_wan = float(ext_raw.get("ZGB", 0.0) or 0.0)
+            ltgb_wan = float(ext_raw.get("LTGB", 0.0) or 0.0)
+            if zgb_wan > 0:
+                mapped_ext["总股本_股"] = int(round(zgb_wan * 10000))
+            if ltgb_wan > 0:
+                mapped_ext["流通股本_股"] = int(round(ltgb_wan * 10000))
             if mgjzc > 0 and now_p > 0:
                 mapped_ext["市净率_PB"] = round(now_p / mgjzc, 2)
-            if syl > 0 and now_p > 0:
+            if syl != 0 and now_p > 0:
                 mapped_ext["动态市盈率_PE"] = round(syl, 2)
                 annualized_eps = round(now_p / syl, 3)
                 mapped_ext["年化每股收益_EPS"] = annualized_eps
@@ -1300,9 +1456,11 @@ class TdxClient:
                     except (ValueError, TypeError):
                         pass
 
+            ann_eps_val = mapped_ext.get("年化每股收益_EPS")
+            ann_eps_str = f"年化每股收益≈{ann_eps_val}元，现价/年化EPS=动态市盈率" if ann_eps_val is not None else "当前亏损或暂无年化每股收益"
             ttm_note = f"滚动市盈率_PETTM为 {mapped_ext.get('滚动市盈率_PETTM')} 倍(按过去4季度滚动净利润测算的真实TTM口径)；" if "滚动市盈率_PETTM" in mapped_ext else ""
             mapped_ext["估值口径说明"] = (
-                f"{ttm_note}动态市盈率_PE({mapped_ext.get('动态市盈率_PE')}倍)采用最新报告期年化折算口径(年化每股收益≈{mapped_ext.get('年化每股收益_EPS')}元，现价/年化EPS=动态市盈率)；"
+                f"{ttm_note}动态市盈率_PE({mapped_ext.get('动态市盈率_PE')}倍)采用最新报告期年化折算口径({ann_eps_str})；"
                 f"报告期每股收益_EPS({mgsy}元)为非年化单期累计值，两者口径不同，禁止直接互乘推导价格或市值。"
             )
             result["估值与基本盘面"] = mapped_ext
@@ -1389,9 +1547,9 @@ class TdxClient:
         period_map = {"5m": 0, "15m": 1, "30m": 2, "60m": 3, "day": 4, "week": 5, "month": 6, "1m": 7}
         p_val = period_map.get(period.lower(), 4)
 
-        # 复权映射: qfq->11, hfq->12, none->0
-        adjust_map = {"qfq": 11, "hfq": 12, "none": 0}
-        tq_val = adjust_map.get(adjust.lower(), 11)
+        # 复权映射: qfq->1, hfq->2, none->0 (通达信官方 PBFXT 底层协议规范)
+        adjust_map = {"none": 0, "qfq": 1, "hfq": 2}
+        tq_val = adjust_map.get(adjust.lower(), 1)
 
         req_body = {
             "Head": {"Target": 0, "CharSet": "UTF8"},
@@ -1421,8 +1579,18 @@ class TdxClient:
             raw_row = item.get("Item") if isinstance(item, dict) else item
             if not isinstance(raw_row, list) or len(raw_row) < 6:
                 continue
-            # 通达信 ListItem Item 结构: [日期, 时间, 今开, 最高, 最低, 收盘, 成交额, 成交额, 成交量...]
-            dt_str = str(raw_row[0])
+            # 通达信 ListItem Item 结构: [日期, 时间(自午夜秒数), 今开, 最高, 最低, 收盘, 成交额, 成交额, 成交量...]
+            raw_date = str(raw_row[0])
+            if period.lower() in ("1m", "5m", "15m", "30m", "60m") and len(raw_row) > 1 and str(raw_row[1]).replace(".", "").isdigit():
+                sec = int(float(raw_row[1]))
+                hh = sec // 3600
+                mm = (sec % 3600) // 60
+                dt_str = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]} {hh:02d}:{mm:02d}"
+            elif len(raw_date) == 8 and raw_date.isdigit():
+                dt_str = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+            else:
+                dt_str = raw_date
+
             # 价格规范化归一（股票取 2 位小数，基金/债券/可转债取 3 位），消除底层 float32 导致的单精度浮点漂移 (如 1309.689941 -> 1309.69)
             price_dec = 3 if clean_code.startswith(("51", "15", "16", "58", "11", "12")) else 2
             open_p = round(float(raw_row[2]), price_dec)
@@ -1445,6 +1613,14 @@ class TdxClient:
         # 按时间正序排列后计算技术指标
         if with_indicators and parsed_bars:
             parsed_bars = calculate_indicators(parsed_bars)
+
+        if not parsed_bars:
+            entity = self._resolve_exact_security_entity(clean_code)
+            if entity is None:
+                raise ValueError(
+                    f"未查询到证券代码 '{symbol}' 的历史 K 线数据（代码不存在或非有效 A 股/港股标的）。"
+                    "建议先调用 stock_lookup 工具核对标准证券名称与代码。"
+                )
 
         return {
             "symbol": clean_code,
@@ -1521,12 +1697,29 @@ class TdxClient:
                         # 现金流量表：将间接法与现金净变动的补充资料与主表直接法科目做物理隔离，彻底杜绝下游遍历加总时双计
                         if rtype in ("cashflow", "cashflow_statement", "xjllb") and clean_col_name.startswith("补充资料_"):
                             supp_dict[clean_col_name] = parsed_val
+                        elif rtype in ("income", "income_statement", "lyb") and clean_col_name == "重复核对_净利润":
+                            # 过滤底层重复核对字段 N027，防止下游将其作为独立科目加总造成双计
+                            continue
                         else:
                             period_dict[clean_col_name] = parsed_val
 
                     # 针对现金流量表：将补充资料独立收纳于二级字典，主表仅保留三大活动直接法科目与期初期末现金净增加额
                     if supp_dict:
                         period_dict["补充资料_间接法"] = supp_dict
+                    if rtype in ("cashflow", "cashflow_statement", "xjllb"):
+                        period_dict["现金流量表加总纪律说明"] = (
+                            "因上游数据模板中缺失'收到的税费返还'等流入细分项，流入/流出细项之和与小计可能存在不可闭合差额。"
+                            "量化与财报分析时禁止引用流入/流出小计，必须且只能引用三大活动净额（经营净额、投资净额、筹资净额）"
+                            "与期末现金余额。"
+                        )
+
+                    # 针对利润表：注入营业利润核算口径说明与防加总幻觉提示
+                    if rtype in ("income", "income_statement", "lyb"):
+                        period_dict["利润表加总纪律说明"] = (
+                            "通达信38列利润表模板中部分细分项目（如公允价值变动、资产/信用减值损失、其他收益）"
+                            "可能随公司行业不同合并填报。分析与建模时请以官方披露的'营业利润'、'利润总额'和'净利润'为准，"
+                            "切勿机械使用各成本费用科目做简单代数累加。"
+                        )
 
                     # 针对资产负债表：自动核算非流动负债明细与小计的不可加总差额（底层数据源缺失新租赁准则【租赁负债】、【长期应付职工薪酬】等科目）
                     if rtype in ("balance", "balance_sheet", "zcfzb"):
@@ -1544,6 +1737,14 @@ class TdxClient:
                     if period_dict:
                         result_periods.append(period_dict)
                 break
+
+        if not result_periods:
+            entity = self._resolve_exact_security_entity(clean_code)
+            if entity is None:
+                raise ValueError(
+                    f"未查询到证券代码 '{symbol}' 的财务报表数据（代码不存在或非有效 A 股/港股标的，无财报披露信息）。"
+                    "建议先调用 stock_lookup 工具核对标准证券名称与代码。"
+                )
 
         return {
             "symbol": clean_code,
@@ -1690,10 +1891,19 @@ class TdxClient:
                 if len(results) >= limit:
                     break
 
+        # 从 Row 0 元信息 [0, '', 命中总数, session_id, count] 中精确提取全量命中总数（非单页返回数）
+        total_hits = len(results)
+        if isinstance(raw, list) and raw and isinstance(raw[0], list) and len(raw[0]) > 2:
+            try:
+                total_hits = int(raw[0][2])
+            except (ValueError, TypeError):
+                total_hits = len(results)
+
         return {
             "query": message,
             "filter_st": filter_st,
-            "matched_count": len(results),
+            "matched_count": total_hits,
+            "returned_count": len(results),
             "stocks": results,
             "raw_summary": raw[0] if (isinstance(raw, list) and raw) else None,
         }
@@ -1716,14 +1926,15 @@ class PublicFallbackClient:
     # - 功能：新浪财经为主力通道（低频控、原生标准JSON、高可用），东方财富为备用通道
     # - 输出：list[dict[str, Any]]: 结构化新闻列表（标题、时间、媒体、链接、正文摘要）
     # =========================================================================
-    def get_news(self, symbol: str, limit: int = 5) -> list[dict[str, Any]]:
+    def get_news(self, symbol: str, limit: int = 5, entity_name: str | None = None) -> list[dict[str, Any]]:
         raw_query = symbol.strip()
         clean_code = re.sub(r"[^\d]", "", raw_query)
         req_limit = max(1, min(limit, 10))
 
-        # 智能确定检索词与港股标的名称解析（防 5 位数字代码直接检索命中双色球彩票噪声）
-        search_term = clean_code if clean_code else raw_query
-        if infer_market_setcode(raw_query) == "31" or (len(clean_code) == 5 and not raw_query.startswith(("60", "68"))):
+        # 智能确定检索词与标的名称组合（确保精准命中正主个股，杜绝泛化模糊数字匹配噪声）
+        if entity_name:
+            search_term = f"{entity_name} {clean_code}" if clean_code else entity_name
+        elif infer_market_setcode(raw_query) == "31" or (len(clean_code) == 5 and not raw_query.startswith(("60", "68"))):
             norm_code = clean_code.zfill(5)
             try:
                 hk_req = Request(f"http://qt.gtimg.cn/q=r_hk{norm_code}", headers={"User-Agent": "Mozilla/5.0"})
@@ -1731,14 +1942,31 @@ class PublicFallbackClient:
                     hk_raw = hk_resp.read().decode("gbk", errors="replace")
                     hk_parts = hk_raw.split("~")
                     if len(hk_parts) > 1 and hk_parts[1].strip():
-                        search_term = f"{hk_parts[1].strip()} {norm_code}"
+                        entity_name = hk_parts[1].strip()
+                        search_term = f"{entity_name} {norm_code}"
+                    else:
+                        search_term = f"港股 {norm_code}"
             except Exception:
                 search_term = f"港股 {norm_code}"
+        else:
+            search_term = clean_code if clean_code else raw_query
 
         lottery_noise = (
             "双色球", "大乐透", "福彩", "体彩", "开奖号码", "杀号", "预测奖号",
             "排列三", "排列四", "排列五", "七星彩", "六合彩", "中奖", "彩票", "幸运飞艇",
         )
+
+        def _is_relevant(title_text: str, content_text: str) -> bool:
+            comb = (title_text + " " + content_text).lower()
+            if clean_code and clean_code in comb:
+                return True
+            if entity_name:
+                core_name = re.sub(r"(股份|科技|集团|控股|发展|实业)$", "", entity_name).strip()
+                if (core_name and core_name.lower() in comb) or (entity_name.lower() in comb):
+                    return True
+            if not clean_code and not entity_name:
+                return True
+            return False
 
         # 1. 主力通道：新浪财经新闻搜索接口（风控宽松、响应极速、原生标准 JSON）
         try:
@@ -1763,6 +1991,8 @@ class PublicFallbackClient:
                         if any(k in title for k in lottery_noise):
                             continue
                         snippet = re.sub(r"<[^>]+>", "", item.get("intro", "")).strip()
+                        if not _is_relevant(title, snippet):
+                            continue
                         media_name = item.get("media", "").strip() or "新浪财经"
                         news_list.append({
                             "title": title,
@@ -1808,6 +2038,8 @@ class PublicFallbackClient:
                         if any(k in title for k in lottery_noise):
                             continue
                         snippet = re.sub(r"<[^>]+>", "", item.get("content", "")).strip()
+                        if not _is_relevant(title, snippet):
+                            continue
                         media_name = item.get("mediaName", "").strip() or "东方财富"
                         news_list.append({
                             "title": title,
@@ -2092,10 +2324,34 @@ class FinanceGateway:
                 tdx_res["source"] = "tdx_official_vip (通达信官方授权专线)"
                 # 将 ResultSets 中的各表结构化转换为行对象字典列表，便于大模型与前端直观阅读
                 formatted_tables = {}
+                holder_total_shares = 0.0
+                if category == "top_holders":
+                    for table in raw_data.get("ResultSets", []):
+                        if table.get("ResultSetKey") == "table0":
+                            t0_rows = table.get("Content", [])
+                            t0_cols = table.get("ColName", [])
+                            if t0_rows and "T004" in t0_cols:
+                                t0_idx = t0_cols.index("T004")
+                                try:
+                                    holder_total_shares = float(t0_rows[0][t0_idx] or 0.0)
+                                except (ValueError, TypeError):
+                                    pass
+                            break
+
                 for idx, table in enumerate(raw_data.get("ResultSets", [])):
                     t_key = table.get("ResultSetKey", f"table{idx}")
                     cols = table.get("ColName", [])
                     rows = table.get("Content", [])
+
+                    # 严格过滤与业务无关的三类底层系统表（复权因子表 AdjustingFactor/RatioFactor 与纯历史收盘价表）
+                    col_str = " ".join(cols)
+                    if "AdjustingFactor" in col_str or "RatioFactor" in col_str or cols == ["TradingDay", "ClosePrice"]:
+                        continue
+                    if category == "capital_flow" and t_key != "table0":
+                        continue
+                    if category == "unlocks" and t_key != "table0":
+                        continue
+
                     table_rows = []
                     for row in rows:
                         row_dict = {}
@@ -2109,9 +2365,23 @@ class FinanceGateway:
                                 col_title = EVENTS_FIELDS.get(col_raw, col_raw)
                             elif category == "limit_up":
                                 col_title = LIMIT_UP_FIELDS.get(col_raw, col_raw)
+                            elif category == "unlocks":
+                                col_title = UNLOCKS_FIELDS.get(col_raw, col_raw)
+                            elif category == "top_holders" and t_key == "table0":
+                                col_title = TOP_HOLDERS_TOTALS_FIELDS.get(col_raw, col_raw)
+                            elif category == "top_holders" and t_key == "table1":
+                                col_title = TOP_HOLDERS_FIELDS.get(col_raw, col_raw)
                             else:
                                 col_title = col_raw
                             row_dict[col_title] = val
+
+                        # 自动补齐 top_holders 中持股比例整列为 null 的缺陷（采用 持股数量/总流通股本 测算）
+                        if category == "top_holders" and t_key == "table1":
+                            if row_dict.get("持股比例_pct") is None and holder_total_shares > 0:
+                                cgs_val = float(row_dict.get("持股数量_股", 0.0) or 0.0)
+                                if cgs_val > 0:
+                                    row_dict["持股比例_pct"] = round((cgs_val / holder_total_shares) * 100.0, 3)
+
                         table_rows.append(row_dict)
                     if category == "events" and table_rows:
                         table_rows = list(reversed(table_rows))
@@ -2126,17 +2396,45 @@ class FinanceGateway:
                     has_records = any(len(rows) > 0 for rows in formatted_tables.values())
                     if not has_records:
                         tdx_res["无记录说明"] = "该股票在近期统计周期内无涨停或异动记录（白马蓝筹股/低波动标的未触发涨停机制属于常态）。"
+                elif category == "unlocks":
+                    t0_data = formatted_tables.get("table0", [])
+                    if t0_data:
+                        latest_date_str = str(t0_data[0].get("解禁日期", ""))
+                        today_str = datetime.date.today().strftime("%Y%m%d")
+                        if latest_date_str and latest_date_str < today_str:
+                            tdx_res["解禁状态说明"] = (
+                                f"该标的最近一次限售解禁已于 {latest_date_str} 实施完成，当前股票处于全流通状态或近期无待解禁日程。"
+                            )
 
                 # 增强 F10 摘要表：汉化关键财务与估值指标、依据“利润变动方向”精确校准亏损标的同比含义、注入隔日风格标签与破净动态复核指引
                 if category == "summary" or ("table3" in formatted_tables and "table4" in formatted_tables):
                     self._enrich_f10_summary_tables(formatted_tables, tdx_res)
+
+                # 防空壳无效标的校验：如果所有格式化表均为空，核验证券代码正主是否存在
+                has_any_data = any(len(rows) > 0 for rows in formatted_tables.values())
+                if not has_any_data:
+                    entity = self.tdx_client._resolve_exact_security_entity(clean_code)
+                    if entity is None:
+                        raise ValueError(
+                            f"未查询到证券代码 '{symbol}' 的 F10 基本面资料（代码不存在或非有效 A 股/港股标的）。"
+                            "建议先调用 stock_lookup 工具核对标准证券名称与代码。"
+                        )
                 return tdx_res
+        except ValueError:
+            raise
         except Exception:
             pass
 
         # 2. 通达信未开放或异常时，自动平滑降级至公开数据中心高可用 F10
         fallback_data = self.fallback_client.get_f10(symbol=symbol, category=category)
         clean_code = re.sub(r"[^\d]", "", symbol)
+        if fallback_data is None or fallback_data == {"status": "暂无数据"}:
+            entity = self.tdx_client._resolve_exact_security_entity(clean_code)
+            if entity is None:
+                raise ValueError(
+                    f"未查询到证券代码 '{symbol}' 的 F10 基本面资料（代码不存在或非有效 A 股/港股标的）。"
+                    "建议先调用 stock_lookup 工具核对标准证券名称与代码。"
+                )
         category_names = {
             "concepts": "热点题材板块族谱",
             "events": "事件驱动催化",
@@ -2294,8 +2592,19 @@ class FinanceGateway:
         symbol = arguments.get("symbol", "").strip()
         if not symbol:
             raise ValueError("symbol 不能为空")
+        clean_code = re.sub(r"[^\d]", "", symbol)
+        entity_name = None
+        if clean_code and len(clean_code) in (5, 6):
+            entity = self.tdx_client._resolve_exact_security_entity(clean_code)
+            if entity is None:
+                raise ValueError(
+                    f"未找到代码为 '{symbol}' 的有效证券标的（代码不存在或非有效 A 股/港股标的），"
+                    "已拦截泛化模糊检索以避免返回无关误导资讯。建议先调用 stock_lookup 工具查询标准代码与简称。"
+                )
+            entity_name = entity.get("entity_name")
+
         limit = int(arguments.get("limit", 5))
-        news = self.fallback_client.get_news(symbol=symbol, limit=limit)
+        news = self.fallback_client.get_news(symbol=symbol, limit=limit, entity_name=entity_name)
         return {"symbol": symbol, "news_count": len(news), "news": news}
 
     def market_context(self, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
