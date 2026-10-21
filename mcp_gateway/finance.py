@@ -1516,20 +1516,27 @@ class TdxClient:
                 annualized_eps = round(now_p / syl, 3)
                 mapped_ext["年化每股收益_EPS"] = annualized_eps
 
-            # 从 ProInfo 中提取真正滚动过去 4 季度的 TTM 滚动市盈率与静态市盈率
+            # 从 ProInfo (或 ExtInfo 备用源) 中提取真正滚动过去 4 季度的 TTM 滚动市盈率与静态市盈率
+            pe_ttm = None
+            pe_static = None
             if isinstance(pro_raw, dict):
                 pe_ttm = pro_raw.get("PETTM")
                 pe_static = pro_raw.get("PEStatic")
-                if pe_ttm is not None and str(pe_ttm).strip() != "":
-                    try:
-                        mapped_ext["滚动市盈率_PETTM"] = round(float(pe_ttm), 2)
-                    except (ValueError, TypeError):
-                        pass
-                if pe_static is not None and str(pe_static).strip() != "":
-                    try:
-                        mapped_ext["静态市盈率_PEStatic"] = round(float(pe_static), 2)
-                    except (ValueError, TypeError):
-                        pass
+            if pe_ttm is None and isinstance(ext_raw, dict):
+                pe_ttm = ext_raw.get("PETTM") or ext_raw.get("SYL_TTM")
+            if pe_static is None and isinstance(ext_raw, dict):
+                pe_static = ext_raw.get("PEStatic") or ext_raw.get("SYL_Static")
+
+            if pe_ttm is not None and str(pe_ttm).strip() != "":
+                try:
+                    mapped_ext["滚动市盈率_PETTM"] = round(float(pe_ttm), 2)
+                except (ValueError, TypeError):
+                    pass
+            if pe_static is not None and str(pe_static).strip() != "":
+                try:
+                    mapped_ext["静态市盈率_PEStatic"] = round(float(pe_static), 2)
+                except (ValueError, TypeError):
+                    pass
 
             ann_eps_val = mapped_ext.get("年化每股收益_EPS")
             ann_eps_str = f"年化每股收益≈{ann_eps_val}元，现价/年化EPS=动态市盈率" if ann_eps_val is not None else "当前亏损或暂无年化每股收益"
@@ -1538,12 +1545,18 @@ class TdxClient:
                 f"{ttm_note}动态市盈率_PE({mapped_ext.get('动态市盈率_PE')}倍)采用最新报告期年化折算口径({ann_eps_str})；"
                 f"报告期每股收益_EPS({mgsy}元)为非年化单期累计值，两者口径不同，禁止直接互乘推导价格或市值。"
             )
+            mapped_ext["PE使用纪律说明"] = (
+                "【PE口径防误导铁律】报告与回答中提及市盈率必须严格指明是哪一个，严禁混称：\n"
+                "1.【滚动市盈率_PETTM】(价值投资推荐口径)：基于过去4个季度滚动归母净利润(真实TTM)计算，能平滑季节性波动；\n"
+                "2.【动态市盈率_PE】：现价÷最新单季年化每股收益(年化口径)，一季度净利×4、半年度×2，易受单季突发收支和淡旺季严重扰动；\n"
+                "3.【静态市盈率_PEStatic】：现价÷上一完整会计年度每股收益。报告中必须明确注明所用PE类型。"
+            )
             result["估值与基本盘面"] = mapped_ext
 
-        # 3. 五档深度买卖盘口整理（通达信官方 BspInfo 返回 5 项明细数组）
+        # 3. 五档深度买卖盘口整理（通达信官方 BspInfo 返回 5 项明细数组或极速备用字典）
         bsp_raw = raw.get("BspInfo", [])
+        bsp_dict = {}
         if isinstance(bsp_raw, list) and bsp_raw:
-            bsp_dict = {}
             buy_names = ["买一", "买二", "买三", "买四", "买五"]
             sell_names = ["卖一", "卖二", "卖三", "卖四", "卖五"]
             for idx, item in enumerate(bsp_raw[:5]):
@@ -1562,15 +1575,6 @@ class TdxClient:
                         "价格": float(s_price) if s_price is not None and str(s_price).strip() else None,
                         "委托量_手": int(s_vol) if (s_vol is not None and str(s_vol).isdigit()) else s_vol,
                     }
-            if bsp_dict:
-                result["五档深度盘口"] = bsp_dict
-                # 检查是否处于盘后休市时段（交易所清空连续竞价撮合委托，盘口仅剩一档收盘撮合价）
-                valid_tiers = sum(1 for v in bsp_dict.values() if isinstance(v, dict) and v.get("价格") is not None)
-                if valid_tiers <= 1:
-                    result["盘口深度说明"] = (
-                        "当前处于休市/盘后时段，交易所撮合系统已清空连续竞价订单簿，仅保留收盘撮合价；"
-                        "完整五档买卖深度将在交易日 9:15-11:30、13:00-15:00 连续竞价期间动态全量呈现。"
-                    )
         elif isinstance(bsp_raw, dict) and bsp_raw:
             bsp_dict = {
                 "买一": {"价格": bsp_raw.get("BuyPrice1") or bsp_raw.get("BuyP1"), "委托量_手": bsp_raw.get("BuyVol1") or bsp_raw.get("BuyV1")},
@@ -1584,7 +1588,29 @@ class TdxClient:
                 "卖四": {"价格": bsp_raw.get("SellPrice4") or bsp_raw.get("SellP4"), "委托量_手": bsp_raw.get("SellVol4") or bsp_raw.get("SellV4")},
                 "卖五": {"价格": bsp_raw.get("SellPrice5") or bsp_raw.get("SellP5"), "委托量_手": bsp_raw.get("SellVol5") or bsp_raw.get("SellV5")},
             }
+
+        if bsp_dict:
             result["五档深度盘口"] = bsp_dict
+            # 检查是否处于盘后休市时段（交易所停止连续竞价撮合，盘口仅剩少量静态残量挂单）
+            valid_tiers = sum(1 for v in bsp_dict.values() if isinstance(v, dict) and v.get("价格") is not None)
+            clean_time = str(hq_raw.get("HQTime", "")).replace(":", "")[:6]
+            is_after_market = False
+            if clean_time.isdigit() and len(clean_time) >= 6:
+                if clean_time >= "150000" or clean_time < "091500":
+                    is_after_market = True
+
+            total_hand = sum(
+                int(v.get("委托量_手", 0) or 0) for v in bsp_dict.values()
+                if isinstance(v, dict) and isinstance(v.get("委托量_手"), (int, float))
+            )
+
+            if is_after_market or valid_tiers <= 1 or (total_hand > 0 and total_hand < 200 and clean_time >= "145700"):
+                result["盘口深度说明"] = (
+                    f"【收盘残量防误导警示】当前处于休市/盘后时段（行情时间: {hq_raw.get('HQTime')}），交易所撮合系统已停止连续竞价撮合。"
+                    f"五档当前累计委托量仅约 {total_hand} 手，纯属收盘集合竞价未撤单的极少量静态残量挂单！"
+                    "【铁律】严禁将休市后的微量残单当作真实买卖盘口深度、买卖支撑阻力或多空博弈力量强弱进行分析与推断。"
+                    "真实有效的盘口买卖深度仅在交易日连续竞价撮合期间（9:30-11:30、13:00-14:57）动态全量呈现。"
+                )
 
         return result
 
@@ -1822,12 +1848,27 @@ class TdxClient:
                             if abs(diff_cz_out) > 0.01:
                                 period_dict["筹资活动现金流出不可加总差额_金融分红及利息细项等"] = diff_cz_out
 
-                    # 针对利润表：注入营业利润核算口径说明与防加总幻觉提示
+                    # 针对利润表：自动核算营业利润与各已知科目代数累加的差额，并注入纪律说明
                     if rtype in ("income", "income_statement", "lyb"):
+                        yylr = period_dict.get("营业利润")
+                        if yylr is not None and isinstance(yylr, (int, float)):
+                            yysr = float(period_dict.get("营业总收入", 0.0) or 0.0)
+                            yycb = float(period_dict.get("营业总成本", 0.0) or 0.0)
+                            tzsy = float(period_dict.get("投资收益", 0.0) or 0.0)
+                            qtsy = float(period_dict.get("其他收益", 0.0) or 0.0)
+                            gysy = float(period_dict.get("公允价值变动净收益", 0.0) or 0.0)
+                            hdsy = float(period_dict.get("汇兑收益", 0.0) or 0.0)
+                            zccz = float(period_dict.get("资产处置收益", 0.0) or 0.0)
+                            calc_yylr = yysr - yycb + tzsy + qtsy + gysy + hdsy + zccz
+                            diff_yylr = round(float(yylr) - calc_yylr, 2)
+                            if abs(diff_yylr) > 0.01:
+                                period_dict["营业利润不可加总差额_信用减值与资产减值损失及其他"] = diff_yylr
+
                         period_dict["利润表加总纪律说明"] = (
-                            "通达信38列利润表模板中部分细分项目（如公允价值变动、资产/信用减值损失、其他收益）"
-                            "可能随公司行业不同合并填报。分析与建模时请以官方披露的'营业利润'、'利润总额'和'净利润'为准，"
-                            "切勿机械使用各成本费用科目做简单代数累加。"
+                            "【营业利润不可直接复算自陈】通达信38列利润表工商业模板未收录'信用减值损失'与'资产减值损失'等细项；"
+                            "因此：营业总收入 − 营业总成本 + 投资收益 + 资产处置 + 汇兑 + 其他收益 + 公允价值变动净收益 ≠ 营业利润。"
+                            "差额已自动核算至【营业利润不可加总差额_信用减值与资产减值损失及其他】。"
+                            "财务建模与分析时请务必直接取用官方公布的【营业利润】、【利润总额】与【净利润】，严禁自行通过加减科目拼凑营业利润！"
                         )
 
                     # 针对资产负债表：自动核算明细与小计的不可加总差额
@@ -2554,8 +2595,10 @@ class FinanceGateway:
                     )
                 elif category == "top_holders":
                     tdx_res["股本口径说明"] = (
-                        "十大流通股东表中的股本字段仅为流通股统计口径；"
-                        "上市公司真实基准总股本请以 quotes 工具返回的【总股本_万股】× 10000（或财务报表归母权益）为准。"
+                        "【A+H及跨市场股本口径警示】十大流通股东表中的股本字段仅为定期报告历史流通股口径（按季度披露）。"
+                        "对于 A+H 两地上市标的（如比亚迪 002594/01211、中国平安、宁德时代等），表中流通总额通常为境内A股流通股与境外H股流通股的历史合并加总（例如比亚迪历史定期报告71.70亿股=A股流通34.87亿+H股流通36.83亿）；"
+                        "而 quotes 工具返回的【总股本_万股】为交易所实时最新法定全部已发行股本（如比亚迪最新91.17亿股，包含最新送转增发）。"
+                        "两者属于【历史定期报告流通额 vs 实时法定总股本】的不同口径，严禁混用，测算总市值或AH溢价时必须区分各市场实际上市股数！"
                     )
                 elif category == "forecast":
                     has_records = any(len(rows) > 0 for rows in formatted_tables.values())

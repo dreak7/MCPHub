@@ -851,6 +851,105 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertIn("无记录说明", res_fc)
             self.assertIn("近期无卖方机构发布盈利预测报告", res_fc["无记录说明"])
 
+    def test_pe_discipline_and_after_hours_orderbook_warning(self) -> None:
+        """测试 quotes 中 PE 必须双轨分开的纪律说明与收盘后五档残量防误导警示"""
+        fin_gw = FinanceGateway()
+        mock_pbhq = {
+            "HQInfo": {
+                "HQDate": "20261021", "HQTime": "150000", "Now": 1309.69,
+                "Close": 1331.88, "Open": 1331.88, "MaxP": 1331.98, "MinP": 1302.36,
+                "Volume": 33514, "Amount": 4403823104.0
+            },
+            "ExtInfo": {
+                "ZGB": 125008.16, "LTGB": 125008.16, "ZSZ": 1637219372013.0,
+                "SYL": 20.1, "SYL_TTM": 19.8, "JLY": 3000000000.0, "MGSY": 5.2
+            },
+            "BaseInfo": {"Name": "贵州茅台", "Code": "600519", "Setcode": 1},
+            "BspInfo": [
+                {"BuyP": 1309.59, "SellP": 1309.69, "BuyV": "2", "SellV": "46"},
+                {"BuyP": 1309.50, "SellP": 1309.80, "BuyV": "10", "SellV": "26"},
+            ],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_pbhq):
+            res = fin_gw.stock_quotes({"symbol": "600519"})
+            # 1. 验证 PE 双轨与纪律说明
+            val_info = res.get("估值与基本盘面", {})
+            self.assertIn("动态市盈率_PE", val_info)
+            self.assertIn("滚动市盈率_PETTM", val_info)
+            self.assertIn("PE使用纪律说明", val_info)
+            self.assertIn("【PE口径防误导铁律】", val_info["PE使用纪律说明"])
+            self.assertIn("滚动市盈率_PETTM", val_info["PE使用纪律说明"])
+            self.assertIn("动态市盈率_PE", val_info["PE使用纪律说明"])
+
+            # 2. 验证收盘后五档残量防误导警示
+            self.assertIn("盘口深度说明", res)
+            self.assertIn("【收盘残量防误导警示】", res["盘口深度说明"])
+            self.assertIn("严禁将休市后的微量残单当作真实买卖盘口深度", res["盘口深度说明"])
+
+    def test_operating_profit_residual_and_discipline_notice(self) -> None:
+        """测试利润表中营业利润不可加总差额（信用减值/资产减值损失）的自动核算与自陈纪律说明"""
+        fin_gw = FinanceGateway()
+        mock_income_raw = {
+            "ErrorCode": 0,
+            "ResultSets": [
+                {
+                    "ResultSetKey": "report",
+                    "ColName": [
+                        "N001", "N002", "N004", "N015", "N018", "N014",
+                        "N017", "N016", "N019", "N022", "N024"
+                    ],
+                    "Content": [
+                        [
+                            "2026-06-30",
+                            83447957386.95,  # 营业总收入
+                            7852378939.99,   # 营业总成本
+                            489839.29,       # 投资收益
+                            33148152.02,     # 其他收益
+                            0.0,             # 公允价值变动
+                            0.0,             # 汇兑收益
+                            -263654.49,      # 资产处置收益
+                            75661448632.82,  # 营业利润 (官方披露值)
+                            75591340578.47,  # 利润总额
+                            56708779901.81,  # 净利润
+                        ]
+                    ],
+                }
+            ],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_income_raw):
+            res = fin_gw.stock_financials({"symbol": "600519", "report_type": "income", "limit_periods": 1})
+            period = res["statements"][0]
+            self.assertIn("营业利润不可加总差额_信用减值与资产减值损失及其他", period)
+            # 复算理论差额: 75661448632.82 - (83447957386.95 - 7852378939.99 + 489839.29 + 33148152.02 - 263654.49) = 32495849.04
+            self.assertEqual(period["营业利润不可加总差额_信用减值与资产减值损失及其他"], 32495849.04)
+            self.assertIn("利润表加总纪律说明", period)
+            self.assertIn("【营业利润不可直接复算自陈】", period["利润表加总纪律说明"])
+
+    def test_top_holders_ah_share_capital_notice(self) -> None:
+        """测试十大流通股东表针对 A+H 股本口径差异的警示说明"""
+        fin_gw = FinanceGateway()
+        mock_th_raw = {
+            "ErrorCode": 0,
+            "ResultSets": [
+                {
+                    "ResultSetKey": "table0",
+                    "ColName": ["ltg", "qtltg", "b1_zgb", "b2_zgb"],
+                    "Content": [[7170468722, 1000000000, 7170468722, 1000000000]],
+                },
+                {
+                    "ResultSetKey": "table1",
+                    "ColName": ["T002", "gdmc", "cgs", "cgbl", "cglx", "gddm"],
+                    "Content": [["2026-06-30", "王传福", 511000000, None, "自然人", "01"]],
+                },
+            ],
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_th_raw):
+            res = fin_gw.stock_f10({"symbol": "002594", "category": "top_holders"})
+            self.assertIn("股本口径说明", res)
+            self.assertIn("【A+H及跨市场股本口径警示】", res["股本口径说明"])
+            self.assertIn("比亚迪", res["股本口径说明"])
+            self.assertIn("实时法定总股本", res["股本口径说明"])
+
 
 if __name__ == "__main__":
     unittest.main()
