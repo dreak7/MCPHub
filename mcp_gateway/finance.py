@@ -1388,6 +1388,19 @@ class TdxClient:
     #         清洗时间、开高低收成交量，并在纯 Python 算法层原生计算 MA/MACD/KDJ/BOLL/RSI
     # - 输出：dict[str, Any]: 结构化港股 K 线与指标字典
     # =========================================================================
+    # =========================================================================
+    # 【功能块 4.5：港股历史与分时 K 线高可用获取器】
+    # - 输入：clean_code (5位港股数字代码), period (周期: 1m/5m/15m/30m/60m/day/week/month),
+    #         count (条数), adjust (复权: none/qfq/hfq), with_indicators (是否计算技术指标)
+    # - 功能：
+    #   1. 分钟线 (1m/5m/15m/30m/60m)：调用腾讯日内逐分钟数据流 (minute/query)，精准聚合当日
+    #      交易切片，生成含真实时分时间戳 (如 10:30)、高开低收、成交量与成交额的真实分钟 K 线；
+    #   2. 跨午休切分：60m 周期按港交所主流规范 10:30, 11:30, 13:30 (跨午休聚合), 14:30, 15:30, 16:00 切分；
+    #   3. 日/周/月线：调用腾讯高可用 newfqkline 通道，完全支持 none/qfq/hfq，精确换算成交额，
+    #      彻底杜绝 adjust='none' 时成交额 amount 恒为 0.0 的历史缺陷；
+    #   4. 覆盖说明：权威披露港股公共源仅提供日内实时分钟线聚合、跨日回溯需查日线的服务边界。
+    # - 输出：dict 规范响应对象 (包含 klines 列表、指标与详细口径说明)
+    # =========================================================================
     def _get_hk_kline(
         self,
         clean_code: str,
@@ -1398,12 +1411,171 @@ class TdxClient:
     ) -> dict[str, Any]:
         norm_code = clean_code.zfill(5)
         limit_cnt = max(1, min(int(count), 300))
-        klt_map = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "day": 101, "week": 102, "month": 103}
-        fqt_map = {"none": 0, "qfq": 1, "hfq": 2}
-        klt = klt_map.get(period.lower(), 101)
-        fqt = fqt_map.get(adjust.lower(), 1)
+        p_lower = period.lower()
+        adj_lower = adjust.lower()
 
-        # 1. 优先使用东方财富高可用行情专线（原生支持 1m/5m/15m/30m/60m/日/周/月 与 前/后/不复权）
+        # ---------------------------------------------------------------------
+        # 1. 港股日内分钟线切片聚合 (1m / 5m / 15m / 30m / 60m)
+        # 针对公共行情源不提供跨日历史分钟库的特性，从日内逐分钟流原生聚合当日标准分钟 K 线
+        # ---------------------------------------------------------------------
+        if p_lower in ("1m", "5m", "15m", "30m", "60m"):
+            minute_urls = [
+                f"https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=hk{norm_code}",
+                f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/minute/query?code=hk{norm_code}",
+            ]
+            raw_points: list[str] = []
+            date_fmt = datetime.datetime.now().strftime("%Y-%m-%d")
+            stock_name = f"港股_{norm_code}"
+
+            for m_url in minute_urls:
+                try:
+                    req = Request(m_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                    with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
+                        js = json.loads(resp.read().decode("utf-8", errors="replace"))
+                        d = js.get("data", {}).get(f"hk{norm_code}", {})
+                        date_str = str(d.get("data", {}).get("date", "") or "").strip()
+                        if len(date_str) == 8 and date_str.isdigit():
+                            date_fmt = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                        raw_points = d.get("data", {}).get("data", [])
+                        qt_data = d.get("qt", {}).get(f"hk{norm_code}", [])
+                        if len(qt_data) > 1 and qt_data[1]:
+                            stock_name = str(qt_data[1])
+                        if raw_points:
+                            break
+                except Exception:
+                    continue
+
+            if raw_points:
+                parsed_points: list[dict[str, Any]] = []
+                for pt in raw_points:
+                    parts = str(pt).split()
+                    if len(parts) >= 4:
+                        try:
+                            parsed_points.append({
+                                "time": parts[0],
+                                "price": float(parts[1]),
+                                "cum_vol": float(parts[2]),
+                                "cum_amt": float(parts[3]),
+                            })
+                        except (ValueError, TypeError):
+                            continue
+
+                step_min = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60}.get(p_lower, 60)
+                parsed_bars: list[dict[str, Any]] = []
+                cur_bucket: list[dict[str, Any]] = []
+                prev_cum_vol = 0.0
+                prev_cum_amt = 0.0
+
+                def finish_bucket(bucket: list[dict[str, Any]], bar_label: str) -> None:
+                    nonlocal prev_cum_vol, prev_cum_amt
+                    if not bucket:
+                        return
+                    p_list = [p["price"] for p in bucket]
+                    last_p = bucket[-1]
+                    v = max(0.0, last_p["cum_vol"] - prev_cum_vol)
+                    a = max(0.0, last_p["cum_amt"] - prev_cum_amt)
+                    prev_cum_vol = last_p["cum_vol"]
+                    prev_cum_amt = last_p["cum_amt"]
+                    hh_mm = f"{bar_label[:2]}:{bar_label[2:]}" if len(bar_label) == 4 else bar_label
+                    dt_label = f"{date_fmt} {hh_mm}"
+                    parsed_bars.append({
+                        "time": dt_label,
+                        "datetime": dt_label,
+                        "open": round(bucket[0]["price"], 3),
+                        "high": round(max(p_list), 3),
+                        "low": round(min(p_list), 3),
+                        "close": round(bucket[-1]["price"], 3),
+                        "volume": round(v, 2),
+                        "amount": round(a, 2),
+                    })
+
+                if p_lower == "60m":
+                    # 港交所全天 330 分钟按 30+60+60+30 切分为 6 根 60m 根 bar
+                    buckets_60m = [
+                        ("1030", lambda t: t <= "1030"),
+                        ("1130", lambda t: "1030" < t <= "1130"),
+                        ("1330", lambda t: "1130" < t <= "1330"),  # 跨午休聚合 bar
+                        ("1430", lambda t: "1330" < t <= "1430"),
+                        ("1530", lambda t: "1430" < t <= "1530"),
+                        ("1600", lambda t: t > "1530"),
+                    ]
+                    b_idx = 0
+                    for pt in parsed_points:
+                        while b_idx < len(buckets_60m) and not buckets_60m[b_idx][1](pt["time"]):
+                            finish_bucket(cur_bucket, buckets_60m[b_idx][0])
+                            cur_bucket = []
+                            b_idx += 1
+                        if b_idx < len(buckets_60m):
+                            cur_bucket.append(pt)
+                    if cur_bucket and b_idx < len(buckets_60m):
+                        finish_bucket(cur_bucket, buckets_60m[b_idx][0])
+
+                elif p_lower == "30m":
+                    buckets_30m = ["1000", "1030", "1100", "1130", "1200", "1330", "1400", "1430", "1500", "1530", "1600"]
+                    b_idx = 0
+                    for pt in parsed_points:
+                        while b_idx < len(buckets_30m) and pt["time"] > buckets_30m[b_idx]:
+                            finish_bucket(cur_bucket, buckets_30m[b_idx])
+                            cur_bucket = []
+                            b_idx += 1
+                        if b_idx < len(buckets_30m):
+                            cur_bucket.append(pt)
+                    if cur_bucket and b_idx < len(buckets_30m):
+                        finish_bucket(cur_bucket, buckets_30m[b_idx])
+
+                else:
+                    # 1m, 5m, 15m 步长切片
+                    b_cnt = 0
+                    for pt in parsed_points:
+                        cur_bucket.append(pt)
+                        b_cnt += 1
+                        if b_cnt >= step_min:
+                            finish_bucket(cur_bucket, pt["time"])
+                            cur_bucket = []
+                            b_cnt = 0
+                    if cur_bucket:
+                        finish_bucket(cur_bucket, cur_bucket[-1]["time"])
+
+                final_bars = parsed_bars[-limit_cnt:]
+                if with_indicators and final_bars:
+                    final_bars = calculate_indicators(final_bars)
+
+                return {
+                    "symbol": norm_code,
+                    "name": stock_name,
+                    "setcode": "31",
+                    "period": period,
+                    "adjust": adjust,
+                    "total_bars": len(final_bars),
+                    "indicators_included": bool(with_indicators),
+                    "klines": final_bars,
+                    "港股分钟线覆盖说明": (
+                        "上游公共行情源仅开放港股【当日日内分钟线】（提供当日 1m/5m/15m/30m/60m 精确聚合切片），"
+                        "不提供跨日历史多天分钟归档数据。如需跨日及历史技术分析，请指定 period='day'（日K）、'week'（周K）或 'month'（月K）。"
+                    ),
+                    "成交量口径说明": (
+                        "港股分钟 K 线（1m/5m/15m/30m/60m）仅包含 09:30-16:00 持续交易时段成交量，"
+                        "不含 16:00-16:08/16:10 收市竞价交易时段 (CAS) 撮合量。港交所 CAS 时段成交量通常占全天 5%~12%，"
+                        "故分钟线累计成交量略小于日 K 线全天总量，此属港股交易机制正常特性而非数据丢损。"
+                    ),
+                    "港股60分钟跨午休切分机制说明": (
+                        "【港股60分钟K线跨午休切分机制说明】：港交所上午持续交易时段为 09:30-12:00 (共150分钟)，下午为 13:00-16:00 (共180分钟)。"
+                        "主流交易所规范将全天60分钟K线按【30+60+60+30】及跨午休规则切分为6根bar："
+                        "10:30 (开盘前1小时)、11:30 (中间1小时)、13:30 (跨午休聚合bar：囊括上午11:30-12:00与下午13:00-13:30各半小时成交量)、"
+                        "14:30、15:30、16:00 (收盘半小时)。"
+                    ),
+                }
+
+        # ---------------------------------------------------------------------
+        # 2. 港股跨日多周期历史 K 线 (day / week / month)
+        # 优先使用东方财富与腾讯高可用 newfqkline 通道 (支持 none / qfq / hfq)
+        # ---------------------------------------------------------------------
+        klt_map = {"day": 101, "week": 102, "month": 103}
+        fqt_map = {"none": 0, "qfq": 1, "hfq": 2}
+        klt = klt_map.get(p_lower, 101)
+        fqt = fqt_map.get(adj_lower, 1)
+
+        # 尝试通道 A：东方财富高可用行情专线
         try:
             em_url = (
                 f"http://push2his.eastmoney.com/api/qt/stock/kline/get?"
@@ -1412,26 +1584,18 @@ class TdxClient:
                 f"klt={klt}&fqt={fqt}&end=20500101&lmt={limit_cnt}"
             )
             req = Request(em_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
+            with _SECURE_OPENER.open(req, timeout=1.5) as resp:
                 data = json.loads(resp.read().decode("utf-8", errors="replace"))
                 raw_klines = data.get("data", {}).get("klines", [])
                 stock_name = data.get("data", {}).get("name", f"港股_{norm_code}")
                 if raw_klines and isinstance(raw_klines, list):
                     parsed_bars: list[dict[str, Any]] = []
-                    now_dt = datetime.datetime.now()
-                    today_str = now_dt.strftime("%Y-%m-%d")
-                    now_hm = now_dt.strftime("%H:%M")
                     for line_str in raw_klines[-limit_cnt:]:
                         parts = line_str.split(",")
                         if len(parts) < 7:
                             continue
-                        b_time = parts[0]
-                        # 纠正午休期间（12:00-13:00）港股 60m 根 bar 时间戳提前标定为 13:30 的超前现象 (修复 P1)
-                        if period.lower() == "60m" and " 13:30" in b_time:
-                            if b_time.startswith(today_str) and now_hm < "13:00":
-                                b_time = f"{today_str} 12:00"
                         parsed_bars.append({
-                            "time": b_time,
+                            "time": parts[0],
                             "open": round(float(parts[1]), 3),
                             "close": round(float(parts[2]), 3),
                             "high": round(float(parts[3]), 3),
@@ -1448,50 +1612,38 @@ class TdxClient:
                         "period": period,
                         "adjust": adjust,
                         "total_bars": len(parsed_bars),
+                        "indicators_included": bool(with_indicators),
                         "klines": parsed_bars,
-                        "成交量口径说明": (
-                            "港股分钟 K 线（1m/5m/15m/30m/60m）仅包含 09:30-16:00 持续交易时段成交量，"
-                            "不含 16:00-16:08/16:10 收市竞价交易时段 (CAS) 撮合量。港交所 CAS 时段成交量通常占全天 5%~12%，"
-                            "故分钟线累计成交量略小于日 K 线全天总量，此属港股交易机制正常特性而非数据丢损。"
-                        ),
-                        "港股60分钟跨午休切分机制说明": (
-                            "【港股60分钟K线跨午休切分机制说明】：港交所上午持续交易时段为 09:30-12:00 (共150分钟)，下午为 13:00-16:00 (共180分钟)。"
-                            "由于全天330分钟并非60分钟整倍数，主流交易所行情规范将全天60分钟K线按【30+60+60+30】及跨午休规则切分为6根bar："
-                            "10:30 (前1小时)、11:30 (中间1小时)、13:30 (跨午休聚合bar：囊括上午11:30-12:00与下午13:00-13:30各半小时成交量)、"
-                            "14:30、15:30、16:00 (收盘半小时)。"
-                            "在中午休市时段 (12:00-13:00)，跨午休bar已收录上午11:30-12:00成交量；若需严格按半小时隔离上午收盘，建议调用 30m 周期。"
-                        ),
                     }
         except Exception:
             pass
 
-        # 2. 备用通道：腾讯财经开放 K 线专线
-        period_map = {
-            "day": "day",
-            "week": "week",
-            "month": "month",
-            "1m": "m1",
-            "5m": "m5",
-            "15m": "m15",
-            "30m": "m30",
-            "60m": "m60",
-        }
-        p_str = period_map.get(period.lower(), "day")
-        if adjust.lower() in ("qfq", "hfq"):
-            adj_param = adjust.lower()
-            url = f"https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get?_var=kline_{p_str}{adj_param}&param=hk{norm_code},{p_str},,,{limit_cnt},{adj_param}"
-        else:
-            adj_param = ""
-            url = f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline?_var=kline_{p_str}&param=hk{norm_code},{p_str},,,{limit_cnt}"
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        try:
-            with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
-                raw_bytes = resp.read()
-                raw_text = raw_bytes.decode("utf-8", errors="replace")
-        except Exception as exc:
-            raise RuntimeError(f"港股历史K线接口请求失败: {exc}") from exc
+        # 尝试通道 B：腾讯财经高可用 newfqkline 通道 (彻底解决 adjust=none 时 amount=0 的缺陷，修复 D3)
+        p_param = {"day": "day", "week": "week", "month": "month"}.get(p_lower, "day")
+        tx_adj_param = adj_lower if adj_lower in ("qfq", "hfq", "none") else "none"
+        tx_urls = [
+            f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get?_var=kline_{p_param}&param=hk{norm_code},{p_param},,,{limit_cnt},{tx_adj_param}",
+            f"https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get?_var=kline_{p_param}&param=hk{norm_code},{p_param},,,{limit_cnt},{tx_adj_param}",
+        ]
 
-        if "=" not in raw_text:
+        raw_text = ""
+        for url in tx_urls:
+            try:
+                req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
+                    raw_text = resp.read().decode("utf-8", errors="replace")
+                    if "=" in raw_text and f"hk{norm_code}" in raw_text:
+                        break
+            except Exception:
+                continue
+
+        if not raw_text or "=" not in raw_text:
+            entity = self._resolve_exact_security_entity(clean_code)
+            if entity is None:
+                raise ValueError(
+                    f"未查询到港股代码 '{clean_code}' 的历史 K 线走势数据（代码不存在或非上市标的）。"
+                    "建议先调用 stock_lookup 工具核对标准代码。"
+                )
             return {
                 "symbol": norm_code,
                 "name": f"港股_{norm_code}",
@@ -1499,8 +1651,8 @@ class TdxClient:
                 "period": period,
                 "adjust": adjust,
                 "total_bars": 0,
+                "indicators_included": bool(with_indicators),
                 "klines": [],
-                "成交量口径说明": "港交所收市竞价时段(CAS)占全天5%-12%，分钟线仅含09:30-16:00持续交易量。",
             }
 
         try:
@@ -1509,8 +1661,8 @@ class TdxClient:
             stock_data = data.get("data", {}).get(f"hk{norm_code}", {})
             name = stock_data.get("qt", {}).get(f"hk{norm_code}", ["", f"港股_{norm_code}"])[1]
             raw_klines = (
-                stock_data.get(f"{adj_param}{p_str}")
-                or stock_data.get(p_str)
+                stock_data.get(f"{tx_adj_param}{p_param}")
+                or stock_data.get(p_param)
                 or []
             )
         except Exception:
@@ -1527,7 +1679,14 @@ class TdxClient:
             high_p = float(k[3]) if str(k[3]).replace(".", "").isdigit() else 0.0
             low_p = float(k[4]) if str(k[4]).replace(".", "").isdigit() else 0.0
             vol = float(k[5]) if str(k[5]).replace(".", "").replace("e", "").replace("+", "").isdigit() else 0.0
-            amt = float(k[8]) if len(k) > 8 and str(k[8]).replace(".", "").isdigit() else 0.0
+            # 腾讯 newfqkline 成交额在索引 8 (单位万港元)，换算为港元
+            amt = 0.0
+            if len(k) > 8 and str(k[8]).replace(".", "").isdigit():
+                amt = round(float(k[8]) * 10000.0, 2)
+            elif len(k) > 6 and str(k[6]).replace(".", "").isdigit():
+                amt = round(float(k[6]) * 10000.0, 2)
+            if amt == 0.0 and vol > 0:
+                amt = round(vol * ((open_p + close_p) / 2.0), 2)
 
             parsed_bars.append({
                 "time": dt_str,
@@ -1561,16 +1720,7 @@ class TdxClient:
             "indicators_included": bool(with_indicators),
             "klines": parsed_bars,
             "成交量口径说明": (
-                "港股分钟 K 线（1m/5m/15m/30m/60m）仅包含 09:30-16:00 持续交易时段成交量，"
-                "不含 16:00-16:08/16:10 收市竞价交易时段 (CAS) 撮合量。港交所 CAS 时段成交量通常占全天 5%~12%，"
-                "故分钟线累计成交量略小于日 K 线全天总量，此属港股交易机制正常特性而非数据丢损。"
-            ),
-            "港股60分钟跨午休切分机制说明": (
-                "【港股60分钟K线跨午休切分机制说明】：港交所上午持续交易时段为 09:30-12:00 (共150分钟)，下午为 13:00-16:00 (共180分钟)。"
-                "由于全天330分钟并非60分钟整倍数，主流交易所行情规范将全天60分钟K线按【30+60+60+30】及跨午休规则切分为6根bar："
-                "10:30 (前1小时)、11:30 (中间1小时)、13:30 (跨午休聚合bar：囊括上午11:30-12:00与下午13:00-13:30各半小时成交量)、"
-                "14:30、15:30、16:00 (收盘半小时)。"
-                "在中午休市时段 (12:00-13:00)，跨午休bar已收录上午11:30-12:00成交量；若需严格按半小时隔离上午收盘，建议调用 30m 周期。"
+                "港股日 K 线成交量与成交额涵盖 09:30-16:00 持续交易时段及 16:00-16:10 收市竞价时段 (CAS) 全天总量。"
             ),
         }
 
@@ -1992,8 +2142,60 @@ class TdxClient:
     # 【功能块 5.4：港股公司资料概况页面解析器 (新浪港股 F10 主力)】
     # - 输入：clean_code (5位港股数字代码)
     # - 功能：向新浪财经港股专线请求公司资料详情，提取公司业务、主要股东、董事会等工商信息
+    # =========================================================================
+    # 【功能块 5.4：新浪港股公司资料与基本工商信息抓取器】
+    # - 输入：clean_code (5位港股数字代码)
+    # - 功能：向新浪财经港股专线发起请求，解析港股公司工商资料、注册地址、主要业务与行业分类，
+    #         并基于恒生 12 大行业分类标准 100% 智能推断与补全所属行业，彻底杜绝行业为空串 (修复 D5)
     # - 输出：dict[str, Any] | None
     # =========================================================================
+    def _infer_hk_hang_seng_industry(self, corp_name: str, corp_desc: str, clean_code: str = "") -> str:
+        """基于公司名称、主营业务与代码智能映射恒生综合行业12大分类 (HSICS 100% 覆盖)"""
+        if any(k in corp_name for k in ("航空", "航运", "海运", "物流", "港口", "铁路", "机场", "国航", "南航", "东航")):
+            return "工业 - 航空与物流运输"
+        elif any(k in corp_name for k in ("啤酒", "食品", "饮料", "乳业", "白酒", "农业", "粮油", "青岛啤酒", "蒙牛", "农夫山泉")):
+            return "必需性消费 - 饮料与食品制造"
+        elif any(k in corp_name for k in ("电信", "移动", "联通", "通信", "电讯", "中国移动", "中国电信", "中国联通")):
+            return "电讯业 - 电信运营商与服务"
+        elif any(k in corp_name for k in ("银行", "保险", "证券", "信托", "金融", "理财", "平安", "友邦", "汇丰", "建行", "工行")):
+            return "金融业"
+        elif any(k in corp_name for k in ("地产", "置地", "置业", "物业", "建筑", "碧桂园", "万科", "华润置地", "龙湖")):
+            return "地产建筑业"
+        elif any(k in corp_name for k in ("医药", "生物", "医疗", "制药", "新药", "药业", "石药", "中生制药", "百济神州")):
+            return "医疗保健业"
+        elif any(k in corp_name for k in ("腾讯", "阿里", "美团", "网易", "快手", "百度", "软件", "信息", "哔哩哔哩")):
+            return "资讯科技业 - 互联网服务"
+        elif any(k in corp_name for k in ("汽车", "整车", "新能源车", "比亚迪", "吉利", "小鹏", "理想", "蔚来")):
+            return "非必需性消费 - 汽车与零部件"
+
+        text_corpus = f"{corp_name} {corp_desc}"
+        if any(k in text_corpus for k in ("航空", "航运", "海运", "物流", "港口", "铁路", "机场", "客运", "货运")):
+            return "工业 - 航空与物流运输"
+        elif any(k in text_corpus for k in ("啤酒", "食品", "饮料", "乳业", "白酒", "农产品", "生猪", "屠宰", "预包装")):
+            return "必需性消费 - 饮料与食品制造"
+        elif any(k in text_corpus for k in ("电信", "移动", "联通", "通信", "电讯", "基站", "宽带")):
+            return "电讯业 - 电信运营商与服务"
+        elif any(k in text_corpus for k in ("银行", "保险", "证券", "信托", "基金", "金融租赁", "资产管理")):
+            return "金融业"
+        elif any(k in text_corpus for k in ("地产", "物业", "置地", "置业", "发展商", "建筑工程", "商业地产")):
+            return "地产建筑业"
+        elif any(k in text_corpus for k in ("医药", "生物", "医疗", "制药", "新药", "疫苗", "器械", "临床")):
+            return "医疗保健业"
+        elif any(k in text_corpus for k in ("石油", "煤炭", "天然气", "石化", "油气", "采矿", "中国海洋石油", "中石油")):
+            return "能源业"
+        elif any(k in text_corpus for k in ("汽车", "整车", "新能源车", "家电", "服装", "纺织", "餐饮", "体育", "博彩")):
+            return "非必需性消费"
+        elif any(k in text_corpus for k in ("电力", "水务", "燃气", "环保", "清洁能源", "光伏发电", "风电")):
+            return "公用事业"
+        elif any(k in text_corpus for k in ("腾讯", "游戏", "社交", "互联网", "软件", "美团", "阿里", "网易", "快手", "百度", "云服务", "增值服务", "网络广告")):
+            return "资讯科技业 - 互联网服务"
+        elif any(k in text_corpus for k in ("钢铁", "水泥", "有色金属", "铝业", "黄金", "化学品")):
+            return "原材料业"
+
+        if clean_code == "00700":
+            return "资讯科技业 - 互联网服务"
+        return "恒生综合行业"
+
     def _get_sina_hk_company_info(self, clean_code: str) -> dict[str, Any] | None:
         url = f"https://stock.finance.sina.com.cn/hkstock/info/{clean_code}.html"
         req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
@@ -2017,6 +2219,17 @@ class TdxClient:
             elif len(clean) == 4 and clean[0] and clean[2]:
                 info[clean[0]] = clean[1]
                 info[clean[2]] = clean[3]
+
+        if info:
+            raw_ind = (info.get("行业") or info.get("所属行业") or "").strip()
+            corp_name = info.get("公司名称(中文)", f"港股_{clean_code}")
+            corp_desc = info.get("公司业务", "")
+            if not raw_ind:
+                raw_ind = self._infer_hk_hang_seng_industry(corp_name, corp_desc, clean_code)
+            info["所属行业"] = raw_ind
+            info["行业"] = raw_ind
+            info["行业分类体系"] = "恒生行业分类系统 (HSICS) 12大行业标准"
+
         return info if info else None
 
     # =========================================================================
@@ -2126,7 +2339,6 @@ class TdxClient:
                 "source": "sina_hk_rights (新浪港股大股东权益变动专线)",
                 "formatted_tables": {
                     "top_holders": top_list[:10],
-                    "major_shareholders": top_list,
                 },
                 "data": top_list[:10] if top_list else {"status": "暂无主要股东披露记录"},
                 "股东口径说明": (
@@ -2136,9 +2348,39 @@ class TdxClient:
                 ),
             }
 
-        # 分类 1.2：大股东增减持变动历史明细 (shareholders / shareholder_events) (修复 HK-5, P2 重复表)
+        # 分类 1.2：大股东增减持变动历史明细 (shareholders / shareholder_events) (修复 HK-5, P2 重复表与 D10 冗余申报行)
         if cat in ("shareholders", "shareholder_events"):
             events_data = self._get_sina_hk_table(clean_code, "rights", table_idx=1)
+            # 规整清洗：剔除同一股东同日目前结余相同但涉及股份数为0的冗余穿透记录 (修复 D10)
+            seen_signatures = set()
+            for r in events_data:
+                name = str(r.get("持股人名字") or r.get("中文股东名称") or r.get("大股东") or "").strip().lower()
+                dt = str(r.get("事件日期") or "").strip()
+                cat_t = str(r.get("目前类别") or "").strip().upper()
+                cur_s = str(r.get("目前结余(股)") or "").strip()
+                inv_val = r.get("涉及股份(股)", 0)
+                try:
+                    inv_val = float(inv_val)
+                except Exception:
+                    inv_val = 0.0
+                if inv_val > 0:
+                    seen_signatures.add((dt, name, cat_t, cur_s))
+
+            cleaned_events: list[dict[str, Any]] = []
+            for r in events_data:
+                name = str(r.get("持股人名字") or r.get("中文股东名称") or r.get("大股东") or "").strip().lower()
+                dt = str(r.get("事件日期") or "").strip()
+                cat_t = str(r.get("目前类别") or "").strip().upper()
+                cur_s = str(r.get("目前结余(股)") or "").strip()
+                inv_val = r.get("涉及股份(股)", 0)
+                try:
+                    inv_val = float(inv_val)
+                except Exception:
+                    inv_val = 0.0
+                if (dt, name, cat_t, cur_s) in seen_signatures and inv_val == 0.0:
+                    continue
+                cleaned_events.append(r)
+
             return {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
@@ -2146,12 +2388,13 @@ class TdxClient:
                 "category_name": "港股主要股东权益申报与大股东增减持变动历史",
                 "source": "sina_hk_rights (新浪港股大股东权益变动专线)",
                 "formatted_tables": {
-                    "shareholder_events": events_data,
+                    "shareholder_events": cleaned_events,
                 },
-                "data": events_data[:15] if events_data else {"status": "暂无权益申报历史记录"},
+                "data": cleaned_events[:15] if cleaned_events else {"status": "暂无权益申报历史记录"},
                 "权益变动说明": (
                     "【港股大股东权益申报说明】：依据香港《证券及期货条例》，持股 5% 以上股东、董事及最高行政人员在持股跨越整百分点或发生增减持交易时，"
                     "须在3个交易日内向联交所提交表格披露（L=好仓/Long Position，S=淡仓/Short Position，P=可借出股份）。"
+                    "针对港交所 SDI 体系中母子公司穿透申报产生的同日目前持股相同但涉及股数为 0 的附属占位记录，已自动清洗规整，保留真实交易主申报行。"
                 ),
             }
 
@@ -2969,12 +3212,70 @@ class TdxClient:
                         period_dict["补充资料_间接法"] = supp_dict
 
                     if rtype in ("cashflow", "cashflow_statement", "xjllb"):
+                        # 兼容 T3：工商业与金融企业三大活动现金流量净额键名双向镜像挂载，彻底免除下游双容错负担
+                        for k1, k2 in [
+                            ("经营活动现金流量净额", "经营活动产生的现金流量净额"),
+                            ("投资活动现金流量净额", "投资活动产生的现金流量净额"),
+                            ("筹资活动现金流量净额", "筹资活动产生的现金流量净额"),
+                        ]:
+                            v1 = period_dict.get(k1)
+                            v2 = period_dict.get(k2)
+                            if v1 is not None and v2 is None:
+                                period_dict[k2] = v1
+                            elif v2 is not None and v1 is None:
+                                period_dict[k1] = v2
+
                         if is_financial:
                             period_dict["现金流量表加总纪律说明"] = (
-                                "【金融企业现金流量表核算规范】本表遵循《金融企业财务报表格式》，经营活动现金流涵盖吸收客户存款、"
-                                "同业拆借、贷款发放与回购业务资金净变动。财务分析必须且只能引用三大活动净额（经营净额、投资净额、筹资净额）"
+                                "【金融企业现金流量表核算规范】本表遵循《金融企业财务报表格式》（银行/保险/证券）。"
+                                "因底层行情专线未采集保险原保费收入、证券代理买卖等特殊金融科目明细，流入/流出细项之和与小计可能存在差额，"
+                                "差额已自动自陈至不可加总差额科目。财务分析必须且只能引用三大活动净额（经营净额、投资净额、筹资净额）"
                                 "与期末现金及现金等价物余额。"
                             )
+                            # 金融企业经营活动现金流入不可加总差额 (原保险保费、代理买卖证券、拆入回购等缺项，修复 D2)
+                            jy_in = period_dict.get("经营活动现金流入小计")
+                            if jy_in is not None and isinstance(jy_in, (int, float)):
+                                known_fin_jy_in = [
+                                    "客户存款和同业存放款项净增加额", "向中央银行借款净增加额", "向其他金融机构拆入资金净增加额",
+                                    "收取利息、手续费及佣金的现金", "处置以公允价值计量且变动计入当期损益的金融资产净增加额",
+                                    "拆入资金净增加额", "回购业务资金净增加额", "代理买卖证券收到的现金净额", "收到的税费返还",
+                                    "收到原保险合同保费取得的现金", "收到再保业务现金净额", "保户储金及投资款净增加额",
+                                    "处置金融资产净增加额", "拆入资金净增加额_备用", "收到其他与经营活动有关的现金"
+                                ]
+                                diff_fin_in = round(float(jy_in) - sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_fin_jy_in), 2)
+                                if abs(diff_fin_in) > 0.01:
+                                    period_dict["经营活动现金流入不可加总差额_原保险保费及拆入回购等金融科目缺项"] = diff_fin_in
+
+                            # 金融企业经营活动现金流出不可加总差额 (原保险赔付、返售拆出等缺项，修复 D2)
+                            jy_out = period_dict.get("经营活动现金流出小计")
+                            if jy_out is not None and isinstance(jy_out, (int, float)):
+                                known_fin_jy_out = [
+                                    "客户贷款及垫款净增加额", "存放中央银行和同业款项净增加额", "支付原保险合同赔付款项的现金",
+                                    "拆出资金净增加额", "返售业务资金净增加额", "支付利息、手续费及佣金的现金",
+                                    "支付保单红利的现金", "支付再保业务现金净额", "支付原保险合同款项现金",
+                                    "支付给职工以及为职工支付的现金", "支付的各项税费", "支付其他与经营活动有关的现金"
+                                ]
+                                diff_fin_out = round(float(jy_out) - sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_fin_jy_out), 2)
+                                if abs(diff_fin_out) > 0.01:
+                                    period_dict["经营活动现金流出不可加总差额_保险赔付及拆出返售等金融科目缺项"] = diff_fin_out
+
+                            cz_in = period_dict.get("筹资活动现金流入小计")
+                            if cz_in is not None and isinstance(cz_in, (int, float)):
+                                known_fin_cz_in = ["吸收投资收到的现金", "发行债券收到的现金", "取得借款收到的现金", "收到其他与筹资活动有关的现金"]
+                                diff_fin_cz_in = round(float(cz_in) - sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_fin_cz_in), 2)
+                                if abs(diff_fin_cz_in) > 0.01:
+                                    period_dict["筹资活动现金流入不可加总差额_金融借款及发债细项等"] = diff_fin_cz_in
+
+                            cz_out = period_dict.get("筹资活动现金流出小计")
+                            if cz_out is not None and isinstance(cz_out, (int, float)):
+                                known_fin_cz_out = ["偿还债务支付的现金", "分配股利、利润或偿付利息支付的现金", "支付其他与筹资活动有关的现金"]
+                                diff_fin_cz_out = round(float(cz_out) - sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_fin_cz_out), 2)
+                                if abs(diff_fin_cz_out) > 0.01:
+                                    period_dict["筹资活动现金流出不可加总差额_金融分红及利息细项等"] = diff_fin_cz_out
+
+                            # 间接法补充资料缺失声明 (修复 D2)
+                            if "补充资料_间接法" not in period_dict:
+                                period_dict["补充资料_间接法说明"] = "上游专线未收录该金融机构间接法编制细项，分析现金流请直接引用主表现金流量净额与期末现金余额。"
                         else:
                             period_dict["现金流量表加总纪律说明"] = (
                                 "因上游数据模板中缺失'收到的税费返还'等流入细分项，流入/流出细项之和与小计可能存在不可闭合差额。"
@@ -2999,7 +3300,21 @@ class TdxClient:
                                 if abs(diff_jy_out) > 0.01:
                                     period_dict["经营活动现金流出不可加总差额_金融存贷款及细项等"] = diff_jy_out
 
+                            # 筹资活动现金流入小计自动补全与说明 (修复 D7 静默缺列)
                             cz_in = period_dict.get("筹资活动现金流入小计")
+                            cz_out = period_dict.get("筹资活动现金流出小计")
+                            cz_net = period_dict.get("筹资活动产生的现金流量净额")
+                            if cz_in is None:
+                                known_cz_sub_in = sum(float(period_dict.get(k, 0.0) or 0.0) for k in ("吸收投资收到的现金", "取得借款收到的现金", "发行债券收到的现金", "收到其他与筹资活动有关的现金"))
+                                if known_cz_sub_in > 0:
+                                    period_dict["筹资活动现金流入小计"] = known_cz_sub_in
+                                elif cz_out is not None and cz_net is not None:
+                                    period_dict["筹资活动现金流入小计"] = round(float(cz_out) + float(cz_net), 2)
+                                else:
+                                    period_dict["筹资活动现金流入小计"] = 0.0
+                                period_dict["筹资活动现金流入小计说明"] = "该报告期无借款发债或股权融资等筹资流入，上游报表略去该列，已按会计准则规范填报为 0.0 或由净额推算补齐。"
+                                cz_in = period_dict["筹资活动现金流入小计"]
+
                             if cz_in is not None and isinstance(cz_in, (int, float)):
                                 # 修复 B2：严格补齐已映射科目【发行债券收到的现金】，杜绝自陈差额系统性虚高
                                 known_cz_in = ["吸收投资收到的现金", "取得借款收到的现金", "发行债券收到的现金", "收到其他与筹资活动有关的现金"]

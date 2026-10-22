@@ -971,7 +971,8 @@ class TestFinanceGateway(unittest.TestCase):
         with unittest.mock.patch.object(fin_gw.tdx_client, "_get_sina_hk_table", return_value=[{"主要股东": "Naspers", "持股比例": 28.86}]):
             res_th = fin_gw.stock_f10({"symbol": "00700", "category": "top_holders"})
             self.assertEqual(res_th["category"], "top_holders")
-            self.assertIn("major_shareholders", res_th["formatted_tables"])
+            self.assertIn("top_holders", res_th["formatted_tables"])
+            self.assertNotIn("major_shareholders", res_th["formatted_tables"])
 
         # 2. 测试 repurchases
         with unittest.mock.patch.object(fin_gw.tdx_client, "_get_sina_hk_table", return_value=[{"回购日期": "2026-10-15", "回购股数": 240000}]):
@@ -1515,6 +1516,61 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertTrue(scr_res.get("is_hk_intent"))
         self.assertIn("warning", scr_res)
         self.assertIn("暂不支持港股标的自动筛选", scr_res["warning"])
+
+    def test_v185_hk_minute_kline_and_day_amount(self) -> None:
+        """测试 D1/D3: 港股日内分钟线逐分钟切片聚合与日线不复权成交额非零"""
+        fin_gw = FinanceGateway()
+        # 1. 测试日线 adjust='none' 的成交额必须 > 0
+        res_day = fin_gw.stock_kline({"symbol": "00700", "period": "day", "count": 2, "adjust": "none"})
+        self.assertGreater(res_day["total_bars"], 0)
+        for b in res_day["klines"]:
+            self.assertGreater(b.get("amount", 0.0), 0.0)
+
+        # 2. 测试 60m 分钟线必须包含时分时间戳与日内聚合切片
+        res_60m = fin_gw.stock_kline({"symbol": "00700", "period": "60m", "count": 6})
+        self.assertGreater(res_60m["total_bars"], 0)
+        self.assertIn("港股分钟线覆盖说明", res_60m)
+        first_bar = res_60m["klines"][0]
+        self.assertIn(":", first_bar["time"])  # 包含时分，如 10:30
+
+    def test_v185_financial_cashflow_discrepancy_and_subtotal(self) -> None:
+        """测试 D2/D7/T3: 金融类现金流量表差额自陈、间接法声明、筹资流入小计完备性与净额键名双向镜像"""
+        fin_gw = FinanceGateway()
+        # 1. 测试 601318 金融现金流自陈与间接法
+        res_601318 = fin_gw.stock_financials({"symbol": "601318", "report_type": "cashflow", "limit_periods": 1})
+        st0 = res_601318["statements"][0]
+        self.assertIn("经营活动现金流入不可加总差额_原保险保费及拆入回购等金融科目缺项", st0)
+        self.assertIn("补充资料_间接法说明", st0)
+        # 双向镜像挂载测试
+        self.assertIn("经营活动现金流量净额", st0)
+        self.assertIn("经营活动产生的现金流量净额", st0)
+        self.assertEqual(st0["经营活动现金流量净额"], st0["经营活动产生的现金流量净额"])
+
+        # 2. 测试 301230 筹资流入小计绝不为 None
+        res_301230 = fin_gw.stock_financials({"symbol": "301230", "report_type": "cashflow", "limit_periods": 4})
+        for r in res_301230["statements"]:
+            self.assertIsNotNone(r.get("筹资活动现金流入小计"))
+
+    def test_v185_hk_f10_industry_and_shareholders_dedup(self) -> None:
+        """测试 D5/D6/D10: 港股 summary 所属行业非空、top_holders 单表规范与 shareholders 0股冗余清洗"""
+        fin_gw = FinanceGateway()
+        # 1. 测试 00700 summary 所属行业非空
+        res_sum = fin_gw.stock_f10({"symbol": "00700", "category": "summary"})
+        prof = res_sum["formatted_tables"]["company_profile"][0]
+        self.assertIn("所属行业", prof)
+        self.assertTrue(len(prof["所属行业"]) > 0)
+        self.assertIn("资讯科技", prof["所属行业"])
+
+        # 2. 测试 top_holders 仅包含单一 top_holders 表名，绝不重复
+        res_th = fin_gw.stock_f10({"symbol": "00700", "category": "top_holders"})
+        self.assertIn("top_holders", res_th["formatted_tables"])
+        self.assertNotIn("major_shareholders", res_th["formatted_tables"])
+
+        # 3. 测试 shareholders 清洗同日 0 股冗余穿透行
+        res_sh = fin_gw.stock_f10({"symbol": "00700", "category": "shareholders"})
+        events = res_sh["formatted_tables"]["shareholder_events"]
+        nas_2021 = [r for r in events if r.get("事件日期") == "2021-04-08" and "naspers" in str(r.get("持股人名字", "")).lower()]
+        self.assertEqual(len(nas_2021), 1)  # 严格为 1 条，已剔除涉及股份为 0 的附注行
 
 
 if __name__ == "__main__":
