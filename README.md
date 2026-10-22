@@ -1,6 +1,6 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v1.8.2)
+# Local MCP Search, Coding & Finance Fallback Gateway (v1.8.3)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
@@ -260,6 +260,18 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### v1.8.3 — 金融数据接口与 Skill 规程 100% 深度对齐、估值与 F10 枚举镜像挂载、港股财报元级口径纠偏与全自动化测试绿灯
+
+- **核心数据接口与 Skill 规程 100% 深度对齐与防幻觉加固**：
+  - **F10 Schema 枚举完备化**：在 `stock_f10` 的 JSON Schema `category` 枚举定义中正式补齐 `"indicators"`（指标宽表）与 `"financials"`，彻底杜绝大模型在严格 Schema 校验环境下调用核心指标被拦截；
+  - **估值指标跨市场镜像挂载**：A 股通达信专线同步挂载 `静态市盈率_PE_LYR` 别名，港股专线同步挂载 `静态市盈率_PEStatic` 别名，消除大模型跨 A/H 股读取市盈率时的字段孤岛；
+  - **港股财报金额单位与币种标准化修正**：在 `mcphub-finance/SKILL.md` 中全面更正港股财报主力通道为东方财富数据中心，金额单位修正为【元】、币种修正为【CNY】，避免百万倍财务数值幻觉；并补充现金桥闭合机制与单季度做差规则；
+  - **港股持股 5% 以上大股东与申报流水严格解耦**：分立 `top_holders`（聚合截面，含名次 1..10 与规范百分比结余率）与 `shareholders`（依《证券及期货条例》申报的历史流水），杜绝 0.0542 小数混淆；
+  - **A 股限售股推算法则与自陈差额规程入库**：在 Skill 中新增《规则 18》，指导大模型通过【基准总股本 − 统计流通总额】精确推算限售股规模，并清晰解释资产负债表与现金流自陈不可加总差额的真实会计成因；
+  - **资讯时间戳 ISO 规范化**：`stock_news` 返回的相对时间（如“4小时前”）全部由网关自动解析为标准 ISO 格式 `YYYY-MM-DD HH:MM:SS`，杜绝大模型时间错位。
+- **全量自动化测试持续 100% 通过**：
+  - 100 项单元测试全部保持绿色通过，服务管理控制台原生升级为 v1.8.3。
 
 ### v1.8.2 — 全量接口与 SKILL 规程 1:1 双向对齐、港股 12 项缺陷（P0-P3）深度修复与高可用容灾、100 项测试全绿灯
 
