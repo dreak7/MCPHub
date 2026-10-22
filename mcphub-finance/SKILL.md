@@ -1,7 +1,7 @@
 ---
 name: mcphub-finance
 description: "Official financial and securities analysis skill for MCPHub. Provides standard SOPs for A-share and HK-share market analysis, real-time Level-1 quotes, indicators, F10, financials, and multi-source cross-verification. MCPHub 股票与证券金融专属调用规程。"
-version: 1.1.0
+version: 1.2.0
 author: MCPHub
 license: MIT
 platforms: [windows, macos, linux]
@@ -42,7 +42,7 @@ metadata:
 (6位代码: 60/00/30) (5位代码: 00700/09988)          (限定A股范围)   + multi_web_search
    │                 │
    ├─ quotes (五档盘口)├─ quotes (一档+双口径市值)
-   ├─ kline (技术指标) ├─ kline (60m跨午休切分)
+   ├─ kline (技术指标) ├─ kline (日内分钟切片/60m跨午休)
    ├─ financials     ├─ financials (单季做差推算)
    │  (isjr金融/工商业) └─ f10 (申报顺位+恒生行业)
    └─ f10 (隔日动态复核)
@@ -177,12 +177,12 @@ metadata:
 2. **实时行情与双口径市值**：
    - 调 `stock_quotes(symbol="00700")`：获取港币最新价与买卖一档，读取 `港股市值_H股流通市值_亿港元`（纯港股在港规模）与 `总市值_全部股本乘H股价_亿港元`（全股本混合参考），明确 PE_TTM 底层包含汇率换算；
 3. **多周期走势**：
-   - 调 `stock_kline(symbol="00700", period="60m", count=12)`：结合《港股60分钟跨午休切分机制说明》分析盘中波段；调 `period="day"` 分析长期趋势；
+   - 调 `stock_kline(symbol="00700", period="60m", count=6)`：结合《港股60分钟跨午休切分机制说明》分析日内分钟切片走势；调 `period="day"` 分析跨日与中长期趋势（日线成交额已全面纠偏）；
 4. **单季度真实财务拆解**：
    - 调 `stock_financials(symbol="00700", report_type="income", period_type="quarter", limit_periods=4)`：直接读取网关利用前驱缓冲区推算出的**真实单季营业额（2025Q3 约为 1,902.76 亿，杜绝 5,518 亿累计值虚增）**，查看 `单季度计算说明`；
 5. **基本面与大股东申报**：
-   - 调 `stock_f10(symbol="00700", category="top_holders")`：获取持股 5% 以上大股东的最新好仓申报顺位（如 Naspers / Prosus 顺位 1，排重历史旧申报）；
-   - 调 `stock_f10(symbol="00700", category="concepts")`：读取标准恒生行业分类（如“资讯科技业 - 互联网服务”）。
+   - 调 `stock_f10(symbol="00700", category="top_holders")`：获取持股 5% 以上大股东的最新好仓申报顺位（如 Naspers / Prosus 顺位 1，已排重历史旧申报并剔除冗余表）；
+   - 调 `stock_f10(symbol="00700", category="summary")` 或 `concepts`：读取标准恒生行业分类（如“资讯科技业 - 互联网服务”），彻底杜绝空串。
 
 ---
 
