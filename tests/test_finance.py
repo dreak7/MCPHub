@@ -1166,9 +1166,360 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertIn("summary", n0)
             self.assertIn("snippet", n0)
 
+    # =========================================================================
+    # 【功能块 T1：P0 金融类股票财报双轨自适应与会计准则校验测试】
+    # - 输入：isjr=1 的金融标的 (银行/保险) 与 isjr=0 的工商业标的
+    # - 功能：验证 isjr 标志精准识别、金融与非金融映射表自适应挂载、0 裸 N 码外泄与恒等式校验
+    # - 输出：单元断言通过
+    # =========================================================================
+    def test_p0_financial_statements_dual_track(self) -> None:
+        """测试 P0 缺陷：isjr=1 金融类标的自适应匹配金融企业会计准则映射表"""
+        fin_gw = FinanceGateway()
+
+        # 1. 模拟金融类标的 (isjr=1，101列资产负债表与57列利润表)
+        mock_fin_balance_raw = {
+            "ResultSets": [
+                {"ColName": ["isjr"], "Content": [["1"]]},
+                {
+                    "ColName": ["N001", "N005", "N025", "N046", "N047", "N056", "N084", "N097", "N098"],
+                    "Content": [["2024-09-30", "3500000000000.0", "28000000000000.0", "57070593000000.0", "1200000000000.0", "42000000000000.0", "52714749000000.0", "4355844000000.0", "4300000000000.0"]]
+                }
+            ]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_fin_balance_raw):
+            res_b = fin_gw.stock_financials({"symbol": "601398", "report_type": "balance", "limit_periods": 1})
+            self.assertTrue(res_b.get("is_financial"))
+            self.assertIn("金融企业会计准则", res_b.get("accounting_standard", ""))
+            stmt = res_b["statements"][0]
+            self.assertEqual(stmt.get("资产总计"), 57070593000000.0)
+            self.assertEqual(stmt.get("负债合计"), 52714749000000.0)
+            self.assertEqual(stmt.get("所有者权益合计"), 4355844000000.0)
+            self.assertEqual(stmt.get("现金及存放中央银行款项"), 3500000000000.0)
+            self.assertEqual(stmt.get("发放贷款及垫款"), 28000000000000.0)
+            self.assertNotIn("流动资产合计", stmt)
+            # 验证无裸 N 码
+            n_codes = [k for k in stmt.keys() if k.startswith("N0") or k.startswith("N1")]
+            self.assertEqual(len(n_codes), 0)
+
+        # 2. 模拟工商业实体 (isjr=0，81列工商业模板)
+        mock_non_fin_raw = {
+            "ResultSets": [
+                {"ColName": ["isjr"], "Content": [["0"]]},
+                {
+                    "ColName": ["N001", "N002", "N015", "N046", "N080"],
+                    "Content": [["2024-09-30", "150000000000.0", "220000000000.0", "28000000000.0", "300000000000.0"]]
+                }
+            ]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_non_fin_raw):
+            res_nb = fin_gw.stock_financials({"symbol": "600519", "report_type": "balance", "limit_periods": 1})
+            self.assertFalse(res_nb.get("is_financial"))
+            self.assertIn("一般工商业企业会计准则", res_nb.get("accounting_standard", ""))
+            stmt_n = res_nb["statements"][0]
+            self.assertEqual(stmt_n.get("货币资金"), 150000000000.0)
+            self.assertEqual(stmt_n.get("流动资产合计"), 220000000000.0)
+            self.assertNotIn("拆出资金", stmt_n)
+
+    # =========================================================================
+    # 【功能块 T2：P1 盘口字段清洗与数值类型对齐测试】
+    # - 输入：通达信原始盘口数据 (含 Yield/Jjjz 字段串扰与 str/float 漂移)
+    # - 功能：验证 Yield 拦截、股票剔除 Jjjz、ItemNum 转明细笔数且为 int、整型字段转 int
+    # - 输出：单元断言通过
+    # =========================================================================
+    def test_p1_quotes_field_cleanup_and_type_alignment(self) -> None:
+        """测试 P1 缺陷：盘口 Yield 拦截、Jjjz 股本串扰拦截以及 str/int/float 数值类型规范化"""
+        fin_gw = FinanceGateway()
+
+        mock_stock_quote = {
+            "HQInfo": {
+                "Now": 18.55,
+                "Close": 18.20,
+                "Open": 18.30,
+                "MaxP": 18.90,
+                "MinP": 18.15,
+                "Volume": "125678",      # 原始为 str
+                "Amount": "233123456.0", # 原始为 str
+                "Inside": "62000",        # 原始为 str
+                "Outside": "63678",       # 原始为 str
+                "CJBS": "4560",           # 原始为 str
+                "RestVol": "120",         # 原始为 str
+                "ItemNum": "88",          # 原始为 str
+                "Yield": 350000000000.0,  # 严重串扰：流通股本混入 Yield
+                "Jjjz": 350000000000.0,   # 严重串扰：股票非基金却混入 Jjjz
+            },
+            "ExtInfo": {
+                "ZGB": 100000.0,
+                "LTGB": 80000.0,
+                "BelongRZRQ": "1",
+                "BelongHGTAG": "1",
+                "BelongSGTAG": "0",
+                "BelongHS300": "1",
+                "HasKQZ": "0",
+                "FreeLtgb": "75000.5",
+                "HYZAF": "2.35",
+            }
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_stock_quote):
+            res_q = fin_gw.stock_quotes({"symbol": "601398"})
+            hq = res_q["盘口核心行情"]
+            ext = res_q["估值与基本盘面"]
+
+            # 1. 验证 Yield 与 Jjjz 彻底剔除
+            self.assertNotIn("Yield", hq)
+            self.assertNotIn("收益率_Yield", hq)
+            self.assertNotIn("Jjjz", hq)
+            self.assertNotIn("基金净值", hq)
+
+            # 2. 验证 ItemNum 汉化且转为 int
+            self.assertNotIn("ItemNum", hq)
+            self.assertIn("明细笔数", hq)
+            self.assertIsInstance(hq["明细笔数"], int)
+            self.assertEqual(hq["明细笔数"], 88)
+
+            # 3. 验证整型指标规范化为 int
+            for ik in ("成交量_手", "内盘_手", "外盘_手", "成交笔数", "剩余委托量", "明细笔数"):
+                self.assertIsInstance(hq[ik], int, f"{ik} 应该为 int 类型")
+
+            # 4. 验证浮点型指标规范化为 float
+            for fk in ("现价", "昨收", "今开", "最高价", "最低价", "成交额_元"):
+                self.assertIsInstance(hq[fk], float, f"{fk} 应该为 float 类型")
+
+            # 5. 验证 ExtInfo 字段汉化与类型
+            self.assertEqual(ext.get("是否属于融资融券标的"), 1)
+            self.assertEqual(ext.get("是否属于沪股通标的"), 1)
+            self.assertEqual(ext.get("是否属于深股通标的"), 0)
+            self.assertEqual(ext.get("是否属于沪深300标的"), 1)
+            self.assertEqual(ext.get("是否含权证或转债"), 0)
+            self.assertEqual(ext.get("自由流通股本_万股"), 75000.5)
+            self.assertEqual(ext.get("行业涨跌幅_pct"), 2.35)
+            for raw_k in ("BelongRZRQ", "BelongHGTAG", "BelongSGTAG", "BelongHS300", "HasKQZ", "FreeLtgb", "HYZAF"):
+                self.assertNotIn(raw_k, ext)
+
+    # =========================================================================
+    # 【功能块 T3：P2 分钟线时间戳纠偏与 events 空记录提示测试】
+    # - 输入：底层返回 46800 秒 (13:00) 的上午收市 bar，以及无催化记录的 events 表
+    # - 功能：验证 13:00 强制纠正为 11:30，以及 events 无记录时返回明确无记录说明
+    # - 输出：单元断言通过
+    # =========================================================================
+    def test_p2_kline_1300_fix_and_events_empty_notice(self) -> None:
+        """测试 P2 缺陷：分钟线 13:00 时间戳纠正为 11:30，以及 events 空记录注入说明"""
+        fin_gw = FinanceGateway()
+
+        # 1. 测试分钟线时间戳纠偏
+        mock_kline_raw = {
+            "ListItem": [
+                {"Item": ["20261021", 41400, 10.0, 10.2, 9.9, 10.1, 5000000.0, 50000.0]},  # 11:30 前
+                {"Item": ["20261021", 46800, 10.1, 10.3, 10.0, 10.2, 6000000.0, 60000.0]},  # 46800秒 原为 13:00
+            ],
+            "AttachInfo": {"Name": "测试股票"}
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_kline_raw):
+            res_k = fin_gw.stock_kline({"symbol": "002223", "period": "1m", "count": 2})
+            bars = res_k["klines"]
+            # 验证第二根 bar 时间纠正为 11:30，杜绝 13:00
+            self.assertEqual(bars[1]["time"], "2026-10-21 11:30")
+            self.assertNotIn("13:00", [b["time"] for b in bars])
+
+        # 2. 测试 events 空记录无静默
+        mock_events_raw = {
+            "ResultSets": [
+                {"ColName": ["cjrq", "sjmc", "rec_id", "sjxz", "cjrzdf"], "Content": []}
+            ]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_events_raw):
+            res_ev = fin_gw.stock_f10({"symbol": "688475", "category": "events"})
+            self.assertIn("无记录说明", res_ev)
+            self.assertIn("事件库属性说明", res_ev)
+            self.assertIn("近期事件库无记录", res_ev["无记录说明"])
+
+    # =========================================================================
+    # 【功能块 T4：P3 F10 摘要表与融资融券裸英文字段汉化测试】
+    # - 输入：包含 jjrq/mll/name/zzhy/pjgdsyll/gxrq/bshow 的 F10 返回字典
+    # - 功能：验证无条件弹出英文原键并替换为标准中文标签，杜绝任何英文字段外泄
+    # - 输出：单元断言通过
+    # =========================================================================
+    def test_p3_f10_and_margin_trading_english_key_elimination(self) -> None:
+        """测试 P3 缺陷：F10 摘要表与融资融券表中的裸英文字段全部汉化"""
+        fin_gw = FinanceGateway()
+
+        # 1. 测试 summary 表各 table 的英文键汉化
+        mock_summary_raw = {
+            "ResultSets": [
+                {
+                    "ColName": ["jjrq", "kfjlr", "jqjzcsyl", "gsdw"],
+                    "Content": [[None, 45000000000.0, 16.5, "白酒龙头"]]
+                },
+                {"ColName": ["dummy"], "Content": []}, # table1
+                {"ColName": ["dummy"], "Content": []}, # table2
+                {"ColName": ["dummy"], "Content": []}, # table3
+                {
+                    "ColName": ["bgq", "mgsy", "mgjzc", "yysr", "gmjlr", "mll", "zcfzl"],
+                    "Content": [["2024-09-30", 35.5, 180.2, 90000000000.0, 45000000000.0, None, 15.2]]
+                },
+                {"ColName": ["dummy"], "Content": []}, # table5
+                {
+                    "ColName": ["sylttm", "syllyr", "sjl", "zsz", "zgb", "ltag"],
+                    "Content": [[25.4, 28.2, 8.5, 2000000000000.0, 1250000000.0, 1250000000.0]]
+                },
+                {"ColName": ["dummy"], "Content": []}, # table7
+                {
+                    "ColName": ["name", "zzhy", "pjgdsyll", "gxrq"],
+                    "Content": [["贵州茅台", "酒、饮料和精制茶制造业", 19.74, "2026-10-21"]]
+                }
+            ]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_summary_raw):
+            res_sum = fin_gw.stock_f10({"symbol": "600519", "category": "summary"})
+            tables = res_sum["formatted_tables"]
+
+            # 验证 table0
+            t0_row = tables["table0"][0]
+            self.assertNotIn("jjrq", t0_row)
+            self.assertIn("业绩披露日期", t0_row)
+            self.assertIn("扣非净利润_元", t0_row)
+
+            # 验证 table4
+            t4_row = tables["table4"][0]
+            self.assertNotIn("mll", t4_row)
+            self.assertIn("毛利率_pct", t4_row)
+            self.assertIn("每股收益_EPS", t4_row)
+
+            # 验证 table6
+            t6_row = tables["table6"][0]
+            self.assertNotIn("sylttm", t6_row)
+            self.assertNotIn("sjl", t6_row)
+            self.assertIn("动态市盈率_PE_TTM", t6_row)
+            self.assertIn("市净率_PB_昨收", t6_row)
+
+            # 验证 table8
+            t8_row = tables["table8"][0]
+            for raw_k in ("name", "zzhy", "pjgdsyll", "gxrq"):
+                self.assertNotIn(raw_k, t8_row)
+            self.assertEqual(t8_row.get("股票简称"), "贵州茅台")
+            self.assertEqual(t8_row.get("证监会行业"), "酒、饮料和精制茶制造业")
+            self.assertEqual(t8_row.get("平均股东收益率_pct"), 19.74)
+            self.assertEqual(t8_row.get("财务更新日期"), "2026-10-21")
+
+        # 2. 测试 margin_trading 的 table2 bshow 汉化
+        mock_margin_raw = {
+            "ResultSets": [
+                {"ColName": ["T001", "T003"], "Content": [["2026-10-21", 100000000.0]]}, # table0
+                {"ColName": ["bdrq", "T033"], "Content": [["2026-10-21", 125000.0]]},     # table1
+                {"ColName": ["bshow"], "Content": [[1]]},                                   # table2
+            ]
+        }
+        with unittest.mock.patch.object(fin_gw.tdx_client, "_post", return_value=mock_margin_raw):
+            res_margin = fin_gw.stock_f10({"symbol": "600519", "category": "margin_trading"})
+            m_tables = res_margin["formatted_tables"]
+            t2_row = m_tables["table2"][0]
+            self.assertNotIn("bshow", t2_row)
+            self.assertIn("是否展示两融标的", t2_row)
+            self.assertEqual(t2_row["是否展示两融标的"], 1)
+
+
+    def test_hk_invalid_symbol_error_contract(self) -> None:
+        """测试 P0: 无效港股代码 001548 的统一错误契约防御（全部抛出明确 ValueError，lookup 返回 exact_match=False）"""
+        fin_gw = FinanceGateway()
+        for fn in [
+            lambda: fin_gw.stock_quotes({"symbol": "001548"}),
+            lambda: fin_gw.stock_kline({"symbol": "001548"}),
+            lambda: fin_gw.stock_news({"symbol": "001548"}),
+            lambda: fin_gw.stock_financials({"symbol": "001548", "report_type": "income"}),
+            lambda: fin_gw.stock_f10({"symbol": "001548", "category": "summary"}),
+        ]:
+            with self.assertRaises(ValueError):
+                fn()
+
+        lookup_res = fin_gw.stock_lookup({"query": "001548", "range": "HK-GP"})
+        self.assertFalse(lookup_res.get("exact_match", True))
+        self.assertIsNone(lookup_res.get("matched_code"))
+        self.assertIn("未检索到代码为", lookup_res.get("未命中说明", ""))
+
+    def test_hk_indicators_currency_and_market_cap_alignment(self) -> None:
+        """测试 P1: indicators 币种校准为法定损益表同源 CNY，并注入市值口径说明"""
+        fin_gw = FinanceGateway()
+        res = fin_gw.tdx_client._get_eastmoney_hk_financials("00700", report_type="summary", limit_periods=1)
+        if res:
+            first_p = res[0]
+            self.assertEqual(first_p.get("币种"), "CNY")
+            self.assertIn("实际记账编报币种为【CNY】", first_p.get("币种说明", ""))
+            self.assertIn("总市值_全部股本乘H股价_港元", first_p)
+            self.assertIn("港股市值_H股流通市值_港元", first_p)
+            self.assertIn("市值口径说明", first_p)
+
+    def test_hk_single_quarter_differencing_not_inflated(self) -> None:
+        """测试 P1: 单季度模式 (quarter) 自动做差，最早一期正确扣减同财年前期（00700 2025Q3 为单季真值 ~1903 亿，非累计 5518 亿）"""
+        fin_gw = FinanceGateway()
+        res = fin_gw.stock_financials({"symbol": "00700", "report_type": "income", "period_type": "quarter", "limit": 4})
+        stmts = res.get("statements", [])
+        self.assertTrue(len(stmts) >= 1)
+        for s in stmts:
+            d = s.get("截止日期")
+            rev = s.get("营业额") or s.get("营业收入") or s.get("营业收入_元")
+            if d == "2025-09-30" and rev is not None:
+                # 真实单季度为 5518亿 - 3615亿 = 1902.76亿，必须远小于 3000 亿，严禁返回 5518 亿累计值
+                self.assertLess(float(rev), 300000000000.0)
+
+    def test_hk_top_holders_and_shareholders_contract(self) -> None:
+        """测试 P2: top_holders 采用申报顺位与好仓排重，shareholders 剔除重复表"""
+        fin_gw = FinanceGateway()
+        # 1. 验证 shareholders 仅保留一张 shareholder_events 表
+        res_sh = fin_gw.stock_f10({"symbol": "00700", "category": "shareholders"})
+        sh_tables = res_sh.get("formatted_tables", {})
+        self.assertIn("shareholder_events", sh_tables)
+        self.assertNotIn("major_shareholders", sh_tables)
+
+        # 2. 验证 top_holders 采用申报顺位，且均为好仓 (L)
+        res_th = fin_gw.stock_f10({"symbol": "00700", "category": "top_holders"})
+        th_list = res_th.get("formatted_tables", {}).get("top_holders", [])
+        for h in th_list:
+            self.assertIn("申报顺位", h)
+            self.assertNotIn("名次", h)
+            self.assertIn(h.get("目前类别"), ("L", "好仓", "", None))
+
+    def test_hk_concepts_industry_always_populated(self) -> None:
+        """测试 P2: concepts 恒生行业分类非空且准确映射（如 00700 资讯科技、00753 航空物流、00168 饮料食品、00728 电讯）"""
+        fin_gw = FinanceGateway()
+        for code, expected_kw in [
+            ("00700", "资讯科技"),
+            ("00753", "航空"),
+            ("00168", "饮料与食品"),
+            ("00728", "电讯"),
+        ]:
+            res = fin_gw.stock_f10({"symbol": code, "category": "concepts"})
+            concepts = res.get("formatted_tables", {}).get("concepts", [])
+            ind_name = None
+            for c in concepts:
+                if c.get("概念分类") == "恒生行业分类":
+                    ind_name = c.get("行业名称")
+            self.assertIsNotNone(ind_name)
+            self.assertTrue(len(ind_name) > 0)
+            self.assertIn(expected_kw, ind_name)
+
+    def test_hk_market_cap_and_pe_fx_disclosure(self) -> None:
+        """测试 P2/P3: 港股市值细分为纯 H 股与全股本混合参考两口径，估值口径披露 PETTM 与 0.868~0.872 汇率折算"""
+        fin_gw = FinanceGateway()
+        quotes_res = fin_gw.stock_quotes({"symbol": "00753"})
+        val_panel = quotes_res.get("估值与基本盘面", {})
+        self.assertIn("港股市值_H股流通市值_亿港元", val_panel)
+        self.assertIn("总市值_全部股本乘H股价_亿港元", val_panel)
+        self.assertIn("市值口径说明", val_panel)
+        self.assertIn("估值口径说明", val_panel)
+        self.assertIn("0.868~0.872", val_panel["估值口径说明"])
+
+    def test_screener_hk_query_warning(self) -> None:
+        """测试 P3: screener 查询包含港股关键词时注入明确的市场范围提示与 warning 警示"""
+        fin_gw = FinanceGateway()
+        scr_res = fin_gw.stock_screener({"message": "港股 腾讯"})
+        self.assertEqual(scr_res.get("market_scope"), "A股 (中国大陆交易所：沪市/深市/北交所)")
+        self.assertTrue(scr_res.get("is_hk_intent"))
+        self.assertIn("warning", scr_res)
+        self.assertIn("暂不支持港股标的自动筛选", scr_res["warning"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

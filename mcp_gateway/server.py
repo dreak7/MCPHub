@@ -217,10 +217,14 @@ class McpServer:
             return self._result(request_id, {"content": [{"type": "text", "text": encoded}], "structuredContent": payload, "isError": False})
         except SearchError as exc:
             self.logger.warning("Gateway request failed: %s", exc)
-            return self._result(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
+            err_payload = {"error": str(exc), "code": -1, "message": str(exc), "isError": True}
+            err_encoded = json.dumps(err_payload, ensure_ascii=False)
+            return self._result(request_id, {"content": [{"type": "text", "text": err_encoded}], "structuredContent": err_payload, "isError": True})
         except Exception as exc:
             self.logger.warning("Tool %s execution failed: %s", tool_name, exc)
-            return self._result(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
+            err_payload = {"error": str(exc), "code": -1, "message": str(exc), "isError": True}
+            err_encoded = json.dumps(err_payload, ensure_ascii=False)
+            return self._result(request_id, {"content": [{"type": "text", "text": err_encoded}], "structuredContent": err_payload, "isError": True})
 
     @staticmethod
     def _result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
