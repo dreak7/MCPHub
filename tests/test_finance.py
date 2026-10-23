@@ -740,10 +740,12 @@ class TestFinanceGateway(unittest.TestCase):
             fin_gw.stock_kline({"symbol": bad_code})
         self.assertIn("未查询到证券代码 '123456' 的历史 K 线数据", str(cm_k.exception))
 
-        # 3. 验证 stock_financials 显式报错（不再返回 period_count: 0 与空表壳）
-        with self.assertRaises(ValueError) as cm_f:
-            fin_gw.stock_financials({"symbol": bad_code})
-        self.assertIn("未查询到证券代码 '123456' 的财务报表数据", str(cm_f.exception))
+        # 3. 验证 stock_financials 显式报错（修复 P0：无论 report_type 与 period_type 为何种组合，无效代码均必须前置拦截，杜绝服务端游标泄露）
+        for rt in ("balance", "income", "cashflow"):
+            for pt in ("report", "quarter"):
+                with self.assertRaises(ValueError) as cm_f:
+                    fin_gw.stock_financials({"symbol": bad_code, "report_type": rt, "period_type": pt})
+                self.assertIn("未查询到证券代码 '123456' 的财务报表数据", str(cm_f.exception))
 
         # 4. 验证 stock_f10 显式报错（不再返回 ErrorCode: 0 假成功空表）
         with self.assertRaises(ValueError) as cm_f10:
@@ -1774,6 +1776,19 @@ class TestFinanceGateway(unittest.TestCase):
         # 7. 验证 P3-2: lhb 具备盘后入库提示
         res_lhb = fin_gw.stock_f10({"symbol": "688499", "category": "lhb"})
         self.assertIn("盘后入库说明", res_lhb)
+
+    def test_v190_quarter_invalid_code_no_session_leakage(self) -> None:
+        """测试 v1.9.0 P0: stock_financials 在 period_type='quarter' 下严密拦截无效代码，杜绝服务端会话泄漏上一只股票数据"""
+        fin_gw = FinanceGateway()
+        
+        # 1. 模拟用户实测复现路径：先查有效代码 600694 (或 601658)，再查无效代码 610617 / 000000
+        # 无论在任何状态下，查询无效代码 610617 必须显式抛出 ValueError
+        for bad_code in ("610617", "000000"):
+            for rt in ("balance", "income", "cashflow"):
+                for pt in ("report", "quarter"):
+                    with self.assertRaises(ValueError) as cm:
+                        fin_gw.stock_financials({"symbol": bad_code, "report_type": rt, "period_type": pt, "limit_periods": 4})
+                    self.assertIn(f"未查询到证券代码 '{bad_code}' 的财务报表数据", str(cm.exception))
 
 
 if __name__ == "__main__":

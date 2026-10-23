@@ -826,6 +826,24 @@ class AStockEngine(BaseMarketEngine):
         clean_code = re.sub(r"[^\d]", "", symbol)
         if len(clean_code) == 5 or symbol.strip().upper().startswith("HK"):
             raise ValueError(f"标的代码 '{symbol}' 为港股标的，请调用港股引擎。")
+        if not clean_code or len(clean_code) != 6:
+            raise ValueError(f"无效的证券代码 '{symbol}'，A 股证券标的代码必须为 6 位数字（如 '600519'）。建议先调用 stock_lookup 工具核对标准代码。")
+
+        # =========================================================================
+        # 【功能块 7.1：A股财报统一前置正主有效性拦截守卫 (修复 P0·本轮新发现)】
+        # - 输入：clean_code (6位A股代码)
+        # - 功能：无论请求何种报表类型与单季/累计口径，统一在发起底层 TQLEX 报表查询前
+        #         核验标的存在性。彻底杜绝无效/停牌退市代码在 period_type='quarter'
+        #         等分支下因上游通达信服务端会话游标缓存残留而泄漏上一只股票财报数据的致命缺陷
+        # - 输出：合法标的放行，非法/无效代码直接显式抛出标准明确的 ValueError
+        # =========================================================================
+        entity = self.resolve_entity(clean_code)
+        if entity is None:
+            raise ValueError(
+                f"未查询到证券代码 '{symbol}' 的财务报表数据（代码不存在或非有效 A 股/港股标的，无财报披露信息）。"
+                "建议先调用 stock_lookup 工具核对标准证券名称与代码。"
+            )
+
         rtype = report_type.lower()
         fixed_tag = "00102" if period_type.lower() == "quarter" else "00101"
 
