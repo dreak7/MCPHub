@@ -1126,11 +1126,13 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertIn("会计口径与说明", res_fin)
         self.assertIn("会计口径与合并说明", res_fin)
 
-        # 6. stock_f10: 验证 category 别名 (industry, dividends, repurchases, lhb)
+        # 6. stock_f10: 验证 category (industry, dividends, repurchases, lhb)
         res_f10_ind = fin_gw.stock_f10({"symbol": "600519", "category": "industry"})
-        self.assertEqual(res_f10_ind["category"], "concepts")
-        res_f10_rep = fin_gw.stock_f10({"symbol": "600519", "category": "buyback"})
+        self.assertEqual(res_f10_ind["category"], "industry")
+        res_f10_rep = fin_gw.stock_f10({"symbol": "600519", "category": "repurchases"})
         self.assertEqual(res_f10_rep["category"], "repurchases")
+        res_f10_bb = fin_gw.stock_f10({"symbol": "600519", "category": "buyback"})
+        self.assertEqual(res_f10_bb["category"], "buyback")
 
         # 7. stock_screener: 验证 top-level message 与 stock 列表中 symbol, matched_indicators
         mock_raw_screener = [
@@ -1665,16 +1667,17 @@ class TestFinanceGateway(unittest.TestCase):
         res_bal = fin_gw.stock_financials({"symbol": "600519", "report_type": "balance", "limit_periods": 1})
         self.assertIn("非流动资产不可加总差额_新租赁准则使用权资产等", res_bal["statements"][0])
 
-        # 9. 验证 Issue 10 & 13 (P2/P3): industry 分类字段汉化映射无裸拼音键
+        # 9. 验证 P2-1: industry 分类返回真实证监会与申万行业分类
         res_ind = fin_gw.stock_f10({"symbol": "600519", "category": "industry"})
-        t0 = res_ind.get("formatted_tables", {}).get("table0", [])
-        if t0:
-            self.assertIn("题材概念名称", t0[0])
+        t_ind = res_ind.get("formatted_tables", {}).get("industry", [])
+        if t_ind:
+            self.assertIn("证监会行业", t_ind[0])
+            self.assertIn("申万一级行业", t_ind[0])
 
-        # 10. 验证 Issue 11 (P2): A 股 repurchases 返回结构化空表与明确无记录说明
+        # 10. 验证 Issue 11 (P2 / P2-7): A 股 repurchases 真实权威专线接入，返回结构化回购表
         res_rep = fin_gw.stock_f10({"symbol": "600519", "category": "repurchases"})
-        self.assertEqual(len(res_rep.get("formatted_tables", {}).get("repurchases", [])), 0)
-        self.assertIn("无记录说明", res_rep)
+        self.assertIn("repurchases", res_rep.get("formatted_tables", {}))
+        self.assertIn("eastmoney", res_rep.get("source", ""))
 
         # 11. 验证 Issue 12 (P2): 港股 52 周最高/最低前复权与分红口径说明
         q_hk = fin_gw.stock_quotes({"symbol": "09896"})
@@ -1707,6 +1710,70 @@ class TestFinanceGateway(unittest.TestCase):
         res_news = fin_gw.stock_news({"symbol": "000063", "limit": 5})
         for n in res_news.get("news", []):
             self.assertNotIn("通则康威", n.get("title", ""))
+
+    def test_v188_empirical_fixes(self) -> None:
+        """测试 v1.8.8: 实测 9 项缺陷与口径陷阱全面回归验证"""
+        fin_gw = FinanceGateway()
+
+        # 1. 验证 P1-1 & P2-4: top_holders 持股比例分母对齐真实法定总股本，反推限售股非空
+        res_h = fin_gw.stock_f10({"symbol": "600875", "category": "top_holders"})
+        t0 = res_h.get("formatted_tables", {}).get("table0", [])
+        self.assertTrue(len(t0) > 0)
+        self.assertEqual(t0[0].get("总股本_股"), 3458360326)
+        self.assertEqual(t0[0].get("限售流通股合计_股"), 786993731)
+
+        t1 = res_h.get("formatted_tables", {}).get("table1", [])
+        self.assertTrue(len(t1) > 0)
+        # 东方电气第一大股东 中国东方电气集团 持股比例 28.617% (杜绝 43.726% 流通A股高估)
+        self.assertEqual(t1[0].get("持股比例_pct"), 28.617)
+        self.assertEqual(t1[0].get("持股占总股本比例_pct"), 28.617)
+        self.assertEqual(t1[0].get("持股占流通A股比例_pct"), 43.726)
+        self.assertIn("持股比例分母口径说明", res_h)
+
+        # 2. 验证 P1-2: 300371 f10 summary 动态市盈率_PE_TTM 期次落后自算校准为 80.31
+        res_sum = fin_gw.stock_f10({"symbol": "300371", "category": "summary"})
+        t6 = res_sum.get("formatted_tables", {}).get("table6", [])
+        self.assertTrue(len(t6) > 0)
+        self.assertEqual(t6[0].get("动态市盈率_PE_TTM"), 80.31)
+        self.assertIn("PE_TTM校准说明", t6[0])
+
+        # 3. 验证 P1-3: 300371 stock_quotes 派生每股指标对齐三季报
+        q_300371 = fin_gw.stock_quotes({"symbol": "300371"})
+        ext_371 = q_300371.get("估值与基本盘面", {})
+        self.assertEqual(ext_371.get("报告期每股收益_EPS"), 0.1373)
+        self.assertEqual(ext_371.get("每股净资产_BPS"), 5.8093)
+        self.assertEqual(ext_371.get("动态市盈率_PE"), 52.08)
+        self.assertEqual(ext_371.get("市净率_PB"), 1.63)
+        self.assertEqual(ext_371.get("最新财报报告期"), "2026-09-30")
+
+        # 4. 验证 P2-2: 601658 银行 2026 一季报筹资流入小计结构闭合
+        res_cf_bank = fin_gw.stock_financials({"symbol": "601658", "report_type": "cashflow", "limit_periods": 4})
+        q1_bank = None
+        for s in res_cf_bank.get("statements", []):
+            if str(s.get("报告期")).startswith("2026-03-31"):
+                q1_bank = s
+                break
+        if q1_bank:
+            self.assertIsNotNone(q1_bank.get("筹资活动现金流入小计"))
+            self.assertIn("筹资流入说明", q1_bank)
+
+        # 5. 验证 P2-3: indicators 与 financials, repurchases 与 buyback 参数区分力
+        res_ind = fin_gw.stock_f10({"symbol": "600519", "category": "indicators"})
+        res_fin = fin_gw.stock_f10({"symbol": "600519", "category": "financials"})
+        self.assertNotEqual(set(res_ind.get("formatted_tables", {}).keys()), set(res_fin.get("formatted_tables", {}).keys()))
+
+        res_rep = fin_gw.stock_f10({"symbol": "600519", "category": "repurchases"})
+        res_bb = fin_gw.stock_f10({"symbol": "600519", "category": "buyback"})
+        self.assertNotEqual(set(res_rep.get("formatted_tables", {}).keys()), set(res_bb.get("formatted_tables", {}).keys()))
+
+        # 6. 验证 P3-1: 610617 stock_lookup 杜绝噪音 600470
+        res_lk = fin_gw.stock_lookup({"query": "610617", "range": "AG"})
+        cand_symbols = [c.get("symbol") for c in res_lk.get("candidates", [])]
+        self.assertNotIn("600470", cand_symbols)
+
+        # 7. 验证 P3-2: lhb 具备盘后入库提示
+        res_lhb = fin_gw.stock_f10({"symbol": "688499", "category": "lhb"})
+        self.assertIn("盘后入库说明", res_lhb)
 
 
 if __name__ == "__main__":
