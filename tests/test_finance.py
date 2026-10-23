@@ -1616,6 +1616,84 @@ class TestFinanceGateway(unittest.TestCase):
                 if "催化日期" in r and r["催化日期"]:
                     self.assertRegex(str(r["催化日期"]), r"^\d{4}-\d{2}-\d{2}$")
 
+    def test_v187_empirical_fixes(self) -> None:
+        """测试 v1.8.7: 实测 14 项缺陷（P0-P3）全面回归验证"""
+        fin_gw = FinanceGateway()
+
+        # 1. 验证 Issue 1 (P0): A 股 stock_f10 支持 indicators / financials 枚举
+        res_ind = fin_gw.stock_f10({"symbol": "600519", "category": "indicators"})
+        self.assertIn("indicators", res_ind.get("formatted_tables", {}))
+        self.assertIn("核心财务与经营指标概览", res_ind.get("category_name", ""))
+
+        # 2. 验证 Issue 2 (P0): stock_lookup 市场范围跨市场隔离与 exact_match 精确匹配
+        res_lk_ag = fin_gw.stock_lookup({"query": "09896", "range": "AG"})
+        self.assertFalse(res_lk_ag.get("exact_match"))
+        res_lk_hk = fin_gw.stock_lookup({"query": "601318", "range": "HK-GP"})
+        self.assertFalse(res_lk_hk.get("exact_match"))
+
+        # 3. 验证 Issue 3 (P0): 港股日K线 count 严格对齐请求条数 (杜绝 count+1)
+        res_k5 = fin_gw.stock_kline({"symbol": "09896", "period": "day", "count": 5})
+        self.assertEqual(len(res_k5.get("klines", [])), 5)
+        res_k1 = fin_gw.stock_kline({"symbol": "09896", "period": "day", "count": 1})
+        self.assertEqual(len(res_k1.get("klines", [])), 1)
+
+        # 4. 验证 Issue 4 (P0): A 股 dividends 准确映射至分红派息专线 (杜绝串入事件驱动)
+        res_div = fin_gw.stock_f10({"symbol": "601318", "category": "dividends"})
+        div_rows = res_div.get("formatted_tables", {}).get("dividends", [])
+        self.assertGreater(len(div_rows), 0)
+        self.assertIn("送股_每10股", div_rows[0])
+        self.assertIn("派息_每10股_含税", div_rows[0])
+
+        # 5. 验证 Issue 5 (P1): 港股复权真实生效 (HFQ收盘价与无复权产生显著分化)
+        k_none = fin_gw.stock_kline({"symbol": "01177", "period": "day", "count": 10, "adjust": "none"})["klines"]
+        k_hfq = fin_gw.stock_kline({"symbol": "01177", "period": "day", "count": 10, "adjust": "hfq"})["klines"]
+        self.assertNotEqual(k_hfq[-1]["close"], k_none[-1]["close"])
+
+        # 6. 验证 Issue 7 (P1): 港股半年度披露标的单季度推算保留 H1 并不混淆全年
+        res_hk_q = fin_gw.stock_financials({"symbol": "01177", "report_type": "income", "period_type": "quarter", "limit_periods": 3})
+        stmts = res_hk_q.get("statements", [])
+        self.assertGreaterEqual(len(stmts), 1)
+        has_h1 = any("H1" in str(s.get("单期标签", "")) for s in stmts)
+        self.assertTrue(has_h1)
+
+        # 7. 验证 Issue 8 (P1): screener 港股意图识别与 warning 告警
+        scr_res = fin_gw.stock_screener({"message": "港股 腾讯", "limit": 5})
+        self.assertTrue(scr_res.get("is_hk_intent"))
+        self.assertIn("warning", scr_res)
+
+        # 8. 验证 Issue 9 (P2): A 股资产负债表非流动资产新租赁准则差额自陈
+        res_bal = fin_gw.stock_financials({"symbol": "600519", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("非流动资产不可加总差额_新租赁准则使用权资产等", res_bal["statements"][0])
+
+        # 9. 验证 Issue 10 & 13 (P2/P3): industry 分类字段汉化映射无裸拼音键
+        res_ind = fin_gw.stock_f10({"symbol": "600519", "category": "industry"})
+        t0 = res_ind.get("formatted_tables", {}).get("table0", [])
+        if t0:
+            self.assertIn("题材概念名称", t0[0])
+
+        # 10. 验证 Issue 11 (P2): A 股 repurchases 返回结构化空表与明确无记录说明
+        res_rep = fin_gw.stock_f10({"symbol": "600519", "category": "repurchases"})
+        self.assertEqual(len(res_rep.get("formatted_tables", {}).get("repurchases", [])), 0)
+        self.assertIn("无记录说明", res_rep)
+
+        # 11. 验证 Issue 12 (P2): 港股 52 周最高/最低前复权与分红口径说明
+        q_hk = fin_gw.stock_quotes({"symbol": "09896"})
+        gz = q_hk.get("估值与基本盘面", {})
+        self.assertIn("前复权", gz.get("52周价格区间说明", ""))
+
+        # 12. 验证 Issue 14 (P3): 港股 basic_info 与 summary 分立独立表结构
+        res_basic = fin_gw.stock_f10({"symbol": "00700", "category": "basic_info"})
+        res_summ = fin_gw.stock_f10({"symbol": "00700", "category": "summary"})
+        self.assertNotEqual(res_basic.get("category_name"), res_summ.get("category_name"))
+        self.assertIn("basic_info", res_basic.get("formatted_tables", {}))
+
+        # 13. 验证 Issue 14 (P3): 现金流量表键序规范 (筹资活动现金流入小计 排在 流出小计 之前)
+        res_cf = fin_gw.stock_financials({"symbol": "300908", "report_type": "cashflow", "limit_periods": 1})
+        cf_keys = list(res_cf["statements"][0].keys())
+        idx_in = cf_keys.index("筹资活动现金流入小计")
+        idx_out = cf_keys.index("筹资活动现金流出小计")
+        self.assertLess(idx_in, idx_out)
+
 
 if __name__ == "__main__":
     unittest.main()

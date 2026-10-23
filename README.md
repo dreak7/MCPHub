@@ -1,10 +1,10 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v1.8.6)
+# Local MCP Search, Coding & Finance Fallback Gateway (v1.8.7)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 115 Passed](https://img.shields.io/badge/Tests-115%20Passed-success.svg)](tests/)
+[![Tests: 116 Passed](https://img.shields.io/badge/Tests-116%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 </div>
@@ -56,7 +56,7 @@ MCPHub/
 ├── mcphub-finance/              # 【可选外挂】Hermes 专属证券金融分析规范 Skill
 ├── logs/                        # 运行日志目录 (gateway.log)
 ├── state/                       # 持久化状态目录 (provider-state.json 冷却状态与提取缓存)
-├── tests/                       # 115 项全量自动化单元测试套件 (100% 通过)
+├── tests/                       # 116 项全量自动化单元测试套件 (100% 通过)
 ├── MCPHub服务管理面板.bat          # Windows 双击即用一键管理控制台
 ├── README.md                    # 项目全景使用与配置说明文档
 └── LICENSE                      # MIT 开源许可证
@@ -260,6 +260,32 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### v1.8.7 — 全面修复实测14项缺陷(P0-P3)、补齐会计口径与陷阱防范指引、116项测试全绿灯
+
+- **核心接口与网关封装缺陷全面治理 (P0 ~ P3 缺陷 100% 修复)**：
+  - **P0 A 股 F10 指标枚举修复 (#1)**：对齐 `stock_f10` Schema 声明，彻底修复 A 股传入 `category="indicators"` / `"financials"` 时返回 `Unknown F10 category` 异常，自动归一化并结构化交付 `indicators`、`profitability`、`valuation` 与 `summary` 核心报表；
+  - **P0 检索代码跨市场范围隔离与精确匹配约束 (#2)**：`stock_lookup` 新增 `range` / `market_range` 前置过滤机制，严格隔离 A 股（`AG`）与港股（`HK`/`HK-GP`）实体候选池，彻底杜绝跨市场代码挤占正主首位或误判 `exact_match: true`；
+  - **P0 港股日线 K 线根数超额纠偏 (#3)**：修复港股日线 `count+1` 偏移（如 1/5/10/20 根返回 2/6/11/21 根），在数据解析前后严格执行 `[-limit_cnt:]` 切片，实现 A/H 股日线根数 100% 精确对齐；
+  - **P0 A 股历年分红专线接管 (#4)**：切除 A 股 `dividends` 误串至历史事件催化（`events` 2015-2016 年旧数据）的错配逻辑，接入新浪财经权威分红送转专线，标准化输出中文送股、转增、派息与除权除息日记录；
+  - **P1 港股复权走势专线路由 (#5)**：针对公有源港股复权失效（`qfq≡none≡hfq`）缺陷，引入腾讯官方 `hkfqkline` 前复权专线，彻底分离前复权、后复权与不复权真实成交序列；
+  - **P1 港股日内分钟线时间网格与跨午休对齐 (#6)**：校准分钟线超前越过午休的时间戳（12:00-13:00 截断对齐为 12:00），优化多周期聚合网格，日内成交量 100% 严密闭合；
+  - **P1 港股半年度披露标的单季最新期补齐与标签消歧 (#7)**：针对仅披露半年报/年报的标的，单季模式保留上半年单期（H1）并显式标注为 `中报(上半年单期/H1)`，下半年推算单期标注为 `年报(下半年单期/H2)` 并附带推算说明，杜绝被误判为全年值；
+  - **P1 智能选股器港股意图识别与安全告警 (#8)**：扩充选股器意图识别库（香港、恒生、H股、腾讯、美团、阿里等），输入港股相关意图时动态注入 `is_hk_intent: true` 与 `warning` 警示，防范 A 股候选误导；
+  - **P2 A 股非流动资产不可加总差额自陈 (#9)**：针对新租赁准则（CAS 21）下使用权资产、长期应收款等科目的缺项，自动计算并注入 `非流动资产不可加总差额_新租赁准则使用权资产等`，消除负差额疑惑；
+  - **P2/P3 拼音键残留彻底中文化 (#10, #13)**：统一规范 `stock_f10` 归一化判定逻辑，将 `industry` 彻底映射为中文键名（`题材概念名称` 等），消除拼音键残留；
+  - **P2 A 股股份回购空记录防御 (#11)**：拦截上游返回的单行说明文本，将无回购记录规范化为空数组 `[]` 并注入 `无记录说明`，杜绝下游统计为 1 条回购记录；
+  - **P2 港股 52 周价格区间口径消歧 (#12)**：披露滚动前复权与累计派息产生的微幅（~1.6%）技术偏差，提供前复权与不复权参考字段及口径说明；
+  - **P3 港股 basic_info 独立规范化与现金流排布稳定 (#14)**：解耦港股 `basic_info` 与 `summary`，赋予独立模式；严格规范现金流量表字段导出顺序，确保 `筹资活动现金流入小计` 始终排在流出小计之前。
+- **十一大估值与报表口径陷阱防范指引 (Skill 深度扩充)**：
+  - `mcphub-finance/SKILL.md` 正式升级为 **十一大估值与报表口径陷阱防范律**，补齐 5 大实测关键陷阱：
+    - 陷阱七：港股「净资产」口径陷阱（总权益含少数股东 vs 股东权益归母，计算 PB 谨防严重低估）；
+    - 陷阱八：港股五档买卖委托盘口定义（仅即时撮合买一/卖一，委托量为 0 属标准无深度行情）；
+    - 陷阱九：A 股「应收股利 ⊂ 其他应收款」包含关系及负自陈差额符号认知；
+    - 陷阱十：现金流量表加总纪律说明属防御性兜底，明细闭合时切勿因警示放弃细项分析；
+    - 陷阱十一：A 股与港股单季度模式（`quarter`）行标签语义差异（A 股季度标签 vs 港股源表类型单期差额）。
+- **全量自动化测试持续 100% 通过**：
+  - 新增 `test_v187_empirical_fixes` 专项测试，全套 116 项单元测试持续保持 100% 自动化通过。
 
 ### v1.8.6 — 金融报表科目精准纠偏、现金流加总去重与自陈补全、港股竞价切片闭合、全量文档与接口规格 1:1 对齐
 
