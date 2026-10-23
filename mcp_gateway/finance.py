@@ -3637,13 +3637,16 @@ class TdxClient:
                             # 3. 流动负债不可加总差额 (吸收存款及同业存放/卖出回购金融资产款等)
                             curr_liab_total = period_dict.get("流动负债合计")
                             if curr_liab_total is not None and isinstance(curr_liab_total, (int, float)):
-                                # 修复 B1：补齐已映射科目【衍生金融负债】及【衍生金融负债_备用】，杜绝流动负债自陈差额虚高
+                                # 修复：补齐已映射科目【预计流动负债】、【待转销项税额】、【衍生金融负债】等，杜绝流动负债自陈差额虚高
                                 known_curr_liab = [
                                     "短期借款", "交易性金融负债", "衍生金融负债", "衍生金融负债_备用", "应付票据", "应付账款", "预收款项",
                                     "合同负债", "应付职工薪酬", "应交税费", "其他应付款合计",
-                                    "持有待售负债", "一年内到期的非流动负债", "其他流动负债"
+                                    "持有待售负债", "一年内到期的非流动负债", "预计流动负债", "待转销项税额", "其他流动负债"
                                 ]
-                                sub_cl = sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_curr_liab)
+                                ap_sum = float(period_dict.get("应付票据") or 0.0) + float(period_dict.get("应付账款") or 0.0)
+                                ap_total = float(period_dict.get("应付票据及应付账款合计") or 0.0) if ap_sum == 0.0 else 0.0
+
+                                sub_cl = sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_curr_liab) + ap_total
                                 diff_cl = round(float(curr_liab_total) - sub_cl, 2)
                                 if abs(diff_cl) > 0.01:
                                     period_dict["流动负债不可加总差额_吸收存款及金融细项等"] = diff_cl
@@ -4034,6 +4037,18 @@ class PublicFallbackClient:
                         snippet = re.sub(r"<[^>]+>", "", item.get("intro", "")).strip()
                         if not _is_relevant(title, snippet):
                             continue
+                        # 过滤他股上市挂牌快讯（标题明确为其他个股 IPO，且标题未包含当前查询标的名称或代码时剔除）
+                        ipo_keywords = ("登陆创业板", "挂牌创业板", "今日登陆", "正式挂牌", "今日上市", "敲钟上市", "今日申购", "上市首日")
+                        if any(kw in title for kw in ipo_keywords):
+                            has_target = False
+                            if clean_code and clean_code in title:
+                                has_target = True
+                            if entity_name:
+                                core_name = re.sub(r"(股份|科技|集团|控股|发展|实业)$", "", entity_name).strip()
+                                if (core_name and core_name in title) or (entity_name in title):
+                                    has_target = True
+                            if not has_target:
+                                continue
                         media_name = item.get("media", "").strip() or "新浪财经"
                         norm_t = self._normalize_time_str(item.get("dataTime", ""))
                         is_broker_pub = bool(re.match(r"^(中信证券|海通证券|广发证券|招商证券|华泰证券|国泰君安|光大证券|申万宏源|中金公司|银河证券|方正证券|天风证券|长江证券|安信证券|国信证券|中泰证券|兴业证券|东吴证券|浙商证券)[：:]", title))

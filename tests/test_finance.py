@@ -1694,6 +1694,20 @@ class TestFinanceGateway(unittest.TestCase):
         idx_out = cf_keys.index("筹资活动现金流出小计")
         self.assertLess(idx_in, idx_out)
 
+        # 14. 验证 000063 流动负债自陈差额纳入【预计流动负债】，差额降为真实残差 (~0.11亿) 而非 15.41 亿
+        res_zte = fin_gw.stock_financials({"symbol": "000063", "report_type": "balance", "limit_periods": 1})
+        s0 = res_zte["statements"][0]
+        self.assertIn("预计流动负债", s0)
+        diff_cl = s0.get("流动负债不可加总差额_吸收存款及金融细项等")
+        if diff_cl is not None:
+            # 差额应约为 1055 万 (0.11亿)，严格小于 1 亿（杜绝 15.41 亿虚高）
+            self.assertLess(diff_cl, 100000000.0)
+
+        # 15. 验证 000063 新闻过滤他股 IPO 快讯
+        res_news = fin_gw.stock_news({"symbol": "000063", "limit": 5})
+        for n in res_news.get("news", []):
+            self.assertNotIn("通则康威", n.get("title", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
