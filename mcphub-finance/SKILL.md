@@ -1,7 +1,7 @@
 ---
 name: mcphub-finance
 description: "Official financial and securities analysis skill for MCPHub. Provides standard SOPs for A-share and HK-share market analysis, real-time Level-1 quotes, indicators, F10, financials, and multi-source cross-verification. MCPHub 股票与证券金融专属调用规程。"
-version: 1.8.6
+version: 1.8.7
 author: MCPHub
 license: MIT
 platforms: [windows, macos, linux]
@@ -134,7 +134,7 @@ metadata:
 
 ### 22. 港股日内分钟线切片与跨日历史日线边界律
 - **公共源服务边界**：港股分钟线（1m/5m/15m/30m/60m）由网关调用日内实时分钟流原生聚合当日交易切片（含年月日时分标准时间戳、真实量额与指标，30m 吸收 16:00~16:08 收市竞价 CAS 量额，15m 标准对齐）；上游公共行情源**不提供跨日历史多天分钟归档数据与历史复权因子**。
-- **大模型指令**：若用户需要跨日或多周期的中长线技术分析，大模型必须主动告知该服务边界，并引导用户将周期切换为 `period="day"`（日K）、`"week"`（周K）或 `"month"`（月K），港股 K 线按不复权序列研判。
+- **大模型指令**：若用户需要跨日或多周期的中长线技术分析，大模型必须主动告知该日内分钟切片服务边界，并引导用户将周期切换为 `period="day"`（日K）、`"week"`（周K）或 `"month"`（月K），港股日线已接入官方专线全面支持真实前复权（qfq）与不复权（none）。
 
 ### 23. 金融机构财务三表科目纠正与缺口自陈律
 - **资产负债表核心科目**：`N003` 映射为【货币资金】（如平安 7,096.83 亿），`N010` 映射为【拆出资金】（如平安 2,770.27 亿），二者已严格物理隔离，彻底纠正早期科目映射错位导致的资产虚增或重叠；
