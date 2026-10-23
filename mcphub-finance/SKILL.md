@@ -1,7 +1,7 @@
 ---
 name: mcphub-finance
 description: "Official financial and securities analysis skill for MCPHub. Provides standard SOPs for A-share and HK-share market analysis, real-time Level-1 quotes, indicators, F10, financials, and multi-source cross-verification. MCPHub 股票与证券金融专属调用规程。"
-version: 1.8.7
+version: 1.9.0
 author: MCPHub
 license: MIT
 platforms: [windows, macos, linux]

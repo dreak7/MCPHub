@@ -1,10 +1,10 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v1.8.7)
+# Local MCP Search, Coding & Finance Fallback Gateway (v1.9.0)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 116 Passed](https://img.shields.io/badge/Tests-116%20Passed-success.svg)](tests/)
+[![Tests: 117 Passed](https://img.shields.io/badge/Tests-117%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 </div>
@@ -260,6 +260,17 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### v1.9.0 — 四层自顶向下流水线双引擎架构落地、A股/港股彻底物理隔离、P1-1大股东持股比例分母校准与117项测试全绿
+
+- **四层自顶向下流水线双引擎架构落地 (彻底告别单体 God Class)**：
+  - **模块解耦与物理隔离**：将原 5,705 行单体 `finance.py` 彻底解构为**门面层 (`FinanceGateway`)、智能路由层 (`MarketDispatcher`)、双引擎层 (`AStockEngine` + `HKStockEngine`) 与基础设施层 (`core/` + `schemas.py`)**，实现 A 股通达信专线通信/CAS 会计准则与港股多源高可用专线/IFRS 单季做差的物理隔离；
+  - **100% 向后兼容契约**：8 大金融工具对外名称、输入 Schema 与输出 JSON 结构保持一字不差的严格向后兼容，`mcphub-finance/SKILL.md`、`server.py` 及外部客户端零破坏性变动；
+  - **核心基础设施独立演进**：抽离 28 张字段映射字典（`core/constants.py`）、技术指标纯算库（`core/indicators.py`）、交易时钟与代码推导（`core/market_utils.py`）、安全传输重定向拦截（`core/network.py`）以及 8 大工具标准元数据（`schemas.py`）；
+- **实测缺陷精准收敛 (P1-1 大股东持股比例分母校准)**：
+  - **P1-1 `top_holders` 持股比例分母校准**：彻底修复通达信原生 `ltgd` 接口默认以“流通A股”为分母导致持股比例高估 8%~53% 及前十股东合计比例超过 100% 的物理不可能缺陷。引入真实法定总股本进行精准分母校准，交付 `持股占总股本比例_pct` 与 `持股占流通A股比例_pct` 双口径字段；
+- **测试套件与自动化工程健全**：
+  - 扩充并完善回归测试套件至 **117 项测试用例**，全链路单元测试 100% 绿灯通过。
 
 ### v1.8.7 — 全面修复实测14项缺陷(P0-P3)、补齐会计口径与陷阱防范指引、116项测试全绿灯
 
