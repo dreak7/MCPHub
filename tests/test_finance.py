@@ -2703,6 +2703,100 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertIn("截断说明", k_a)
         self.assertIn("超限提示", k_a)
 
+    def test_hk_d1_to_d13_regressions(self) -> None:
+        """测试港股实测 D1-D13 缺陷收敛与口径保障"""
+        # =========================================================================
+        # 1. D1 验证: 02026 (USD 编报) f10.indicators 全量逆向还原与各期汇率完全对齐
+        # =========================================================================
+        ind_res = self.gw.stock_f10({"symbol": "02026", "category": "indicators"})
+        t_ind = ind_res.get("formatted_tables", {}).get("indicators", [])
+        self.assertTrue(len(t_ind) >= 4)
+        p0 = t_ind[0]
+        # 毛利率约为 16.9%，毛利润(USD) / 营业收入(USD) 必须与毛利率一致，杜绝 115% 币种混装
+        rev0 = float(p0.get("营业收入_元", 0))
+        gp0 = float(p0.get("毛利润_元", 0))
+        self.assertAlmostEqual(gp0 / rev0, 0.169, delta=0.01)
+        # 验证 2025-09-30 期（第4期）无 4.33% 残留，营收精确为 60876000 USD
+        p3 = next((p for p in t_ind if str(p.get("报告期", "")).startswith("2025-09-30")), None)
+        if p3:
+            self.assertEqual(int(float(p3.get("营业收入_元", 0))), 60876000)
+
+        # =========================================================================
+        # 2. D2 验证: 09988 (3月财年) 单期标签与做差逻辑，Q4 行成功保留且标签与自然季匹配
+        # =========================================================================
+        inc_res = self.gw.stock_financials({"symbol": "09988", "statement_type": "income", "period_type": "quarter"})
+        inc_rows = inc_res.get("statements", [])
+        q4_row = next((r for r in inc_rows if str(r.get("截止日期", "")).startswith("2026-03-31")), None)
+        self.assertIsNotNone(q4_row, "09988 2026-03-31 财年末 Q4 必须存在")
+        if q4_row:
+            self.assertIn("Q4", str(q4_row.get("单期标签", "")))
+        q3_row = next((r for r in inc_rows if str(r.get("截止日期", "")).startswith("2025-12-31")), None)
+        if q3_row:
+            self.assertIn("Q3", str(q3_row.get("单期标签", "")))
+        q2_row = next((r for r in inc_rows if str(r.get("截止日期", "")).startswith("2025-09-30")), None)
+        if q2_row:
+            self.assertIn("Q2", str(q2_row.get("单期标签", "")))
+
+        # =========================================================================
+        # 3. D3 验证: 09988 每股收益_TTM 注入防误用警示说明
+        # =========================================================================
+        ind_988 = self.gw.stock_f10({"symbol": "09988", "category": "indicators"})
+        t_988 = ind_988.get("formatted_tables", {}).get("indicators", [])
+        if t_988:
+            self.assertIn("每股收益_TTM_说明", t_988[0])
+            self.assertIn("口径不可信", t_988[0]["每股收益_TTM_说明"])
+
+        # =========================================================================
+        # 4. D4, D5, D12, D13 验证: 港股 quotes 估值面板对齐 A 股键、普通股 PB 校准、02628 过期断言清理
+        # =========================================================================
+        q_988 = self.gw.stock_quotes({"symbol": "09988"})
+        v_988 = q_988.get("估值与基本盘面", {})
+        self.assertIn("市净率_PB_自算_普通股", v_988)
+        self.assertIn("市净率_PB_F10", v_988)
+        self.assertIn("最新财报报告期", v_988)
+        self.assertIn("每股净资产_BPS", v_988)
+        self.assertIn("报告期每股收益_EPS", v_988)
+        self.assertIn("派生指标换期说明", v_988)
+        # 09988 普通股 PB 应在 1.55~1.65 之间（已校准至归母净资产口径，非总权益 1.51）
+        self.assertGreater(v_988["市净率_PB_自算_普通股"], 1.55)
+        self.assertNotIn("1207.63", str(v_988.get("估值口径说明", "")))
+
+        # =========================================================================
+        # 5. D6 验证: 股本口径说明涵盖非 A+H 标的工商与二级市场时滞说明
+        # =========================================================================
+        b_tx = self.gw.stock_f10({"symbol": "00700", "category": "basic_info"})
+        self.assertIn("非A+H标的", b_tx.get("已发行股本口径说明", ""))
+
+        # =========================================================================
+        # 6. D7, D8 验证: 股东空表文案与 A/H 分母动态自适应
+        # =========================================================================
+        h_883 = self.gw.stock_f10({"symbol": "00883", "category": "top_holders"})
+        self.assertIn("未收录", str(h_883))
+
+        th_939 = self.gw.stock_f10({"symbol": "00939", "category": "top_holders"})
+        t_939 = th_939.get("formatted_tables", {}).get("top_holders", [])
+        a_row = next((r for r in t_939 if "A" in str(r.get("股份类别", ""))), None)
+        if a_row:
+            self.assertIn("已发行A股", a_row.get("持股比例分母口径说明", ""))
+
+        # =========================================================================
+        # 7. D9, D10 验证: kline 分钟截断语病消除与真上限超限提示
+        # =========================================================================
+        k_5m = self.gw.stock_kline({"symbol": "00700", "period": "5m", "count": 100})
+        self.assertIn("超限提示", k_5m)
+        self.assertIn("66 根 5m bar", k_5m["超限提示"])
+        if "截断说明" in k_5m:
+            self.assertNotIn("上限 100", k_5m["截断说明"])
+
+        # =========================================================================
+        # 8. D11 验证: events 模板占位符 -- 已被真实字段替换渲染
+        # =========================================================================
+        ev_700 = self.gw.stock_f10({"symbol": "00700", "category": "events"})
+        t_ev = ev_700.get("formatted_tables", {}).get("events", [])
+        for row in t_ev:
+            content = str(row.get("事件内容", ""))
+            self.assertNotIn("--", content)
+
 
 if __name__ == "__main__":
     unittest.main()

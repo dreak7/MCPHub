@@ -47,7 +47,7 @@ STOCK_KLINE_SCHEMA = {
         "properties": {
             "symbol": {"type": "string", "description": "证券代码：A股为6位数字（如'600519'），港股为5位数字（如'00700'）"},
             "period": {"type": "string", "enum": ["day", "week", "month", "60m", "30m", "15m", "5m", "1m"], "default": "day", "description": "K线周期，默认为 day (日线)"},
-            "count": {"type": "integer", "minimum": 1, "maximum": 500, "default": 30, "description": "请求K线根数（1-500，A股常规截断至300，港股1m支持至500以覆盖单日全貌），默认30根"},
+            "count": {"type": "integer", "minimum": 1, "maximum": 500, "default": 30, "description": "请求K线根数（1-500，A股日K常规截断至300，港股日K支持至500；港股日内分钟线仅覆盖单日，全天最大可用根数：1m约332根、5m为66根、15m为21根、30m为11根、60m为6根，超出时交付单日全量并附超限说明），默认30根"},
             "adjust": {"type": "string", "enum": ["qfq", "hfq", "none"], "default": "qfq", "description": "复权方式：qfq=前复权(默认), hfq=后复权, none=不复权"},
             "setcode": {"type": "string", "description": "市场代码：0=深市，1=沪市，2=北交所，31=港交所。默认自动推导"},
             "with_indicators": {"type": "boolean", "default": True, "description": "是否自动附带技术指标计算结果（MA、MACD、KDJ、BOLL），默认为 true"}

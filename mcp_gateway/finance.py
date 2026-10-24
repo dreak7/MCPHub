@@ -995,7 +995,7 @@ class FinanceGateway:
         symbol = arguments.get("symbol", "").strip()
         if not symbol:
             raise ValueError("symbol 不能为空")
-        report_type = arguments.get("report_type", "balance")
+        report_type = arguments.get("report_type") or arguments.get("statement_type", "balance")
         period_type = arguments.get("period_type", "report")
         limit_periods = int(arguments.get("limit_periods", 4))
         return self.tdx_client.get_financial_statements(
