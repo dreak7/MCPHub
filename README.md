@@ -1,10 +1,10 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v1.9.1)
+# Local MCP Search, Coding & Finance Fallback Gateway (v1.9.2)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 134 Passed](https://img.shields.io/badge/Tests-134%20Passed-success.svg)](tests/)
+[![Tests: 139 Passed](https://img.shields.io/badge/Tests-139%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 </div>

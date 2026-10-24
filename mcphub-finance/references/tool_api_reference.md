@@ -1,6 +1,6 @@
 # MCPHub 证券与金融专属工具集技术参考手册 (Securities & Finance Tools API Reference & Data Dictionary)
 
-> **版本**：v1.9.1  
+> **版本**：v1.9.2  
 > **受众**：人类软件工程师、量化策略分析师、或需要精确核对底层字段/Schema的大模型（按需渐进式调阅）。  
 > **定位**：静态技术基准参考库（API Reference）、参数约束边界矩阵与 80+ 财务科目官方数据字典（Data Dictionary）。  
 > **使用规程**：日常 Agent 推理行动请直接遵循 [mcphub-finance/SKILL.md](../SKILL.md)；本白皮书提供底层最详尽的技术规格、参数边界与数据字典映射。
@@ -33,11 +33,11 @@
 | | `adjust` | string | 否 | `"qfq"` | `["qfq", "hfq", "none"]` (前复权/后复权/不复权) | 非法取值回退为 `"qfq"`；A股与港股均全面支持真实前复权(qfq)/后复权(hfq)/不复权(none) |
 | | `setcode` | string | 否 | `null` | `["0", "1", "2", "31"]` | 选填；缺省自动识别；严格与代码前缀校验一致 |
 | | `with_indicators`| boolean| 否 | `true` | `true` / `false` | 默认为 `true`，纯 Python 服务端原生防幻觉技术指标 |
-| `stock_financials` | `symbol` | string | 是 | 无 | A 股 6 位数字，港股 5 位数字 | 无效代码拦截报错；A 股三表截止日期与报告期日期严格输出 ISO-8601 YYYY-MM-DD 标准机器可读日期，文字标签收纳于报告期；顶层与各期明细显式输出 currency/unit/币种/金额单位 (CNY/元)；利润表中归母净利润与归属于母公司股东的净利润互为镜像别名双向支持；库存股正数值显式挂载‘库存股_抵减项’与‘减_库存股’；归母所有者权益严格扣减库存股并自陈专项储备缺项差额；自动适配工商业(isjr=0)与金融企业(isjr=1)准则；港股建立双重金融嗅探自适应注入 is_financial 与 accounting_standard（金融保险企业全三表闭合统一）；校准金融资产负债表科目(N003 货币资金，N010 拆出资金)；流动负债明细白名单补齐预计流动负债与待转销项税额；非流动资产自动核算 CAS 21 新租赁准则使用权资产缺项自陈；金融利润表公式严格遵循【营业利润 = 营业收入 − 营业支出】；自动披露 CAS25/IFRS17 保险收入与投资现金流缺口自陈；定期报告季提示三表异步入库时差；现金流量表加总纪律说明依据财政部《企业会计准则第31号》注入一三季报免于披露现金流间接法附注说明与补充资料_间接法说明 |
+| `stock_financials` | `symbol` | string | 是 | 无 | A 股 6 位数字，港股 5 位数字 | 无效代码拦截报错；A 股三表截止日期与报告期日期严格输出 ISO-8601 YYYY-MM-DD 标准机器可读日期，文字标签收纳于报告期；顶层与各期明细显式输出 currency/unit/币种/金额单位 (CNY/元)；利润表中归母净利润与归属于母公司股东的净利润互为镜像别名双向支持；库存股统一收敛为唯一规范键【库存股】（彻底切除'减_库存股'与'库存股_抵减项'等正数别名防遍历双计）；归母所有者权益严格扣减库存股并自陈专项储备缺项差额；自动适配工商业(isjr=0)与金融企业(isjr=1)准则；港股建立双重金融嗅探自适应注入 is_financial 与 accounting_standard（金融保险企业全三表闭合统一）；校准金融资产负债表科目(N003 货币资金，N010 拆出资金)；流动负债明细白名单补齐预计流动负债与待转销项税额；非流动资产自动核算 CAS 21 新租赁准则使用权资产缺项自陈；金融利润表公式严格遵循【营业利润 = 营业收入 − 营业支出】；自动披露 CAS25/IFRS17 保险收入与投资现金流缺口自陈；定期报告季提示三表异步入库时差；现金流量表加总纪律说明依据财政部《企业会计准则第31号》注入一三季报免于披露现金流间接法附注说明与补充资料_间接法说明 |
 | | `report_type` | string | 否 | `"balance"` | `["balance", "income", "cashflow"]` (资产负债/利润/现金流) | 非法取值回退为 `"balance"` |
 | | `period_type` | string | 否 | `"report"` | `["report", "quarter"]` (报告期累计 / 单季度做差) | 非法取值回退为 `"report"`；港股半年度披露标的自适应保留中报(H1)与年报单期(H2，标签标明单期) |
 | | `limit_periods`| integer| 否 | `4` | `1 <= limit_periods <= 10` | 超出范围自动截断至 `[1, 10]` |
-| `stock_f10` | `symbol` | string | 是 | 无 | A 股 6 位数字，港股 5 位数字 | 无效代码拦截报错；非法枚举回退为 `"concepts"`；lhb 龙虎榜外层直连上榜记录与席位明细并消除假否定句；港股 buyback 聚合全面对齐新浪表头实现明细真实累加，repurchases 底层清洗无回购占位行；top_holders 注入港股法定申报时效缺口提示；basic_info 补齐港股注册地址/办公地址/董事长/已发行股本/网址等映射；indicators/financials 双向对齐截止日期与报告期；港股 concepts/industry, events/dividends, indicators/financials, repurchases/buyback 四组分类彻底异构解耦；summary.table5 质押客观说明未收录事实(杜绝武断零质押)；margin_trading.table0 空表输出无记录说明且日期统一为 ISO-8601 YYYY-MM-DD；limit_up 历史成交额缺失时注入明确补充说明；basic_info.table2 为空时注入 ESG 披露说明；unlocks 日期统一规范为字符串且表级与行内状态一致消除自相矛盾；events 催化日期格式化为 YYYY-MM-DD；dividends 金额列强制转换为规范 float；indicators 子表 table1/2/3/5/7 裸码与拼音缩写 100% 汉化并剔除 rec_id，顶层挂载与 summary 逐位同源说明；financials/indicators/summary 顶层对称挂载最新财报报告期与换期说明；unlocks 确立引用铁律(只信解禁股数，占比基于当前法定总股本一律自算，上游T014标为申报批次历史比例消除冲突，多阶段明细严格取当期解禁值 CURRENT_FREE_SHARES)；top_holders 交付校准后的持股占总股本比与占流通A股比双口径字段，明确声明 A+H 标的持股占流通A股比允许大于 100% |
+| `stock_f10` | `symbol` | string | 是 | 无 | A 股 6 位数字，港股 5 位数字 | 无效代码拦截报错；非法枚举回退为 `"concepts"`；lhb 龙虎榜外层直连上榜记录与席位明细（彻底切除同哈希重复表 lhb_daily_details）并消除假否定句；港股 buyback 聚合全面对齐新浪表头实现明细真实累加，repurchases 底层清洗无回购占位行；top_holders 注入港股法定申报时效缺口提示；basic_info 补齐港股注册地址/办公地址/董事长/已发行股本/网址等映射；indicators/financials 双向对齐截止日期与报告期；港股 concepts/industry, events/dividends, indicators/financials, repurchases/buyback 四组分类彻底异构解耦；summary.table5 质押客观说明未收录事实(杜绝武断零质押)；margin_trading.table0 空表输出无记录说明且日期统一为 ISO-8601 YYYY-MM-DD；limit_up 唯一规范交付 limit_up_records（切除 table0 杜绝同哈希重复表），历史成交额缺失时注入明确补充说明；basic_info.table2 为空时注入 ESG 披露说明；unlocks 唯一规范交付 unlock_schedule（切除 table0 杜绝同哈希重复表与双计），日期统一规范为字符串且表级与行内状态一致消除自相矛盾；events 催化日期格式化为 YYYY-MM-DD；dividends 金额列强制转换为规范 float；indicators 子表 table1/2/3/5/7 裸码与拼音缩写 100% 汉化并剔除 rec_id，顶层挂载与 summary 逐位同源说明；financials/indicators/summary 顶层对称挂载最新财报报告期与换期说明；unlocks 确立引用铁律(只信解禁股数，占比基于当前法定总股本一律自算，上游T014标为申报批次历史比例消除冲突，多阶段明细严格取当期解禁值 CURRENT_FREE_SHARES)；top_holders 交付校准后的持股占总股本比与占流通A股比双口径字段，明确声明 A+H 标的持股占流通A股比允许大于 100% |
 | | `category` | string | 否 | `"concepts"`| 18 大合法枚举（详见第三章能力矩阵） | 见上；lhb 外层直连真实流水，dividends 接入新浪权威历年分红送转专线（数值强制 float），indicators/financials 规范化为 summary 并交付核心指标大表，repurchases 与 buyback 实现明细流水与宏观聚合统计分工 |
 | `stock_screener` | `message` | string | 是 | 无 | 自然语言选股条件，如 `"主板 绩优 储能"` | 长度限制 200 字符；自动清洗特殊字符；检测港股意图注入市场范围与 warning 警示；支持 `message` / `query` / `condition` 别名入参 |
 | | `limit` | integer| 否 | `10` | `1 <= limit <= 100` | 超出范围自动截断至 `[1, 100]`；底层 pageSize 严格与 limit 保持 1:1 对齐，杜绝偏移量翻倍与漏标的；跨页遍历逐页并集严格守恒 |
@@ -138,14 +138,14 @@
   - `margin_trading`: table0 两融明细为空时主动输出 `无记录说明`，提示非两融标的或暂无明细；历史窗口边界日（窗口最早一天）成交三列（成交量/成交金额/收盘价）若为 None 自动注入 `两融成交回填说明`，指出系通达信专线滚动窗口首日未联合二级市场行情回填的固有断档，指引以 `stock_kline` 日线为准；
   - `capital_flow`: 表内【主力净占比_pct】、【超大单净占比_pct】等各项占比均为已乘 100 的百分数（数值单位为 %，例如 0.85 代表 0.85%，非 85%），与[净流入÷成交额]反算严格一致；
   - `shareholders`: 表内【参考股价_元】严格对齐各报告期最后一个交易日的收盘价，与 stock_kline 日线历史收盘价逐位一致；
-  - `limit_up`: table0 预设统一列结构（包含成交额补充说明、封板说明），彻底消除 8 列与 10 列跨行漂移；
+  - `limit_up`: 唯一规范交付 formatted_tables.limit_up_records（已彻底切除 table0 杜绝同哈希重复表），预设统一列结构（包含成交额补充说明、封板说明），彻底消除 8 列与 10 列跨行漂移；
   - `events`: 催化日期与发生日期统一标准化为 `YYYY-MM-DD` 格式；
   - `dividends`: A 股直通新浪财经权威历年分红派息专线，格式化输出纯正中文表头记录，送股、转增、派息金额已强制转换为规范浮点数 (float)；
   - `repurchases` 与 `buyback` 业务分工重构：
     - `repurchases`：底层每笔回购方案流水明细表（`formatted_tables.repurchases`）；
     - `buyback`：宏观聚合统计仪表盘与明细，包含 `formatted_tables.buyback_summary`（累计已回购金额_万元、总股数、进行中/完成方案数等宏观统计卡片）与 `formatted_tables.buyback_details`；
   - `top_holders`: 交付真实总股本校准后的 `持股占总股本比例_pct` 与 `持股占流通A股比例_pct` 双口径字段，附带分母说明；明确指出在 A+H 两地上市标的（如 601658 邮储银行）或控股股东持股数超过境内纯 A 股流通盘时，`持股占流通A股比例_pct` 允许且完全可能 >100%（反映大股东总持股已超过境内A股流通盘，真实法定股权请以 `持股占总股本比例_pct` 为准）；港股彻底剔除冗余的 `major_shareholders`；`shareholders` 流水自动清洗穿透申报；
-  - `unlocks`: 限售股解禁计划与自算闭合铁律。同一表中【解禁股数_万股】与【占总股本比例_pct】严密闭合。**引用铁律：只信【解禁股数_万股】（可与多阶段明细相邻行差分核对），占比一律基于当前法定总股本自算**（`解禁股数 ÷ 法定总股本`）；上游 T014 原值保留为【上游申报批次占比_pct】仅代表历史申报批次口径；【解禁后参考流通股本_万股】消解口径歧义；多阶段解禁明细中【解禁股数_万股】严格取当期解禁值（CURRENT_FREE_SHARES），严禁取解禁后累计流通股本；若已过法定承诺解禁日但上游仍标“未实施”，已自适应注入进度纠偏说明。
+  - `unlocks`: 唯一规范交付 formatted_tables.unlock_schedule（已彻底切除 table0 杜绝同哈希重复表与双计）。限售股解禁计划与自算闭合铁律。同一表中【解禁股数_万股】与【占总股本比例_pct】严密闭合。**引用铁律：只信【解禁股数_万股】（可与多阶段明细相邻行差分核对），占比一律基于当前法定总股本自算**（`解禁股数 ÷ 法定总股本`）；上游 T014 原值保留为【上游申报批次占比_pct】仅代表历史申报批次口径；【解禁后参考流通股本_万股】消解口径歧义；多阶段解禁明细中【解禁股数_万股】严格取当期解禁值（CURRENT_FREE_SHARES），严禁取解禁后累计流通股本；若已过法定承诺解禁日但上游仍标“未实施”，已自适应注入进度纠偏说明。
 
 #### 7. `stock_screener`（国内 A 股自然语言智能选股）
 - **功能**：自然语言选股条件筛选。
@@ -157,7 +157,8 @@
 - **防污染拦截与研报属性标注**：
   - 针对不存在或无效代码前置抛错拦截，绝不使用泛化检索返回他股资讯；
   - 自动识别以“券商名：观点”命名的券商研究团队署名行业研报，注入 `内容属性说明: 券商行业研报观点` 标签，防止将券商对外发表的行业观点误判为上市公司自身日常经营公告；
-  - 增加他股 IPO 上市挂牌快讯拦截机制，杜绝同业对比正文引发的无关个股挂牌快讯误召回。
+  - 增加他股 IPO 上市挂牌快讯拦截机制，杜绝同业对比正文引发的无关个股挂牌快讯误召回；
+  - 聚合新闻与重大公告列表严格按时间戳倒序（reverse=True）排列交付，确保列表首条即为最新鲜发布（修复 P3-1）。
 
 ---
 

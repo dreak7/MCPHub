@@ -1,7 +1,7 @@
 ---
 name: mcphub-finance
 description: "Official financial and securities analysis skill for MCPHub. Provides standard SOPs for A-share and HK-share market analysis, real-time Level-1 quotes, indicators, F10, financials, and multi-source cross-verification. MCPHub 股票与证券金融专属调用规程。"
-version: 1.9.1
+version: 1.9.2
 author: MCPHub
 license: MIT
 platforms: [windows, macos, linux]
@@ -172,7 +172,7 @@ metadata:
 - **陷阱 27（stock_quotes 严格校验 setcode 防静默错标）**：禁止向 A 股标的传入错误的 `setcode`（如 600875 传入深交所 `setcode=0`），服务端已建立强拦截，直接抛出 `ValueError`，杜绝产生静默错标或丢失盘口（修复 P2-3）；
 - **陷阱 28（A 股财报三表日期机器可读性规范）**：A 股三大法定报表中，【截止日期】与【报告期日期】统一输出为标准 ISO-8601 `YYYY-MM-DD` 格式（如 `2026-06-30`），文字标签收纳于【报告期】与【报告期标签】，确保下游按日期排序与对齐 100% 稳定可靠（修复 P2-6）；
 - **陷阱 29（港股 1m 分钟线覆盖度与截断说明）**：港股 1m 分钟线上限已扩容至 500 根，单日覆盖超 330 根（含 16:08 收市竞价 CAS）。当请求条数小于实际生成根数时，服务端将在顶层明确注入【截断说明】，防止量能分析低估（修复 P2-4）；
-- **陷阱 30（港股与 A 股龙虎榜 lhb 单层解耦与假否定句消除，修复问题 A）**：`stock_f10(category="lhb")` 外层解开多层嵌套，直连 `billboard_records`（上榜流水）与 `seat_details`（营业部/机构席位明细），保留 `lhb_daily_details` 兼容别名；`has_records` 紧密挂钩真实记录列表，消除无记录时误报的假否定句，内外数据源统一为官方专线；
+- **陷阱 30（港股与 A 股龙虎榜 lhb 单层解耦与假否定句消除，修复问题 A 与 P2-1）**：`stock_f10(category="lhb")` 外层解开多层嵌套，规范直连 `billboard_records`（上榜流水）与 `seat_details`（营业部/机构席位明细），已彻底剔除同哈希重复表 `lhb_daily_details`（杜绝遍历双计）；`has_records` 紧密挂钩真实记录列表，消除无记录时误报的假否定句，内外数据源统一为官方专线；
 - **陷阱 31（港股回购 buyback_summary 明细真实累加，修复问题 B）**：港股回购聚合全面对齐新浪表头 `回购总价(港元)` 与 `回购数量(股)`，精准累加明细总金额与总股数，输出港元与万港元双口径，彻底消除明细有 24 条但 summary 恒为 0 的缺陷；
 - **陷阱 32（港股 top_holders 股东法定申报时效缺口认知，修复问题 C）**：港股实行中央结算系统大股东法定申报制，股东仅在持股跨越 5% 整数线时申报，历史申报可能滞后数年。接口在 `股东口径说明` 中已注入【时效缺口风险提示】，大模型不可误视其为最新财报截面的静态股东名册；
 - **陷阱 33（港股回购暂无数据占位行清洗，修复问题 D）**：港股未发生回购的标的（如 02628）上游返回单单元格占位行，底层已建立双层过滤机制，自动清洗占位假记录，记录天数正确置 0，最新回购日期置空；
