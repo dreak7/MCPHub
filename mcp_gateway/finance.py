@@ -1337,6 +1337,23 @@ class FinanceGateway:
                                     except (ValueError, TypeError):
                                         pass
 
+                        # 针对 events：清洗当日涨跌幅_pct类型漂移，消除 int/float 并存 (修复 P3)
+                        if norm_cat == "events":
+                            if "当日涨跌幅_pct" in row_dict and row_dict["当日涨跌幅_pct"] is not None:
+                                try:
+                                    row_dict["当日涨跌幅_pct"] = round(float(row_dict["当日涨跌幅_pct"]), 2)
+                                except (ValueError, TypeError):
+                                    pass
+
+                        # 针对 limit_up：清洗成交金额与封单金额类型漂移，统一规范为 float (修复 P3)
+                        if norm_cat == "limit_up":
+                            for num_k in ("当日成交金额_万元", "封单金额_万元"):
+                                if num_k in row_dict and row_dict[num_k] is not None:
+                                    try:
+                                        row_dict[num_k] = round(float(row_dict[num_k]), 2)
+                                    except (ValueError, TypeError):
+                                        pass
+
                         # 针对 top_holders table0：补齐真实总股本并反推限售流通股 (修复 P2-4)
                         if norm_cat == "top_holders" and t_key == "table0":
                             if zgb_total_shares > 0:
@@ -1520,10 +1537,23 @@ class FinanceGateway:
                     t0_data = formatted_tables.get("table0", [])
                     if not t0_data:
                         tdx_res["无记录说明"] = f"标的 {symbol} 当前非融资融券标的证券（或暂无公开披露的两融交易明细记录）。"
+                    else:
+                        has_missing_vol = any(r.get("成交量_股") is None or r.get("成交金额_元") is None or r.get("收盘价") is None for r in t0_data)
+                        if has_missing_vol:
+                            tdx_res["两融成交回填说明"] = (
+                                "历史窗口边界日（如窗口最早一天）二级市场成交三列（成交量/成交金额/收盘价）若为 None，"
+                                "系通达信官方专线两融滚动窗口首日未联合二级市场行情做联合查询回填所致的固有断档（非该日无交易），"
+                                "标的当日二级市场真实复权量价请直接调用 stock_kline 日线为准。"
+                            )
 
                 # 增强 F10 摘要表：汉化关键财务与估值指标、依据“利润变动方向”精确校准亏损标的同比含义、注入隔日风格标签与破净动态复核指引
                 if norm_cat == "summary" or ("table3" in formatted_tables and "table4" in formatted_tables):
                     self._enrich_f10_summary_tables(formatted_tables, tdx_res)
+                    if cat_lower == "summary":
+                        tdx_res["数据源同源说明"] = (
+                            "【数据源同源说明】summary 与 indicators 的 table0/4/5/6/8 共享通达信专线同一 F10 概要底表，"
+                            "二者逐位哈希相同。若需要核心财务与估值宽表，建议直接调用 indicators 分类获取。"
+                        )
 
                 # 修复 Issue 1: 针对 indicators / financials，挂载宽表字段与专属分类名
                 # 针对 indicators 与 financials：赋予明确的参数区分度与专属数据结构 (修复 P2-3 与 P2-4)
@@ -1790,17 +1820,17 @@ class FinanceGateway:
                     if ok in row:
                         row[cn] = row.pop(ok)
 
-                # 修复问题 1: 消除动态 PE 同名不同义歧义
+                # 修复问题 2: 消除动态 PE 同名不同义与自相矛盾别名歧义
                 # F10 table6 中的 sylttm 为真实的 TTM 滚动市盈率，与 stock_quotes 中的【滚动市盈率_PETTM】同值同源
-                # 显式挂载标准名称【滚动市盈率_PETTM】与【滚动市盈率_PE_TTM】，同时保留【动态市盈率_PE_TTM】作为同值兼容别名
-                pe_ttm_val = row.get("滚动市盈率_PETTM") if "滚动市盈率_PETTM" in row else row.get("动态市盈率_PE_TTM")
+                # 显式挂载标准名称【滚动市盈率_PETTM】与【滚动市盈率_PE_TTM】，彻底剔除易引发下游误解的【动态市盈率_PE_TTM】别名
+                row.pop("动态市盈率_PE_TTM", None)
+                pe_ttm_val = row.get("滚动市盈率_PETTM") or row.get("滚动市盈率_PE_TTM")
                 if pe_ttm_val is not None:
                     row["滚动市盈率_PETTM"] = pe_ttm_val
                     row["滚动市盈率_PE_TTM"] = pe_ttm_val
-                    row["动态市盈率_PE_TTM"] = pe_ttm_val
 
                 # 检验 PE_TTM 是否由于快照批处理入库滞后而落后于最新报告期 (修复 P1-2)
-                curr_pe_ttm = row.get("滚动市盈率_PETTM") or row.get("动态市盈率_PE_TTM")
+                curr_pe_ttm = row.get("滚动市盈率_PETTM") or row.get("滚动市盈率_PE_TTM")
                 if curr_pe_ttm is not None and table4_bgq:
                     try:
                         clean_code = tdx_res.get("symbol", "")
@@ -1816,7 +1846,7 @@ class FinanceGateway:
                                 if abs(real_ttm_val - float(curr_pe_ttm)) > 1.0:
                                     row["滚动市盈率_PETTM"] = real_ttm_val
                                     row["滚动市盈率_PE_TTM"] = real_ttm_val
-                                    row["动态市盈率_PE_TTM"] = real_ttm_val
+                                    row.pop("动态市盈率_PE_TTM", None)
                                     row["PE_TTM校准说明"] = (
                                         f"上游F10估值快照期次入库滞后(原值{curr_pe_ttm})，"
                                         f"已自动自算校准为最新{table4_bgq}期次真实TTM值({real_ttm_val}倍)。"
@@ -1824,7 +1854,11 @@ class FinanceGateway:
                     except Exception:
                         pass
 
-                row["口径辨析提示"] = "table6 中的【滚动市盈率_PETTM】(sylttm) 为基于过去4个季度滚动归母净利的真 TTM 市盈率，与 stock_quotes 中的【滚动市盈率_PETTM】同口径；请勿将其与 quotes 中的【动态市盈率_PE】(单季年化口径) 直接横比。"
+                row["口径辨析提示"] = (
+                    "table6 中的【滚动市盈率_PETTM】(及别名【滚动市盈率_PE_TTM】) 实质为基于过去4个季度滚动归母净利的真 TTM 市盈率，"
+                    "与 stock_quotes 中的【滚动市盈率_PETTM】同值同口径；请勿将其与 quotes 中的【动态市盈率_PE】(单季年化口径) 直接横比；"
+                    "网关已彻底剔除自相矛盾的'动态市盈率_PE_TTM'旧别名以防误导。"
+                )
                 row["估值时效提示"] = f"市净率(PB)/市盈率(PE)基于上一交易日清算日({gxrq or '前一交易日'})，盘中请结合 stock_quotes 实时现价动态重算。"
 
         # 3.5 增强 table8 (基础信息与行业分类汉化映射，修复 P3 杜绝裸英文字段外泄)

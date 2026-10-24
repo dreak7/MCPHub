@@ -1396,7 +1396,8 @@ class TestFinanceGateway(unittest.TestCase):
             t6_row = tables["table6"][0]
             self.assertNotIn("sylttm", t6_row)
             self.assertNotIn("sjl", t6_row)
-            self.assertIn("动态市盈率_PE_TTM", t6_row)
+            self.assertIn("滚动市盈率_PETTM", t6_row)
+            self.assertNotIn("动态市盈率_PE_TTM", t6_row)
             self.assertIn("市净率_PB_昨收", t6_row)
 
             # 验证 table8
@@ -1739,7 +1740,8 @@ class TestFinanceGateway(unittest.TestCase):
         res_sum = fin_gw.stock_f10({"symbol": "300371", "category": "summary"})
         t6 = res_sum.get("formatted_tables", {}).get("table6", [])
         self.assertTrue(len(t6) > 0)
-        self.assertEqual(t6[0].get("动态市盈率_PE_TTM"), 80.31)
+        self.assertEqual(t6[0].get("滚动市盈率_PETTM"), 80.31)
+        self.assertNotIn("动态市盈率_PE_TTM", t6[0])
         self.assertIn("PE_TTM校准说明", t6[0])
 
         # 3. 验证 P1-3 与 P2-1: 300371 stock_quotes 派生每股指标对齐三季报且 PE 与 EPS 绝对互逆闭环
@@ -2176,17 +2178,85 @@ class TestFinanceGateway(unittest.TestCase):
         t6_rows = res_f10.get("formatted_tables", {}).get("table6", [])
         self.assertGreater(len(t6_rows), 0)
         t6_0 = t6_rows[0]
-        # 验证同时包含标准名 滚动市盈率_PETTM 与兼容名 动态市盈率_PE_TTM
+        # 验证包含标准名 滚动市盈率_PETTM 与规范别名 滚动市盈率_PE_TTM，且严格不含自相矛盾的 动态市盈率_PE_TTM
         self.assertIn("滚动市盈率_PETTM", t6_0)
-        self.assertIn("动态市盈率_PE_TTM", t6_0)
+        self.assertIn("滚动市盈率_PE_TTM", t6_0)
+        self.assertNotIn("动态市盈率_PE_TTM", t6_0)
         self.assertIn("口径辨析提示", t6_0)
-        self.assertEqual(t6_0["滚动市盈率_PETTM"], t6_0["动态市盈率_PE_TTM"])
+        self.assertEqual(t6_0["滚动市盈率_PETTM"], t6_0["滚动市盈率_PE_TTM"])
 
         # 2. 验证与 quotes 滚动市盈率_PETTM 保持同一口径 (约 7.34 倍)
         quotes = self.gw.stock_quotes({"symbol": "601658"})
         q_ttm = quotes.get("估值与基本盘面", {}).get("滚动市盈率_PETTM")
         self.assertIsNotNone(q_ttm)
         self.assertAlmostEqual(float(t6_0["滚动市盈率_PETTM"]), float(q_ttm), delta=0.5)
+
+    # =========================================================================
+    # 【功能块：验证实测 7 大新问题回归防护】
+    # - 输入：FinanceGateway 各工具接口调用
+    # - 功能：核验两融回填断档说明、PE别名剔除、同源声明、N码清理、浮点归一化及盘后字段缺省保底
+    # - 输出：断言通过，无任何异常
+    # =========================================================================
+    def test_new_issues_empirical_fixes(self):
+        """验证实测 7 大新问题全量回归防护"""
+        import re
+
+        # 1. 验证 P1: margin_trading 注入两融成交回填说明，非两融标的注入无记录说明
+        res_margin = self.gw.stock_f10({"symbol": "600875", "category": "margin_trading"})
+        self.assertIn("formatted_tables", res_margin)
+        t0_margin = res_margin.get("formatted_tables", {}).get("table0", [])
+        if t0_margin and any(r.get("成交量_股") is None for r in t0_margin):
+            self.assertIn("两融成交回填说明", res_margin)
+
+        res_margin_none = self.gw.stock_f10({"symbol": "300371", "category": "margin_trading"})
+        self.assertIn("无记录说明", res_margin_none)
+
+        # 2. 验证 P1/P2: summary table6 彻底剔除 '动态市盈率_PE_TTM'，顶层注入数据源同源说明
+        res_sum = self.gw.stock_f10({"symbol": "600875", "category": "summary"})
+        self.assertIn("数据源同源说明", res_sum)
+        t6_rows = res_sum.get("formatted_tables", {}).get("table6", [])
+        self.assertTrue(len(t6_rows) > 0)
+        self.assertNotIn("动态市盈率_PE_TTM", t6_rows[0])
+        self.assertIn("滚动市盈率_PETTM", t6_rows[0])
+        self.assertIn("滚动市盈率_PE_TTM", t6_rows[0])
+
+        # 3. 验证 P2: 利润表键名彻底清除原始 N 码（如 _原始N036, _原始N037, _N101 等）
+        res_fin = self.gw.stock_f10({"symbol": "600875", "category": "financials"})
+        inc_sheet = res_fin.get("formatted_tables", {}).get("利润表", [])
+        if inc_sheet:
+            for k in inc_sheet[0].keys():
+                self.assertFalse(re.search(r"_原始N\d{2,4}", k), f"键名仍含原始N码残留: {k}")
+                self.assertFalse(re.search(r"_N\d{2,4}$", k), f"键名仍含N码残留: {k}")
+
+        # 4. 验证 P3: 个别票盘后字段为 0 而非 None/null (300371, 002293)
+        q_371 = self.gw.stock_quotes({"symbol": "300371"})
+        h_371 = q_371.get("盘口核心行情", {})
+        self.assertIsNotNone(h_371.get("盘后成交量"))
+        self.assertIsNotNone(h_371.get("剩余委托量"))
+        self.assertIsInstance(h_371.get("盘后成交量"), int)
+        self.assertIsInstance(h_371.get("剩余委托量"), int)
+
+        q_293 = self.gw.stock_quotes({"symbol": "002293"})
+        h_293 = q_293.get("盘口核心行情", {})
+        self.assertIsNotNone(h_293.get("盘后成交量"))
+        self.assertIsInstance(h_293.get("盘后成交量"), int)
+
+        # 5. 验证 P3: 数值类型归一化 (float)，杜绝 int/float 漂移
+        ctx = self.gw.market_context({"type": "events"})
+        events_list = ctx.get("events", [])
+        if events_list:
+            for ev in events_list[:5]:
+                if "当日涨跌幅_pct" in ev:
+                    self.assertIsInstance(ev["当日涨跌幅_pct"], float)
+
+        ctx_limit = self.gw.market_context({"type": "limit_up"})
+        up_list = ctx_limit.get("limit_up_pool", [])
+        if up_list:
+            for up in up_list[:5]:
+                if "当日成交金额_万元" in up:
+                    self.assertIsInstance(up["当日成交金额_万元"], float)
+                if "封单金额_万元" in up:
+                    self.assertIsInstance(up["封单金额_万元"], float)
 
     # =========================================================================
     # 【功能块：验证 Skill 与 Reference 资料库中数据接口与证券专用工具集 100% 对齐】

@@ -478,6 +478,12 @@ class AStockEngine(BaseMarketEngine):
             if "ItemNum" in mapped_hq:
                 mapped_hq["明细笔数"] = mapped_hq.pop("ItemNum")
 
+            # 修复 P3: 盘后成交量与剩余委托量保底规整（若标的当日未参与盘后固定价格交易或无收盘撮合残单，上游缺省不返回，补齐保底为 0 手）
+            if mapped_hq.get("盘后成交量") in (None, ""):
+                mapped_hq["盘后成交量"] = 0
+            if mapped_hq.get("剩余委托量") in (None, ""):
+                mapped_hq["剩余委托量"] = 0
+
             # 数值类型严格对齐：消除跨标的 str/int/float 漂移 (P1)
             int_keys = ("成交量_手", "内盘_手", "外盘_手", "成交笔数", "剩余委托量", "明细笔数", "内外盘强弱标志", "盘后成交量")
             for ik in int_keys:
