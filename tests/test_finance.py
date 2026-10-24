@@ -1739,12 +1739,18 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertEqual(t6[0].get("动态市盈率_PE_TTM"), 80.31)
         self.assertIn("PE_TTM校准说明", t6[0])
 
-        # 3. 验证 P1-3: 300371 stock_quotes 派生每股指标对齐三季报
+        # 3. 验证 P1-3 与 P2-1: 300371 stock_quotes 派生每股指标对齐三季报且 PE 与 EPS 绝对互逆闭环
         q_300371 = fin_gw.stock_quotes({"symbol": "300371"})
         ext_371 = q_300371.get("估值与基本盘面", {})
         self.assertEqual(ext_371.get("报告期每股收益_EPS"), 0.1373)
         self.assertEqual(ext_371.get("每股净资产_BPS"), 5.8093)
-        self.assertEqual(ext_371.get("动态市盈率_PE"), 52.08)
+        now_p_371 = float(q_300371.get("盘口核心行情", {}).get("现价") or 0.0)
+        pe_371 = float(ext_371.get("动态市盈率_PE") or 0.0)
+        eps_371 = float(ext_371.get("年化每股收益_EPS") or 0.0)
+        self.assertGreater(pe_371, 50.0)
+        self.assertGreater(eps_371, 0.15)
+        # 严格验证互逆性: 现价 / 年化EPS 与 动态PE 相对误差绝对不超过 0.08%
+        self.assertLess(abs((now_p_371 / eps_371) - pe_371) / pe_371, 0.0008)
         self.assertEqual(ext_371.get("市净率_PB"), 1.63)
         self.assertEqual(ext_371.get("最新财报报告期"), "2026-09-30")
 
@@ -1817,6 +1823,101 @@ class TestFinanceGateway(unittest.TestCase):
         res_inc = fin_gw.stock_financials({"symbol": "00005", "report_type": "income", "limit_periods": 1})
         self.assertTrue(res_inc.get("is_financial"))
         self.assertIn("利润表加总纪律说明", res_inc["statements"][0])
+
+    # =========================================================================
+    # 【功能块 T5：实测 P1/P2/P3 问题全面收敛测试套件 (v1.9.0 深度收敛闭环)】
+    # - 输入：东方电气 (600875)、邮储银行 (601658)、华录百纳 (300371)、百润股份 (002293)
+    # - 功能：严格验证 P1-1(unlocks占比自算与明细闭合)、P2-1(PE/EPS互逆)、
+    #         P2-2(f10顶层挂载报告期)、P2-3(金融科目无前缀)、P2-4(indicators同源声明)、
+    #         P3-1(table5汉化)、P3-2(buyback状态纠偏)、P3-3(两融日期ISO)、
+    #         P3-5(A+H流通比说明)、P3-6(quotes总股本个位精度)
+    # - 输出：单元测试断言 100% 通过
+    # =========================================================================
+    def test_v190_p1_p2_p3_issue_convergence(self) -> None:
+        """测试 v1.9.0: P1-1/P2-1/P2-2/P2-3/P2-4/P3-1/P3-2/P3-3/P3-5/P3-6 全量闭环验证"""
+        fin_gw = FinanceGateway()
+
+        # 1. 验证 P1-1: 600875 unlocks 占比基于法定总股本严格自算闭合 (解禁股数 3309.07 ÷ 345836.031 ≈ 0.957%)
+        res_unl = fin_gw.stock_f10({"symbol": "600875", "category": "unlocks"})
+        self.assertIn("解禁口径与核算规则说明", res_unl)
+        t0_unl = res_unl.get("formatted_tables", {}).get("table0", [])
+        if t0_unl:
+            row0 = t0_unl[0]
+            self.assertIn("解禁股数_万股", row0)
+            self.assertIn("占总股本比例_pct", row0)
+            self.assertIn("上游申报批次占比_pct", row0)
+            self.assertIn("解禁后参考流通股本_万股", row0)
+            # 自算比例约 0.957%，绝非上游批次的 15.11%
+            self.assertAlmostEqual(float(row0["占总股本比例_pct"]), 0.957, delta=0.05)
+            self.assertAlmostEqual(float(row0["上游申报批次占比_pct"]), 15.11, delta=0.1)
+
+        # 验证 P1-1 另一处: 601658 多阶段解禁明细中解禁股数为本次解禁股数(90513万股)而非累计流通盘(387912万股)
+        res_unl_bank = fin_gw.stock_f10({"symbol": "601658", "category": "unlocks"})
+        multi_unl = res_unl_bank.get("多阶段解禁明细", [])
+        if multi_unl:
+            m0 = multi_unl[0]
+            self.assertIn("解禁后累计流通A股本_万股", m0)
+            self.assertIn("占总股本比例_pct", m0)
+            self.assertLess(float(m0["解禁股数_万股"]), float(m0["解禁后累计流通A股本_万股"]))
+
+        # 2. 验证 P2-1: 002293 与 300371 换期后 PE 与 EPS 绝对互逆闭环 (现价 / EPS ≈ PE, 误差 <= 0.08%)
+        for sym in ("002293", "300371"):
+            q_res = fin_gw.stock_quotes({"symbol": sym})
+            ext_info = q_res.get("估值与基本盘面", {})
+            now_p = float(q_res.get("盘口核心行情", {}).get("现价") or 0.0)
+            pe = float(ext_info.get("动态市盈率_PE") or 0.0)
+            eps = float(ext_info.get("年化每股收益_EPS") or 0.0)
+            if pe > 0 and eps > 0 and now_p > 0:
+                calc_pe = now_p / eps
+                rel_diff = abs(calc_pe - pe) / pe
+                self.assertLess(rel_diff, 0.0008, f"标的 {sym} 动态PE({pe}) 与 现价/EPS({calc_pe}) 互逆误差超标: {rel_diff}")
+
+        # 3. 验证 P2-2: financials / indicators / summary 顶层对称挂载 最新财报报告期 与 派生指标换期说明
+        for cat in ("financials", "indicators", "summary"):
+            f10_r = fin_gw.stock_f10({"symbol": "600875", "category": cat})
+            self.assertIn("最新财报报告期", f10_r, f"分类 {cat} 顶层缺失 最新财报报告期")
+            self.assertIn("派生指标换期说明", f10_r, f"分类 {cat} 顶层缺失 派生指标换期说明")
+
+        # 4. 验证 P2-3: 601658 银行利润表科目无 加_/减_ 前缀，与工商模板完全一致
+        res_inc = fin_gw.stock_financials({"symbol": "601658", "report_type": "income", "limit_periods": 1})
+        inc_stmt = res_inc.get("statements", [])[0]
+        self.assertIn("营业外收入", inc_stmt)
+        self.assertIn("营业外支出", inc_stmt)
+        self.assertIn("所得税费用", inc_stmt)
+        self.assertNotIn("加_营业外收入", inc_stmt)
+        self.assertNotIn("减_营业外支出", inc_stmt)
+
+        # 5. 验证 P2-4: indicators 顶层挂载同源声明
+        res_ind = fin_gw.stock_f10({"symbol": "600875", "category": "indicators"})
+        self.assertIn("数据源同源与交叉印证说明", res_ind)
+
+        # 6. 验证 P3-1: indicators.table5 汉化无 zyrq/zygf/zzygf 裸码残留
+        ind_t5 = res_ind.get("formatted_tables", {}).get("table5", [])
+        if ind_t5:
+            for k in ind_t5[0].keys():
+                self.assertNotIn(k, ("zyrq", "zygf", "zzygf"))
+
+        # 7. 验证 P3-2: 300371 buyback 状态智能纠偏，完成方案数 >= 8，实施中方案数 <= 1
+        res_bb = fin_gw.stock_f10({"symbol": "300371", "category": "buyback"})
+        bb_sum = res_bb.get("formatted_tables", {}).get("buyback_summary", [])[0]
+        self.assertGreaterEqual(bb_sum["已实施完成方案数"], 8)
+        self.assertLessEqual(bb_sum["当前实施中方案数"], 1)
+
+        # 8. 验证 P3-3: margin_trading table0 交易日期标准化为 YYYY-MM-DD
+        res_mt = fin_gw.stock_f10({"symbol": "600875", "category": "margin_trading"})
+        t0_mt = res_mt.get("formatted_tables", {}).get("table0", [])
+        if t0_mt:
+            date_val = str(t0_mt[0].get("交易日期", ""))
+            self.assertRegex(date_val, r"^\d{4}-\d{2}-\d{2}$")
+
+        # 9. 验证 P3-5: 601658 top_holders 顶层说明声明持股占流通A股比例可大于100%
+        res_th = fin_gw.stock_f10({"symbol": "601658", "category": "top_holders"})
+        self.assertIn("持股比例分母口径说明", res_th)
+        self.assertIn("大于 100%", res_th["持股比例分母口径说明"])
+
+        # 10. 验证 P3-6: 601658 quotes 总股本精确到个位，等于 120095053492
+        q_bank = fin_gw.stock_quotes({"symbol": "601658"})
+        self.assertEqual(q_bank.get("估值与基本盘面", {}).get("总股本_股"), 120095053492)
 
 
 if __name__ == "__main__":

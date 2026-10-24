@@ -849,7 +849,7 @@ class PublicFallbackClient:
                         "公司简介": (jbzl.get("ORG_PROFILE") or "").strip()[:300],
                     }
 
-            # 5. 限售解禁日程
+            # 5. 限售解禁日程 (修复 P1-1: 严防将解禁后累计流通股本 FREE_SHARES 错标为当期解禁股数)
             elif cat == "unlocks":
                 url = f"https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_LIFT_STAGE&columns=ALL&filter=(SECURITY_CODE=%22{clean_code}%22)&pageNumber=1&pageSize=5"
                 req = Request(url, headers=headers)
@@ -859,8 +859,10 @@ class PublicFallbackClient:
                     return [
                         {
                             "解禁日期": (x.get("FREE_DATE") or "")[:10],
-                            "解禁股数_万股": x.get("FREE_SHARES"),
-                            "解禁类型": x.get("LIMITED_TYPE_NAME"),
+                            "解禁股数_万股": float(x.get("CURRENT_FREE_SHARES") if x.get("CURRENT_FREE_SHARES") is not None else (x.get("ABLE_FREE_SHARES") or 0.0)),
+                            "解禁后累计流通A股本_万股": float(x.get("FREE_SHARES") or 0.0),
+                            "解禁类型": x.get("FREE_SHARES_TYPE") or x.get("LIMITED_TYPE_NAME"),
+                            "占总股本比例_pct": round(float(x.get("TOTAL_RATIO")) * 100.0, 3) if x.get("TOTAL_RATIO") is not None else (round(float(x.get("TOTALSHARES_RATIO")) * 100.0, 3) if x.get("TOTALSHARES_RATIO") is not None else None),
                         }
                         for x in items
                     ]
@@ -1118,11 +1120,30 @@ class FinanceGateway:
             rep_data = self.tdx_client._get_ashare_repurchases(clean_code)
             rep_list = rep_data.get("formatted_tables", {}).get("repurchases", [])
             has_records = len(rep_list) > 0
+            # 修复 P3-2：遍历历次方案，结合完成日期与截止日纠偏上游滞留的“实施中”状态
+            today_str = datetime.date.today().strftime("%Y-%m-%d")
+            for r in rep_list:
+                comp_date = r.get("方案完成日期")
+                end_date = r.get("回购实施截止日")
+                spent = float(r.get("已实施回购金额_万元") or 0.0)
+                cur_status = str(r.get("回购进展状态", ""))
+                is_done = False
+                if comp_date:
+                    is_done = True
+                elif end_date and str(end_date) < today_str and spent > 0:
+                    is_done = True
+                elif "完成" in cur_status or "终止" in cur_status:
+                    is_done = True
+                
+                if is_done:
+                    fin_date = comp_date or end_date or ""
+                    r["回购进展状态"] = f"已完成 (完成日: {fin_date})" if fin_date else "已完成"
+
             if norm_cat == "buyback":
                 cat_name = "股份回购实施进展与累计聚合概览 (Buyback Overview)"
                 total_spent = round(sum(float(r.get("已实施回购金额_万元") or 0.0) for r in rep_list), 2)
-                ongoing_count = sum(1 for r in rep_list if "实施" in str(r.get("回购进展状态", "")) and "完成" not in str(r.get("回购进展状态", "")))
-                completed_count = sum(1 for r in rep_list if "完成" in str(r.get("回购进展状态", "")))
+                completed_count = sum(1 for r in rep_list if "完成" in str(r.get("回购进展状态", "")) or "终止" in str(r.get("回购进展状态", "")))
+                ongoing_count = len(rep_list) - completed_count
                 latest_plan_date = rep_list[0].get("公告日期") if rep_list else None
                 latest_status = rep_list[0].get("回购进展状态") if rep_list else "无"
                 buyback_summary = {
@@ -1196,18 +1217,19 @@ class FinanceGateway:
                 formatted_tables = {}
                 holder_total_shares = 0.0
                 zgb_total_shares = 0.0
-                if category == "top_holders":
-                    for table in raw_data.get("ResultSets", []):
-                        if table.get("ResultSetKey") == "table0":
-                            t0_rows = table.get("Content", [])
-                            t0_cols = table.get("ColName", [])
-                            if t0_rows and "T004" in t0_cols:
-                                t0_idx = t0_cols.index("T004")
-                                try:
-                                    holder_total_shares = float(t0_rows[0][t0_idx] or 0.0)
-                                except (ValueError, TypeError):
-                                    pass
-                            break
+                if category in ("top_holders", "unlocks"):
+                    if category == "top_holders":
+                        for table in raw_data.get("ResultSets", []):
+                            if table.get("ResultSetKey") == "table0":
+                                t0_rows = table.get("Content", [])
+                                t0_cols = table.get("ColName", [])
+                                if t0_rows and "T004" in t0_cols:
+                                    t0_idx = t0_cols.index("T004")
+                                    try:
+                                        holder_total_shares = float(t0_rows[0][t0_idx] or 0.0)
+                                    except (ValueError, TypeError):
+                                        pass
+                                break
                     # 获取标的真实法定总股本 (优先从 summary.table6.zgb 快速读取)
                     try:
                         sum_chk = self.tdx_client.get_f10(clean_code, category="summary")
@@ -1220,7 +1242,7 @@ class FinanceGateway:
                                     break
                     except Exception:
                         pass
-                    if zgb_total_shares <= 0.0:
+                    if zgb_total_shares <= 0.0 and holder_total_shares > 0.0:
                         zgb_total_shares = holder_total_shares
 
                 for idx, table in enumerate(raw_data.get("ResultSets", [])):
@@ -1258,7 +1280,7 @@ class FinanceGateway:
                                 col_title = SHAREHOLDERS_FIELDS.get(col_raw, col_raw)
                             elif norm_cat == "forecast":
                                 col_title = FORECAST_FIELDS.get(col_raw, col_raw)
-                            elif norm_cat == "summary":
+                            elif norm_cat in ("summary", "indicators"):
                                 col_title = SUMMARY_FIELDS.get(col_raw, col_raw)
                             elif norm_cat == "top_holders" and t_key == "table0":
                                 col_title = TOP_HOLDERS_TOTALS_FIELDS.get(col_raw, col_raw)
@@ -1316,11 +1338,20 @@ class FinanceGateway:
                                 elif "持股占流通A股比例_pct" in row_dict:
                                     row_dict["持股比例_pct"] = row_dict["持股占流通A股比例_pct"]
 
+                        # 修复 P1-1：针对 unlocks table0，以真实法定总股本严格自算 [占总股本比例_pct] 消除上游申报批次语义冲突
+                        if norm_cat == "unlocks" and t_key == "table0":
+                            unl_wan = float(row_dict.get("解禁股数_万股") or 0.0)
+                            if unl_wan > 0 and zgb_total_shares > 0:
+                                zgb_wan = zgb_total_shares / 10000.0
+                                row_dict["占总股本比例_pct"] = round((unl_wan / zgb_wan) * 100.0, 3)
+
                         table_rows.append(row_dict)
-                    if norm_cat == "events" and table_rows:
-                        table_rows = list(reversed(table_rows))
+                    # 修复 P3-3：标准化 events 及 margin_trading 等各类表格中的 8 位数字日期为 YYYY-MM-DD
+                    if norm_cat in ("events", "margin_trading") and table_rows:
+                        if norm_cat == "events":
+                            table_rows = list(reversed(table_rows))
                         for r in table_rows:
-                            for dk in ("催化日期", "cjrq"):
+                            for dk in ("催化日期", "cjrq", "交易日期", "变动日期", "rq", "T002", "基准日期", "cur", "截止日期"):
                                 if dk in r and re.match(r"^\d{8}$", str(r[dk])):
                                     ds = str(r[dk])
                                     r[dk] = f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
@@ -1336,9 +1367,9 @@ class FinanceGateway:
                     )
                 elif norm_cat == "top_holders":
                     tdx_res["持股比例分母口径说明"] = (
-                        "【持股比例口径校准（已修复 P1-1）】："
+                        "【持股比例口径校准（已修复 P1-1 与 P3-5）】："
                         "1.【持股占总股本比例_pct / 持股比例_pct】：分母为公司真实法定总股本（如东方电气 34.58亿股、邮储银行 1200亿股），严密反映股东对上市公司的真实权益占比；"
-                        "2.【持股占流通A股比例_pct】：分母为境内流通A股股本（如 A+H 标的或含受限股标的），仅反映其在 A 股流通盘中的集中度；"
+                        "2.【持股占流通A股比例_pct】：分母为境内流通A股股本。注意：在 A+H 股（如邮储银行 601658）或控股股东持股数超过境内流通A股的标的中，该比例完全可能出现大于 100%（例如 119.69%），这反映了该股东总持股规模已超过境内全部流通A股盘子，绝非计算错误；真实股权占比请务必以【持股占总股本比例_pct】（≤100%）为准；"
                         "3. 表内【是否定期报告】字段中，1 代表季末/半年末/年末定期法定财报披露，0 代表非季末重大股权变动、大宗交易或增减持等临时变动日。"
                     )
                     tdx_res["股本口径说明"] = (
@@ -1401,6 +1432,13 @@ class FinanceGateway:
                             if row.get("封板时间") == "--":
                                 row["封板说明"] = "盘中超涨10%异动，未触发封死涨停板"
                 elif category == "unlocks":
+                    tdx_res["解禁口径与核算规则说明"] = (
+                        "【解禁口径与核对铁律（已修复 P1-1）】："
+                        "1.【占比自算铁律】：表中【占总股本比例_pct】一律基于标的当前真实法定总股本严格自算(解禁股数÷法定总股本)，杜绝上游历史申报批次比例引发的语义冲突；"
+                        "2.【上游申报批次占比_pct】：保留上游专线原值，仅代表该批次在历史特定发行时的申报比例，不可作为当前公司总股本占比；"
+                        "3.【解禁后参考流通股本_万股】：上游字段口径因标的而异（部分标的等于总股本，部分等于流通盘），请以解禁股数与明细相邻行差分为准；"
+                        "4.【解禁股数与明细闭合】：只信【解禁股数_万股】，可与多阶段解禁明细相邻行差分交叉核对。"
+                    )
                     t0_data = formatted_tables.get("table0", [])
                     if t0_data:
                         latest_date_str = str(t0_data[0].get("解禁日期", ""))
@@ -1416,6 +1454,12 @@ class FinanceGateway:
                     try:
                         fb_unlocks = self.fallback_client.get_f10(symbol=clean_code, category="unlocks")
                         if fb_unlocks and isinstance(fb_unlocks, list) and len(fb_unlocks) > 1:
+                            if zgb_total_shares > 0:
+                                zgb_wan = zgb_total_shares / 10000.0
+                                for item in fb_unlocks:
+                                    item_unl = float(item.get("解禁股数_万股") or 0.0)
+                                    if item_unl > 0:
+                                        item["占总股本比例_pct"] = round((item_unl / zgb_wan) * 100.0, 3)
                             tdx_res["多阶段解禁明细"] = fb_unlocks
                     except Exception:
                         pass
@@ -1448,7 +1492,7 @@ class FinanceGateway:
                     self._enrich_f10_summary_tables(formatted_tables, tdx_res)
 
                 # 修复 Issue 1: 针对 indicators / financials，挂载宽表字段与专属分类名
-                # 针对 indicators 与 financials：赋予明确的参数区分度与专属数据结构 (修复 P2-3)
+                # 针对 indicators 与 financials：赋予明确的参数区分度与专属数据结构 (修复 P2-3 与 P2-4)
                 if cat_lower == "indicators":
                     tdx_res["category"] = "indicators"
                     tdx_res["category_name"] = "核心财务与经营指标概览 (公司主要财务与估值比率)"
@@ -1457,6 +1501,8 @@ class FinanceGateway:
                     formatted_tables["valuation"] = formatted_tables.get("table6", [])
                     formatted_tables["summary"] = formatted_tables.get("table8", [])
                     tdx_res["估值快照清算说明"] = "【估值基准说明】本表收盘后总市值基于当日收盘清算价计算；盘中时段为上一交易日清算口径，盘中精准估值请结合 stock_quotes 实时行情总市值。"
+                    # 修复 P2-4：明确 indicators 内嵌表与 summary 逐位相同哈希的同源关系，杜绝下游误解为两路独立交叉印证
+                    tdx_res["数据源同源与交叉印证说明"] = "【数据源同源说明】indicators 与 summary 的 table0/4/5/6/8 共享通达信专线同一 F10 概要接口底表，二者逐位哈希相同，属于同一底层数据源在不同业务视图下的挂载，无需重复交叉印证，任取一处即可。"
                 elif cat_lower == "financials":
                     tdx_res["category"] = "financials"
                     tdx_res["category_name"] = "财务三大报表核心数据精要 (利润表/资产负债表/现金流量表)"
@@ -1473,6 +1519,27 @@ class FinanceGateway:
                         formatted_tables["financials_overview"] = formatted_tables.get("table4", [])
                     tdx_res["formatted_tables"] = formatted_tables
                     tdx_res["估值快照清算说明"] = "【估值基准说明】本表收盘后总市值基于当日收盘清算价计算；盘中时段为上一交易日清算口径，盘中精准估值请结合 stock_quotes 实时行情总市值。"
+
+                # 修复 P2-2：在 financials / indicators / summary 顶层显式挂载 最新财报报告期 与 派生指标换期说明
+                if norm_cat in ("indicators", "financials", "summary"):
+                    bgq_val = None
+                    for t_name in ("table4", "indicators", "financials_overview"):
+                        if t_name in formatted_tables and formatted_tables[t_name]:
+                            r0 = formatted_tables[t_name][0]
+                            bgq_val = r0.get("报告期") or r0.get("bgq") or r0.get("截止日期")
+                            if bgq_val:
+                                break
+                    if not bgq_val and norm_cat == "financials":
+                        inc_l = formatted_tables.get("income_summary", [])
+                        if inc_l and isinstance(inc_l, list) and inc_l[0].get("报告期"):
+                            bgq_val = inc_l[0].get("报告期")
+                    
+                    if bgq_val:
+                        tdx_res["最新财报报告期"] = str(bgq_val)
+                        tdx_res["派生指标换期说明"] = f"当前 F10 财务与指标数据基于最新披露的 {bgq_val} 报告期编制。"
+                    else:
+                        tdx_res["最新财报报告期"] = "最新定期财报"
+                        tdx_res["派生指标换期说明"] = "指标已与最新已披露财报同步。"
 
                 # 防空壳无效标的校验：严格校验所有格式化表中是否存在任何实质有效非空单元格（防止全 None 占位行被误判为有效数据）
                 has_any_data = any(

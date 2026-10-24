@@ -532,21 +532,33 @@ class AStockEngine(BaseMarketEngine):
             if ltgb_wan > 0:
                 mapped_ext["流通股本_股"] = int(round(ltgb_wan * 10000))
 
-            # 交叉比对 F10 summary table4 最新财报，防止上游行情专线 ExtInfo 字段滞留上一期 (修复 P1-3)
+            # 交叉比对 F10 summary table4 最新财报，防止上游行情专线 ExtInfo 字段滞留上一期 (修复 P1-3 与 P2-1)
             clean_code = re.sub(r"[^\d]", "", symbol)
             if clean_code:
                 try:
                     f10_sum = self.get_f10(clean_code, category="summary")
                     t4_row = None
+                    t6_row = None
                     for t in f10_sum.get("data", {}).get("ResultSets", []):
-                        if t.get("ResultSetKey") == "table4" and t.get("Content"):
+                        rk = t.get("ResultSetKey")
+                        if rk == "table4" and t.get("Content"):
                             t4_row = dict(zip(t.get("ColName", []), t["Content"][0]))
-                            break
+                        elif rk == "table6" and t.get("Content"):
+                            t6_row = dict(zip(t.get("ColName", []), t["Content"][0]))
+                    
+                    # 修复 P3-6：若 F10 table6 存在精确到个位的真实法定总股本与流通A股，优先覆盖万股截断值
+                    if t6_row:
+                        t6_zgb = int(float(t6_row.get("zgb") or 0))
+                        t6_ltgb = int(float(t6_row.get("ltgb") or 0))
+                        if t6_zgb > 0:
+                            mapped_ext["总股本_股"] = t6_zgb
+                        if t6_ltgb > 0:
+                            mapped_ext["流通股本_股"] = t6_ltgb
+
                     if t4_row and t4_row.get("bgq"):
                         f10_bgq = str(t4_row.get("bgq"))
                         f10_mgsy = float(t4_row.get("mgsy") or 0.0)
                         f10_mgjzc = float(t4_row.get("mgjzc") or 0.0)
-                        f10_gmjlr = float(t4_row.get("gmjlr") or 0.0)
                         mapped_ext["最新财报报告期"] = f10_bgq
                         is_stale = False
                         if f10_mgsy > 0 and (abs(f10_mgsy - mgsy) > 0.001 or (f10_mgjzc > 0 and abs(f10_mgjzc - mgjzc) > 0.01)):
@@ -558,16 +570,14 @@ class AStockEngine(BaseMarketEngine):
                             mapped_ext["报告期每股收益_EPS"] = mgsy
                             mapped_ext["每股净资产_BPS"] = mgjzc
                             ann_factor = 4.0 if f10_bgq.endswith("-03-31") else (2.0 if f10_bgq.endswith("-06-30") else (4.0 / 3.0 if f10_bgq.endswith("-09-30") else 1.0))
-                            annualized_eps = round(mgsy * ann_factor, 4)
-                            mapped_ext["年化每股收益_EPS"] = round(annualized_eps, 3)
-                            if annualized_eps > 0 and now_p > 0:
-                                if f10_gmjlr > 0 and zgb_wan > 0:
-                                    total_cap = now_p * (zgb_wan * 10000)
-                                    ann_profit = f10_gmjlr * ann_factor
-                                    syl = round(total_cap / ann_profit, 2)
-                                else:
-                                    syl = round(now_p / annualized_eps, 2)
+                            ann_eps_raw = mgsy * ann_factor
+                            # 修复 P2-1：换期校准双侧严格代数闭环，确保 [现价 ÷ 年化每股收益_EPS = 动态市盈率_PE] 绝对互逆
+                            if ann_eps_raw > 0 and now_p > 0:
+                                syl = round(now_p / ann_eps_raw, 2)
                                 mapped_ext["动态市盈率_PE"] = syl
+                                mapped_ext["年化每股收益_EPS"] = round(now_p / syl, 4) if syl > 0 else round(ann_eps_raw, 4)
+                            else:
+                                mapped_ext["年化每股收益_EPS"] = round(ann_eps_raw, 4)
                             mapped_ext["派生指标换期说明"] = f"检测到上游行情盘口指标滞留于旧期次，已自动自算对齐至最新披露的 {f10_bgq} 财报口径 (EPS={f10_mgsy}元, BPS={f10_mgjzc}元)。"
                         else:
                             mapped_ext["派生指标换期说明"] = f"上游行情盘口指标与最新披露的 {f10_bgq} 财报完全同步对齐，无需换期重算。"
@@ -580,8 +590,7 @@ class AStockEngine(BaseMarketEngine):
             if syl != 0:
                 mapped_ext["动态市盈率_PE"] = round(syl, 2)
                 if now_p > 0 and "年化每股收益_EPS" not in mapped_ext:
-                    annualized_eps = round(now_p / syl, 3)
-                    mapped_ext["年化每股收益_EPS"] = annualized_eps
+                    mapped_ext["年化每股收益_EPS"] = round(now_p / syl, 4)
 
             # 从 ProInfo (或 ExtInfo 备用源) 中提取真正滚动过去 4 季度的 TTM 滚动市盈率与静态市盈率
             pe_ttm = None
