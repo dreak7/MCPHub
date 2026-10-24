@@ -265,7 +265,7 @@ class HKStockEngine(BaseMarketEngine):
                     "【港股市盈率口径与汇率折算披露】：\n"
                     "1. 字段映射关系：【市盈率_TTM】与【滚动市盈率_PETTM】同源取自过去12个月净利润测算；【静态市盈率_PE_LYR】与【静态市盈率_PEStatic】同源取自上一财年经审计年报。\n"
                     "2. 跨币种汇率换算机制：对于财报以人民币(CNY)编报但股票以港元(HKD)交易的标的（如腾讯控股、中国国航、青岛啤酒、中国电信等），行情源提供的 PE_TTM 在底层已包含港元对人民币的汇率折算（隐含换算比率约为 0.868~0.872 CNY/HKD）。如以人民币净利润手工复核，请统一折算对应汇率。\n"
-                    "3.【A+H两地上市标的市盈率全股本口径铁律】：对于 A+H 两地上市标的（如中国人寿 02628、工商银行 01398、中国国航 00753 等），上游官方行情源提供的【市盈率_TTM】与【静态市盈率】一律采用【全部已发行股份(含A+H总股本) × H股现价 × 汇率 ÷ TTM净利润】口径计算（即分子对应【总市值_全部股本乘H股价_亿港元】，而非单一 H 股流通市值）。例如中国人寿 02628：全股本乘H股市值 6653.51 亿 HKD × 汇率 0.8686 ÷ TTM 净利润 2476.36 亿 = PE_TTM 2.33；若误按纯 H 股流通市值 1751.65 亿计算会导致 PE 仅为 0.61，无法对应归母全量净利润，请务必以此全股本口径为准。"
+                    "3.【A+H两地上市标的市盈率全股本口径警示与自算铁律】：上游公共行情源（腾讯/新浪）对 A+H 标的所直接提供的【市盈率_TTM】与【静态市盈率】系直接透传自行情数据流（逐位一致）。但上游口径底层采用总股本乘H股价折算，且其采用的 TTM 净利润存在历史口径偏差（例如 02628 上游行情串 PE_TTM 2.33 隐含 2476 亿净利，与财报实际归母 TTM 1207.63 亿存在明显出入）。因此行情接口提供的 PE_TTM 仅供参考，在严肃基本面估值分析时，严禁盲信上游原始 PE 数值，必须以最新财报真实归母净利润结合即时汇率进行自算（【总市值或H股折算市值 ÷ 实际财报TTM归母净利润】）！"
                 ),
                 "52周价格区间说明": (
                     "52周最高/最低价统计周期为最近52周滚动交易日，上游行情源底层采用滚动现金分红前复权(QFQ)口径计算；"
@@ -522,6 +522,13 @@ class HKStockEngine(BaseMarketEngine):
                         f"受 count={count} (上限 {limit_cnt}) 参数限制，当前仅返回最近 {len(final_bars)} 根分钟线，"
                         f"已截断当日早盘前 {len(parsed_bars) - len(final_bars)} 根分钟线。如需完整全天日内量能分析，"
                         f"请传入 count={len(parsed_bars)} 或直接查阅日 K 线。"
+                    )
+                elif count > len(final_bars):
+                    # 修复 E (P2): 港股 60m/30m/15m count 超限提示
+                    resp_payload["超限提示"] = (
+                        f"当前请求 count={count} 大于港股当日该周期实际可生成的最大根数({len(final_bars)}根)。"
+                        f"港交所持续交易时段全天最多共生成 6 根 60m bar、11 根 30m bar、21 根 15m bar、66 根 5m bar。"
+                        "港股分钟线仅覆盖当日日内交易时段（不提供跨日历史分钟线），已全量交付当日已生成的全部切片。"
                     )
                 return resp_payload
 
@@ -917,8 +924,10 @@ class HKStockEngine(BaseMarketEngine):
                 c_code = real_currency if (real_currency and rep_name == "RPT_HKF10_FN_MAININDICATOR") else (row.get("CURRENCY_CODE") or row.get("CURRENCY") or "CNY")
                 periods_map[r_date] = {
                     "截止日期": r_date,
+                    "报告期日期": r_date,
+                    "报告期": r_date,
                     "报告期截止日": r_date,
-                    "报告期": r_type,
+                    "报告期标签": r_type,
                     "报表类型": r_type,
                     "币种": c_code,
                     "报告币种": c_code,
@@ -1225,7 +1234,7 @@ class HKStockEngine(BaseMarketEngine):
             "summary": "主要财务指标",
         }
         stmt_name = type_names.get(report_type.lower(), report_type)
-        period_suffix = "单季度" if period_type.lower() == "quarter" else "累计报告期"
+        period_suffix = "单期(半年度单期/单季)" if period_type.lower() == "quarter" else "累计报告期"
         return {
             "symbol": clean_code,
             "market": "香港交易所 (HKEX)",
@@ -1240,8 +1249,9 @@ class HKStockEngine(BaseMarketEngine):
                 f"港股会计报表按国际财务报告准则 (IFRS) 或香港财务报告准则 (HKFRS) 编制。当前口径：【{period_suffix}】。\n"
                 f"准则类别：【{standard_name}】。\n"
                 "1.【数据源与金额单位说明】：本接口采用双源高可用容灾架构：以东方财富港股数据中心专线为主力数据源（统一金额单位为【元】，币种统一为【CNY】），"
-                "当 period_type=quarter 时针对利润表与现金流量表按同财年相邻累计报告期自动做差生成单季度数据（资产负债表为时点存量不作差）。\n"
-                "2.【报告期披露频率说明】：港交所主板强制规则仅要求披露半年度(中报)与全年度(年报)；除 A+H 两地上市标的（因中国证监会要求必须按季披露 Q1/Q3）及腾讯控股等少数自愿披露标的外，多数纯 H 股无一季报/三季报。\n"
+                "当 period_type=quarter 时针对利润表与现金流量表按同财年相邻累计报告期自动做差生成单期数据（资产负债表为时点存量不作差）。\n"
+                "2.【单期与单季度口径区别】：港交所主板强制规则仅要求披露半年度(中报)与全年度(年报)；除 A+H 两地上市标的（因中国证监会要求必须按季披露 Q1/Q3）及腾讯控股等少数自愿披露标的外，多数纯 H 股无一季报/三季报。"
+                "因此对于实行半年度披露的标的，做差推算的单期其本质是半年度单期（如年报扣除中报得到下半年单期 H2，中报累计值即为上半年单期 H1），非真正三月单季；仅按季披露标的才对应真正三月单季(Q1-Q4)。具体每期单期属性已在【单期标签】与【单季度计算说明】中明确标注。\n"
                 "3.【金融与保险业明细说明】：港股专线未对保险等特殊金融行业设立细分子模板，保险公司（如中国太保 02601）的主营负债与资产大额归集于【负债其他项目】/【资产其他项目】，分析资产负债细项结构时须注意该口径特性。"
             ),
         }
@@ -1370,6 +1380,11 @@ class HKStockEngine(BaseMarketEngine):
         for tr in trs[1:25]:
             vals = [re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S | re.I)]
             if any(vals):
+                # 修复 D (P2): 剔除仅包含"暂无数据"、"暂无"等占位文本的空行，杜绝占位行被视作有效记录
+                if len(vals) == 1 and vals[0] in ("暂无数据", "暂无", "无数据", "--", ""):
+                    continue
+                if all(v in ("暂无数据", "暂无", "无数据", "--", "") for v in vals):
+                    continue
                 row_dict = {}
                 for col_name, val in zip(cols, vals):
                     val_str = str(val).strip()
@@ -1453,7 +1468,8 @@ class HKStockEngine(BaseMarketEngine):
                 "股东口径说明": (
                     "【港股权益申报机制说明】：港交所实行中央结算系统 (CCASS) 存托体系，绝大部分机构与公众投资者股份均由香港中央结算(代理人)集中名义持有，"
                     "上市公司并无 A 股式每季度穿透至个人的『前十大流通股东名册』。依据香港《证券及期货条例》第XV部，法定信息披露仅要求持股比例达 5% 及以上的大股东、董事在增减持跨越整百分点时主动申报流水（L=好仓，S=淡仓，P=可借出股份）。"
-                    "本表仅展示各大股东最新一次好仓(L)申报记录（已自动排重历史旧申报与淡仓）。表内序号为【申报顺位】，非同一基准日的当前时点静态股东名次！"
+                    "本表仅展示各大股东最新一次好仓(L)申报记录（已自动排重历史旧申报与淡仓）。表内序号为【申报顺位】，非同一基准日的当前时点静态股东名次！\n"
+                    "【时效缺口风险提示】：港股大股东权益申报仅在增减持跨越法定整百分点门槛时依法强制触发。若某大股东长期无主动申报，最新公开披露申报记录可能停留在数年前（例如 00688 最新申报为 2020 年，02628 最新申报为 2019 年）。最新申报日期仅反映最后一次法定申报时点的历史持股截面，不代表当前最新时点持股，查阅时务必结合具体申报日期进行时效审阅。"
                 ),
             }
 
@@ -1509,7 +1525,9 @@ class HKStockEngine(BaseMarketEngine):
 
         # 分类 2.1：股份回购明细流水 (repurchases)
         if cat == "repurchases":
-            repurchases_data = self._get_sina_hk_table(clean_code, "rights", table_idx=2)
+            raw_rep = self._get_sina_hk_table(clean_code, "rights", table_idx=2)
+            # 修复 D (P2): 剔除回购日期为"暂无数据"的占位行
+            clean_rep = [r for r in raw_rep if str(r.get("回购日期", "")).strip() not in ("暂无数据", "暂无", "无数据", "--", "None", "")]
             return {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
@@ -1517,40 +1535,42 @@ class HKStockEngine(BaseMarketEngine):
                 "category_name": "港股公司股份回购明细流水",
                 "source": "sina_hk_rights (新浪港股公司回购专线)",
                 "formatted_tables": {
-                    "repurchases": repurchases_data,
+                    "repurchases": clean_rep,
                 },
-                "data": repurchases_data[:15] if repurchases_data else {"status": "暂无股份回购记录"},
+                "data": clean_rep[:15] if clean_rep else {"status": "暂无股份回购记录"},
                 "回购说明": "港交所上市公司每日回购报告明细流水，包含回购日期、回购股数、最高/最低回购价及回购总耗资额。",
+                "无记录说明": "该标的近期未在港交所披露股份回购实施流水记录。" if not clean_rep else None,
             }
 
         # 分类 2.2：股份回购宏观聚合概览 (buyback)
         if cat == "buyback":
-            repurchases_data = self._get_sina_hk_table(clean_code, "rights", table_idx=2)
-            total_spent_wan = 0.0
-            total_shares_wan = 0.0
-            for r in repurchases_data:
-                amt = r.get("回购总额_万港元") or r.get("耗资总额(港元)") or r.get("回购金额") or 0.0
-                shs = r.get("回购股数_万股") or r.get("回购股数(股)") or r.get("回购股数") or 0.0
+            raw_rep = self._get_sina_hk_table(clean_code, "rights", table_idx=2)
+            # 修复 D (P2): 剔除回购日期为"暂无数据"的占位行
+            clean_rep = [r for r in raw_rep if str(r.get("回购日期", "")).strip() not in ("暂无数据", "暂无", "无数据", "--", "None", "")]
+            total_spent_hkd = 0.0
+            total_shares = 0.0
+            # 修复 B (P1): 对齐新浪港股原生列名【回购总价(港元)】与【回购数量(股)】
+            for r in clean_rep:
+                amt = r.get("回购总价(港元)") or r.get("回购总额_万港元") or r.get("耗资总额(港元)") or r.get("回购金额") or 0.0
+                shs = r.get("回购数量(股)") or r.get("回购股数_万股") or r.get("回购股数(股)") or r.get("回购股数") or 0.0
                 try:
                     amt_f = float(str(amt).replace(",", ""))
-                    if amt_f > 100000:
-                        amt_f = amt_f / 10000.0
-                    total_spent_wan += amt_f
+                    total_spent_hkd += amt_f
                 except (ValueError, TypeError):
                     pass
                 try:
                     shs_f = float(str(shs).replace(",", ""))
-                    if shs_f > 100000:
-                        shs_f = shs_f / 10000.0
-                    total_shares_wan += shs_f
+                    total_shares += shs_f
                 except (ValueError, TypeError):
                     pass
             buyback_summary = {
-                "累计回购总金额_万港元": round(total_spent_wan, 2),
-                "累计回购股数_万股": round(total_shares_wan, 2),
-                "回购实施记录天数": len(repurchases_data),
-                "最新回购日期": repurchases_data[0].get("回购日期") if repurchases_data else None,
-                "最新回购实施价格_港元": repurchases_data[0].get("最高价(港元)") if repurchases_data else None,
+                "累计回购总金额_港元": round(total_spent_hkd, 2),
+                "累计回购总金额_万港元": round(total_spent_hkd / 10000.0, 2),
+                "累计回购股数_股": int(total_shares),
+                "累计回购股数_万股": round(total_shares / 10000.0, 2),
+                "回购实施记录天数": len(clean_rep),
+                "最新回购日期": clean_rep[0].get("回购日期") if clean_rep else None,
+                "最新回购实施价格_港元": clean_rep[0].get("最高回购价(港元)") or clean_rep[0].get("最高价(港元)") if clean_rep else None,
             }
             return {
                 "symbol": clean_code,
@@ -1560,7 +1580,7 @@ class HKStockEngine(BaseMarketEngine):
                 "source": "sina_hk_rights (新浪港股公司回购专线)",
                 "formatted_tables": {
                     "buyback_summary": [buyback_summary],
-                    "buyback_details": repurchases_data,
+                    "buyback_details": clean_rep,
                 },
                 "data": buyback_summary,
                 "回购说明": "buyback 聚焦于回购累计实施规模与状态的宏观聚合概览 (buyback_summary)；repurchases 聚焦于历次方案明细流水。",
@@ -1836,15 +1856,15 @@ class HKStockEngine(BaseMarketEngine):
                     "公司名称(英文)": info.get("公司名称(英文)", ""),
                     "股份代码": clean_code,
                     "上市日期": info.get("上市日期", ""),
-                    "注册地址": info.get("注册地址", ""),
-                    "办公地址": info.get("办公地址", ""),
-                    "董事长": info.get("董事长", ""),
-                    "董秘": info.get("董秘", "") or info.get("公司秘书", ""),
+                    "注册地址": info.get("注册地址") or info.get("注册办事处", ""),
+                    "办公地址": info.get("办公地址") or info.get("公司总部", ""),
+                    "董事长": info.get("董事长") or info.get("主席", ""),
+                    "董秘": info.get("董秘") or info.get("公司秘书", ""),
                     "核数师": info.get("核数师", ""),
-                    "已发行股本": info.get("已发行股本", ""),
+                    "已发行股本": info.get("已发行股本") or info.get("港股股份数目", ""),
                     "每手股数": info.get("每手股数", ""),
-                    "官方网址": info.get("网址", ""),
-                    "电子邮箱": info.get("电子邮箱", ""),
+                    "官方网址": info.get("官方网址") or info.get("公司网址") or info.get("网址", ""),
+                    "电子邮箱": info.get("电子邮箱") or info.get("电邮地址", ""),
                 }]
                 return {
                     "symbol": clean_code,
@@ -1857,6 +1877,7 @@ class HKStockEngine(BaseMarketEngine):
                     },
                     "data": basic_table[0],
                     "说明": "港股基本工商信息包含公司注册地址、成立上市日期、董事会高管、核数师及法定股本架构。",
+                    "字段完整性说明": "上市日期与每手股数如显示空串，系上游公开数据源F10概况页未收录该字段，可参考实时行情盘口或港交所官方披露易。",
                 }
 
         # 默认：公司资料与业务概况 (summary / company)

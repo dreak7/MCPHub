@@ -259,8 +259,8 @@ class McpServerTest(unittest.TestCase):
         initialized = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual("local-search-fallback-gateway", initialized["result"]["serverInfo"]["name"])
         import mcp_gateway
-        self.assertEqual("1.9.0", mcp_gateway.__version__)
-        self.assertEqual("1.9.0", initialized["result"]["serverInfo"]["version"])
+        self.assertEqual("1.9.1", mcp_gateway.__version__)
+        self.assertEqual("1.9.1", initialized["result"]["serverInfo"]["version"])
         self.assertEqual(mcp_gateway.__version__, initialized["result"]["serverInfo"]["version"])
         tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = [t["name"] for t in tools["result"]["tools"]]

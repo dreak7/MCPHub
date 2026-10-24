@@ -1022,6 +1022,10 @@ class AStockEngine(BaseMarketEngine):
                         period_dict["报告期"] = raw_end
                         period_dict["报告期标签"] = raw_end
 
+                    # 修复 G (P3): 统一对齐挂载 币种 与 金额单位
+                    period_dict["币种"] = "CNY"
+                    period_dict["金额单位"] = "元"
+
                     # 针对现金流量表：将补充资料独立收纳于二级字典，主表仅保留三大活动直接法科目与期初期末现金净增加额
                     if supp_dict:
                         # 间接法补充资料现金净增加额回填（若底层上游漏值为0或None，自动取主表现金净增加额或期初期末差额，修复 B8）
@@ -1336,6 +1340,17 @@ class AStockEngine(BaseMarketEngine):
                                 "财务建模与分析时请务必直接取用官方公布的【营业利润】、【利润总额】与【净利润】，严禁自行通过加减科目拼凑营业利润！"
                             )
 
+                        # 修复 H (P3): 消除金融(银行/证券/保险)与工商业模板归母净利润及综合收益键名分裂
+                        if "归属于母公司股东的净利润" in period_dict and "归母净利润" not in period_dict:
+                            period_dict["归母净利润"] = period_dict["归属于母公司股东的净利润"]
+                        elif "归母净利润" in period_dict and "归属于母公司股东的净利润" not in period_dict:
+                            period_dict["归属于母公司股东的净利润"] = period_dict["归母净利润"]
+
+                        if "归属于母公司股东的综合收益总额" in period_dict and "归属于母公司所有者的综合收益总额" not in period_dict:
+                            period_dict["归属于母公司所有者的综合收益总额"] = period_dict["归属于母公司股东的综合收益总额"]
+                        elif "归属于母公司所有者的综合收益总额" in period_dict and "归属于母公司股东的综合收益总额" not in period_dict:
+                            period_dict["归属于母公司股东的综合收益总额"] = period_dict["归属于母公司所有者的综合收益总额"]
+
                     # 针对资产负债表：自动核算明细与小计的不可加总差额
                     if rtype in ("balance", "balance_sheet", "zcfzb"):
                         if is_financial:
@@ -1427,6 +1442,10 @@ class AStockEngine(BaseMarketEngine):
             "statement_type": type_name,
             "period_type": period_type,
             "period_count": len(result_periods),
+            "currency": "CNY",
+            "unit": "元",
+            "币种": "CNY",
+            "金额单位": "元",
             "is_financial": is_financial,
             "accounting_standard": standard_name,
             "statements": result_periods,
@@ -1521,8 +1540,13 @@ class AStockEngine(BaseMarketEngine):
         """通达信自然语言智能选股 (输入中文自然语言条件，如'主板 绩优 储能 连板')"""
         # 修复 Issue 8: 识别查询条件中的港股/香港意图 (包含常见知名港股巨头与港股关键词)
         is_hk_query = bool(re.search(r"港股|香港|HKEX|\bHK\b|恒生|H股|腾讯|美团|阿里|中芯国际港股|小米", message, re.I))
-        # 严格与下游请求分页参数 1:1 对齐，直接请求所指定的单页条数，避免放大 pageSize 导致跳页或数据断裂
-        fetch_size = max(1, min(limit, 100))
+        # 修复 I (P3): 当开启 filter_st 时，为避免过滤 ST 股票后有效返回只数不足 limit，
+        # 底层适当多拉取适度缓冲 (如请求 limit * 1.5 + 5，上限 100)，在过滤 ST 后尽量补齐至满 limit 条，
+        # 兼顾用户对'有效页大小'的直觉，并保留精确的 filtered_st_count 计数与自陈
+        if filter_st:
+            fetch_size = max(1, min(max(limit, int(limit * 1.5) + 5), 100))
+        else:
+            fetch_size = max(1, min(limit, 100))
         req_body = [{
             "message": message.strip(),
             "rang": "AG",
@@ -1626,6 +1650,7 @@ class AStockEngine(BaseMarketEngine):
             "returned_count": len(results),
             "filtered_st_count": filtered_st_count,
             "filter_st_note": "默认已过滤 ST/*ST 股；若需获取全部股票（含风险警示股）请将 filter_st 设为 False。",
+            "分页与过滤说明": "网关底层在开启 filter_st 时已配置预拉取缓冲，并在过滤风险警示股后补齐至用户请求的有效 limit 条数（若总合格标的不足则全部交付）；filtered_st_count 记录了被剔除的 ST 标的数。",
             "market_scope": "A股 (中国大陆交易所：沪市/深市/北交所)",
             "is_hk_intent": is_hk_query,
             "stocks": results,

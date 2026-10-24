@@ -14,6 +14,9 @@ from mcp_gateway.finance import (
 
 
 class TestFinanceGateway(unittest.TestCase):
+    def setUp(self) -> None:
+        self.gw = FinanceGateway()
+
     def test_infer_market_setcode(self) -> None:
         """测试不同市场证券代码的自动推导"""
         self.assertEqual(infer_market_setcode("600519"), "1")  # 沪市主板
@@ -2023,6 +2026,113 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertTrue(len(docs) > 0)
         self.assertNotIn("[Unknown]", docs[0].get("title", ""))
         self.assertIn("stock_kline", docs[0].get("title", ""))
+
+    # =========================================================================
+    # 【功能块：新一轮 A~J 缺陷收敛验证测试集】
+    # =========================================================================
+    def test_issue_a_lhb_double_nesting_and_false_negative_fixed(self):
+        """验证问题 A (P1): stock_f10 lhb 双层嵌套解开，内外 source 统一，杜绝假否定句"""
+        res_600875 = self.gw.stock_f10({"symbol": "600875", "category": "lhb"})
+        tables = res_600875.get("formatted_tables", {})
+        self.assertIn("billboard_records", tables)
+        self.assertIn("seat_details", tables)
+        self.assertIn("lhb_daily_details", tables)
+        self.assertGreater(len(tables["billboard_records"]), 0)
+        self.assertIsNone(res_600875.get("无记录说明"))
+        self.assertEqual(res_600875.get("source"), "eastmoney_billboard (东方财富龙虎榜官方数据专线)")
+
+    def test_issue_b_and_d_hk_buyback_aggregation_and_placeholder_filter(self):
+        """验证问题 B (P1) 与 D (P2): 港股 buyback_summary 聚合求和与 02628 回购占位行过滤"""
+        # 1. 验证 00688 buyback_summary 累加非 0
+        res_00688 = self.gw.stock_f10({"symbol": "00688", "category": "buyback"})
+        bb_list = res_00688.get("formatted_tables", {}).get("buyback_summary", [])
+        self.assertGreater(len(bb_list), 0)
+        bb_sum = bb_list[0]
+        self.assertGreater(bb_sum.get("累计回购总金额_万港元", 0.0), 0.0)
+        self.assertGreater(bb_sum.get("累计回购股数_万股", 0.0), 0.0)
+        self.assertGreater(bb_sum.get("回购实施记录天数", 0), 0)
+
+        # 2. 验证 02628 过滤暂无数据占位行
+        res_02628_rep = self.gw.stock_f10({"symbol": "02628", "category": "repurchases"})
+        clean_rep = res_02628_rep.get("formatted_tables", {}).get("repurchases", [])
+        self.assertEqual(len(clean_rep), 0)
+        res_02628_bb = self.gw.stock_f10({"symbol": "02628", "category": "buyback"})
+        bb_02628_sum = res_02628_bb.get("formatted_tables", {}).get("buyback_summary", [])[0]
+        self.assertEqual(bb_02628_sum.get("回购实施记录天数"), 0)
+        self.assertIsNone(bb_02628_sum.get("最新回购日期"))
+
+    def test_issue_c_hk_top_holders_aging_gap_warning(self):
+        """验证问题 C (P2): 港股 top_holders 股东口径说明提示最新申报可能多年前"""
+        res_00688 = self.gw.stock_f10({"symbol": "00688", "category": "top_holders"})
+        note = res_00688.get("股东口径说明", "")
+        self.assertIn("时效缺口风险提示", note)
+        self.assertIn("数年前", note)
+
+    def test_issue_e_hk_minute_count_limit_notice(self):
+        """验证问题 E (P2): 港股 60m/30m/15m count 超限提示"""
+        res_60m = self.gw.stock_kline({"symbol": "00688", "period": "60m", "count": 30})
+        self.assertEqual(len(res_60m.get("klines", [])), 6)
+        self.assertIn("超限提示", res_60m)
+        self.assertIn("大于港股当日该周期实际可生成的最大根数", res_60m["超限提示"])
+
+    def test_issue_f_hk_basic_info_field_mapping(self):
+        """验证问题 F (P3): 港股 basic_info 多字段空串消除与真实数据对齐"""
+        res_basic = self.gw.stock_f10({"symbol": "00688", "category": "basic_info"})
+        table = res_basic.get("formatted_tables", {}).get("basic_info", [])
+        self.assertGreater(len(table), 0)
+        row0 = table[0]
+        self.assertTrue(len(row0.get("注册地址", "")) > 0)
+        self.assertTrue(len(row0.get("办公地址", "")) > 0)
+        self.assertTrue(len(row0.get("官方网址", "")) > 0)
+        self.assertTrue(len(row0.get("电子邮箱", "")) > 0)
+        self.assertTrue(len(row0.get("董事长", "")) > 0)
+
+    def test_issue_g_and_h_ashare_financials_currency_and_parent_profit_alias(self):
+        """验证问题 G 与 H (P3): A股三表统一挂载币种与单位，工商业与银行模板归母净利润别名镜像"""
+        # 1. 验证工商业 (贵州茅台)
+        inc_mt = self.gw.stock_financials({"symbol": "600519", "report_type": "income", "limit_periods": 1})
+        self.assertEqual(inc_mt.get("币种"), "CNY")
+        self.assertEqual(inc_mt.get("金额单位"), "元")
+        stmt_mt = inc_mt.get("statements", [])[0]
+        self.assertEqual(stmt_mt.get("币种"), "CNY")
+        self.assertEqual(stmt_mt.get("金额单位"), "元")
+        self.assertIn("归母净利润", stmt_mt)
+        self.assertIn("归属于母公司股东的净利润", stmt_mt)
+        self.assertEqual(stmt_mt["归母净利润"], stmt_mt["归属于母公司股东的净利润"])
+
+        # 2. 验证银行/金融 (邮储银行 601658)
+        inc_bank = self.gw.stock_financials({"symbol": "601658", "report_type": "income", "limit_periods": 1})
+        self.assertEqual(inc_bank.get("币种"), "CNY")
+        self.assertEqual(inc_bank.get("金额单位"), "元")
+        stmt_bank = inc_bank.get("statements", [])[0]
+        self.assertEqual(stmt_bank.get("币种"), "CNY")
+        self.assertEqual(stmt_bank.get("金额单位"), "元")
+        self.assertIn("归母净利润", stmt_bank)
+        self.assertIn("归属于母公司股东的净利润", stmt_bank)
+        self.assertEqual(stmt_bank["归母净利润"], stmt_bank["归属于母公司股东的净利润"])
+
+    def test_issue_i_screener_buffer_and_filter_notes(self):
+        """验证问题 I (P3): screener 的 limit 缓冲补齐与 ST 过滤自陈说明"""
+        res = self.gw.stock_screener({"message": "主板 绩优 储能", "limit": 3, "filter_st": True})
+        self.assertEqual(len(res.get("stocks", [])), 3)
+        self.assertIn("分页与过滤说明", res)
+
+    def test_issue_j_indicators_report_date_alignment(self):
+        """验证问题 J (P3): indicators 报告期与截止日期两市对齐"""
+        # A 股
+        ind_a = self.gw.stock_f10({"symbol": "600519", "category": "indicators"})
+        row_a = ind_a.get("formatted_tables", {}).get("table4", [])[0]
+        self.assertIn("报告期", row_a)
+        self.assertIn("截止日期", row_a)
+        self.assertEqual(row_a["报告期"], row_a["截止日期"])
+
+        # 港股
+        ind_hk = self.gw.stock_f10({"symbol": "00700", "category": "indicators"})
+        row_hk = ind_hk.get("formatted_tables", {}).get("indicators", [])[0]
+        self.assertIn("报告期", row_hk)
+        self.assertIn("截止日期", row_hk)
+        self.assertRegex(str(row_hk["报告期"]), r"^\d{4}-\d{2}-\d{2}$")
+        self.assertRegex(str(row_hk["截止日期"]), r"^\d{4}-\d{2}-\d{2}$")
 
 
 if __name__ == "__main__":

@@ -1082,26 +1082,32 @@ class FinanceGateway:
             }
 
         # =========================================================================
-        # 【功能块 8.3：A股权威龙虎榜异动与席位明细专线 (修复 P2-2)】
-        # - 输入：clean_code
-        # - 功能：调用东方财富权威龙虎榜接口获取登榜记录与买卖营业部席位金额占比
+        # 【功能块 8.3：A股权威龙虎榜异动与席位明细专线 (修复 A (P1) 双层嵌套与假否定句)】
+        # - 输入：clean_code (6位A股数字代码)
+        # - 功能：调用东方财富权威龙虎榜接口，解开双层嵌套，直连 billboard_records 与 seat_details，
+        #         根据真实上榜记录判定并彻底消除假否定句
         # - 输出：结构化龙虎榜明细字典
         # =========================================================================
         if norm_cat == "lhb":
             lhb_data = self.tdx_client._get_ashare_lhb(clean_code)
-            has_records = len(lhb_data.get("lhb_records", [])) > 0
+            inner_tables = lhb_data.get("formatted_tables", {})
+            billboard_records = inner_tables.get("billboard_records", [])
+            seat_details = inner_tables.get("seat_details", [])
+            has_records = len(billboard_records) > 0 or len(seat_details) > 0
             res_obj = {
                 "symbol": clean_code,
                 "category": "lhb",
                 "category_name": "龙虎榜每日席位明细与游资机构博弈",
-                "source": "eastmoney_lhb_vip (东方财富龙虎榜权威专线)",
+                "source": "eastmoney_billboard (东方财富龙虎榜官方数据专线)",
                 "formatted_tables": {
-                    "lhb_daily_details": lhb_data.get("lhb_records", []),
+                    "billboard_records": billboard_records,
+                    "seat_details": seat_details,
+                    "lhb_daily_details": billboard_records,
                 },
-                "data": lhb_data,
+                "data": billboard_records[:15] if billboard_records else {"status": "近期无龙虎榜登榜记录"},
                 "龙虎榜说明": "收录股票近期异动登榜的营业部席位买卖金额、机构专用席位博弈与成交占比。",
                 "盘后入库说明": (
-                    "【龙虎榜披露时效与规则（修复 P3-2）】交易所官方龙虎榜异动及席位明细由上交所/深交所于交易日 16:30–17:30 盘后清算后统一公布入库。"
+                    "【龙虎榜披露时效与规则】交易所官方龙虎榜异动及席位明细由上交所/深交所于交易日 16:30–17:30 盘后清算后统一公布入库。"
                     "盘中交易时段或清算完成前查询无当日记录；若收盘清算后仍无记录，表明该标的当日价格振幅、换手率或涨跌幅未触发交易所法定披露标准"
                     "（如非ST主板单日偏离值达7%、换手率达20%等；可结合 limit_up 工具交叉核验涨跌停及异动池）。"
                 ),
@@ -1298,6 +1304,13 @@ class FinanceGateway:
                             else:
                                 col_title = col_raw
                             row_dict[col_title] = val
+
+                        # 修复 J (P3): 报告期与截止日期两市对齐互通
+                        if norm_cat in ("summary", "indicators"):
+                            if "报告期" in row_dict and "截止日期" not in row_dict:
+                                row_dict["截止日期"] = row_dict["报告期"]
+                            elif "截止日期" in row_dict and "报告期" not in row_dict:
+                                row_dict["报告期"] = row_dict["截止日期"]
 
                         # 针对 margin_trading：清洗数字字符串类型漂移，统一规范为 float (修复 B3)
                         if norm_cat == "margin_trading":
@@ -1685,6 +1698,12 @@ class FinanceGateway:
                 for ok, cn in F10_TABLE4_FINANCIAL_MAP.items():
                     if ok in row:
                         row[cn] = row.pop(ok)
+
+                # 修复 J (P3): 报告期与截止日期两市对齐互通
+                if "报告期" in row and "截止日期" not in row:
+                    row["截止日期"] = row["报告期"]
+                elif "截止日期" in row and "报告期" not in row:
+                    row["报告期"] = row["截止日期"]
 
                 g_profit = row.get("归母净利润_元")
                 g_tb = row.get("归母净利润同比增减_pct")
