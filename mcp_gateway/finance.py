@@ -1354,6 +1354,21 @@ class FinanceGateway:
                                     except (ValueError, TypeError):
                                         pass
 
+                        # 针对 capital_flow：清洗主力与各单净占比数字类型漂移，统一规范为 float (保留 4 位小数)
+                        if norm_cat == "capital_flow":
+                            for num_k in ("主力净流入_元", "超大单净流入_元", "大单净流入_元", "中单净流入_元", "收盘价"):
+                                if num_k in row_dict and row_dict[num_k] is not None:
+                                    try:
+                                        row_dict[num_k] = float(row_dict[num_k])
+                                    except (ValueError, TypeError):
+                                        pass
+                            for pct_k in ("主力净占比_pct", "超大单净占比_pct", "大单净占比_pct", "中单净占比_pct"):
+                                if pct_k in row_dict and row_dict[pct_k] is not None:
+                                    try:
+                                        row_dict[pct_k] = round(float(row_dict[pct_k]), 4)
+                                    except (ValueError, TypeError):
+                                        pass
+
                         # 针对 top_holders table0：补齐真实总股本并反推限售流通股 (修复 P2-4)
                         if norm_cat == "top_holders" and t_key == "table0":
                             if zgb_total_shares > 0:
@@ -1545,6 +1560,17 @@ class FinanceGateway:
                                 "系通达信官方专线两融滚动窗口首日未联合二级市场行情做联合查询回填所致的固有断档（非该日无交易），"
                                 "标的当日二级市场真实复权量价请直接调用 stock_kline 日线为准。"
                             )
+                elif norm_cat == "capital_flow":
+                    tdx_res["资金流向口径说明"] = (
+                        "【主力净占比口径说明】表内【主力净占比_pct】、【超大单净占比_pct】、【大单净占比_pct】、【中单净占比_pct】"
+                        "均为已乘 100 的百分数（数值单位为 %，例如 0.85 即代表 0.85%，由[净流入÷成交额]计算，非 85%），"
+                        "下游引用时切勿重复乘 100。"
+                    )
+                elif norm_cat == "shareholders":
+                    tdx_res["参考股价口径说明"] = (
+                        "【参考股价口径说明】表内【参考股价_元】严格对齐各报告期最后一个交易日（如季末/月末最后一个交易日）的收盘价"
+                        "（若该日无交易 bar 则取前一交易日收盘价），与 stock_kline 日线历史收盘价逐位一致。"
+                    )
 
                 # 增强 F10 摘要表：汉化关键财务与估值指标、依据“利润变动方向”精确校准亏损标的同比含义、注入隔日风格标签与破净动态复核指引
                 if norm_cat == "summary" or ("table3" in formatted_tables and "table4" in formatted_tables):

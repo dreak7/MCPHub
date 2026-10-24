@@ -2258,6 +2258,34 @@ class TestFinanceGateway(unittest.TestCase):
                 if "封单金额_万元" in up:
                     self.assertIsInstance(up["封单金额_万元"], float)
 
+        # 6. 验证涨跌停价次日参考派生与口径说明 (彻底解决休市后 2% 隔日偏差)
+        q_600875 = self.gw.stock_quotes({"symbol": "600875"})
+        ext_875 = q_600875.get("估值与基本盘面", {})
+        self.assertIn("当日涨停价", ext_875)
+        self.assertIn("次日参考涨停价", ext_875)
+        self.assertIn("次日参考跌停价", ext_875)
+        self.assertIn("次日涨跌幅限制_pct", ext_875)
+        self.assertIn("涨跌停价时效说明", ext_875)
+        self.assertEqual(ext_875.get("次日涨跌幅限制_pct"), 10.0)
+
+        # 7. 验证 capital_flow 注入资金流向口径说明与百分比数值规范化
+        res_cf = self.gw.stock_f10({"symbol": "600875", "category": "capital_flow"})
+        self.assertIn("资金流向口径说明", res_cf)
+        cf_rows = res_cf.get("formatted_tables", {}).get("table0", [])
+        if cf_rows:
+            self.assertIn("主力净占比_pct", cf_rows[0])
+            self.assertIsInstance(cf_rows[0]["主力净占比_pct"], float)
+
+        # 8. 验证 shareholders 注入参考股价口径说明
+        res_sh = self.gw.stock_f10({"symbol": "600875", "category": "shareholders"})
+        self.assertIn("参考股价口径说明", res_sh)
+
+        # 9. 验证 income 利润表中的利润表加总纪律说明与双键同值同源提示
+        fin_inc = self.gw.stock_financials({"symbol": "600519", "report_type": "income", "limit_periods": 1})
+        stmts = fin_inc.get("statements", [])
+        self.assertTrue(len(stmts) > 0)
+        self.assertIn("归母净利润双键同值同源提示", stmts[0].get("利润表加总纪律说明", ""))
+
     # =========================================================================
     # 【功能块：验证 Skill 与 Reference 资料库中数据接口与证券专用工具集 100% 对齐】
     # - 输入：FinanceGateway 实例, mcp_gateway.schemas, mcp_gateway.finance
