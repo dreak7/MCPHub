@@ -1449,6 +1449,31 @@ class FinanceGateway:
                         "如需获取上市公司最新分钟级法定披露公告与突发新闻，请调用 stock_news 工具。"
                     )
                 elif norm_cat == "top_holders":
+                    # 支持 periods 参数按需截取最近 N 期股东数据，大幅降低网络传输与 Token 体积 (修复 Q7)
+                    req_periods = arguments.get("periods")
+                    if req_periods is not None:
+                        try:
+                            n_p = int(req_periods)
+                            if n_p > 0:
+                                t0_rows = formatted_tables.get("table0", [])
+                                t1_rows = formatted_tables.get("table1", [])
+                                if t0_rows:
+                                    formatted_tables["table0"] = t0_rows[:n_p]
+                                if t1_rows:
+                                    # 提取前 n_p 个不同截止日期/报告期
+                                    seen_dates = []
+                                    for r in t1_rows:
+                                        d_val = str(r.get("截止日期") or r.get("报告期") or r.get("bgq") or "")
+                                        if d_val and d_val not in seen_dates:
+                                            seen_dates.append(d_val)
+                                        if len(seen_dates) >= n_p:
+                                            break
+                                    if seen_dates:
+                                        formatted_tables["table1"] = [r for r in t1_rows if str(r.get("截止日期") or r.get("报告期") or r.get("bgq") or "") in seen_dates]
+                                tdx_res["期次与截断说明"] = f"已按 periods={n_p} 截取最近 {n_p} 个报告期前十大流通股东数据（已由全量 18 期大幅精简至最新 {n_p} 期）。"
+                        except (ValueError, TypeError):
+                            pass
+
                     tdx_res["持股比例分母口径说明"] = (
                         "【持股比例口径校准（已修复 P1-1 与 P3-5）】："
                         "1.【持股占总股本比例_pct / 持股比例_pct】：分母为公司真实法定总股本（如东方电气 34.58亿股、邮储银行 1200亿股），严密反映股东对上市公司的真实权益占比；"
@@ -1475,11 +1500,11 @@ class FinanceGateway:
                             "正值代表卖方分析师综合调高预期，负值代表调低预期。"
                         )
                 elif norm_cat == "limit_up":
-                    has_records = any(len(rows) > 0 for rows in formatted_tables.values())
+                    t0_data = formatted_tables.pop("table0", [])
+                    has_records = len(t0_data) > 0
                     if not has_records:
                         tdx_res["无记录说明"] = "该股票在近期统计周期内无涨停或异动记录（白马蓝筹股/低波动标的未触发涨停机制属于常态）。"
                     else:
-                        t0_data = formatted_tables.get("table0", [])
                         # 修复 B6：通达信官方专线对'超涨10%'类异动记录的成交金额恒返回0，智能对齐日K线成交额全量补齐
                         need_kline = any(r.get("当日成交金额_万元") in (0, 0.0, "0", None) for r in t0_data)
                         kline_map = {}
@@ -1520,8 +1545,8 @@ class FinanceGateway:
                                     row["成交额补充说明"] = "上游官方专线原始披露成交额"
                             if row.get("封板时间") == "--":
                                 row["封板说明"] = "盘中超涨10%异动，未触发封死涨停板"
-                        formatted_tables["limit_up_records"] = t0_data
-                        formatted_tables.pop("table0", None)
+                    formatted_tables["limit_up_records"] = t0_data
+                    formatted_tables.pop("table0", None)
                 elif norm_cat == "unlocks":
                     tdx_res["解禁口径与核算规则说明"] = (
                         "【解禁口径与核对铁律（已修复 P1-1）】："
@@ -1530,10 +1555,10 @@ class FinanceGateway:
                         "3.【解禁后参考流通股本_万股】：上游字段口径因标的而异（部分标的等于总股本，部分等于流通盘），请以解禁股数与明细相邻行差分为准；"
                         "4.【解禁股数与明细闭合】：只信【解禁股数_万股】，可与多阶段解禁明细相邻行差分交叉核对。"
                     )
-                    t0_data = formatted_tables.get("table0", [])
+                    t0_data = formatted_tables.pop("table0", [])
+                    formatted_tables["unlock_schedule"] = t0_data
+                    formatted_tables.pop("table0", None)
                     if t0_data:
-                        formatted_tables["unlock_schedule"] = t0_data
-                        formatted_tables.pop("table0", None)
                         today_iso = datetime.date.today().strftime("%Y-%m-%d")
                         latest_date_str = str(t0_data[0].get("解禁日期", ""))
                         has_pending = any(r.get("解禁进度") == "未实施" for r in t0_data)
@@ -1765,6 +1790,14 @@ class FinanceGateway:
                 for ok, cn in F10_TABLE0_SUMMARY_MAP.items():
                     if ok in row:
                         row[cn] = row.pop(ok)
+                # 规范化 业绩披露日期 为 ISO 格式 YYYY-MM-DD (修复 Q4)
+                raw_jjrq = str(row.get("业绩披露日期") or "").strip()
+                if re.match(r"^\d{8}$", raw_jjrq):
+                    row["业绩披露日期"] = f"{raw_jjrq[:4]}-{raw_jjrq[4:6]}-{raw_jjrq[6:8]}"
+                elif not raw_jjrq or raw_jjrq.lower() in ("none", "null", ""):
+                    row["业绩披露日期"] = None
+                if row.get("业绩披露日期"):
+                    row["业绩披露日期说明"] = "该日期为上游通达信收录的预约或实际财报披露日；若存在超出当前年度的远期占位，以交易所官方最新披露预约日历为准。"
 
         # 0.1 汉化 table1 (主营业务简述与申万行业，彻底清除 T017/hy1/hy2 裸码)
         if "table1" in formatted_tables:

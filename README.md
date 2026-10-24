@@ -1,10 +1,10 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v1.9.3)
+# Local MCP Search, Coding & Finance Fallback Gateway (v1.9.4)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 145 Passed](https://img.shields.io/badge/Tests-145%20Passed-success.svg)](tests/)
+[![Tests: 150 Passed](https://img.shields.io/badge/Tests-150%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 </div>
@@ -76,7 +76,7 @@ MCPHub/
 - **`[1] 一键生成挂载配置`**：自动识别本机实际 Python 绝对路径与配置文件绝对路径；
 - **`[2] 启动可视化配置向导 (GUI)`**：原生 Windows 窗口，免改 JSON 即可添加引擎或自定义能力；
 - **`[3] 快捷配置/编辑 API 密钥`**：系统记事本安全编辑 `config/.env`；
-- **`[4] 运行服务健康检查与全部测试套件`**：一键运行全量 145 项自动化单元测试；
+- **`[4] 运行服务健康检查与全部测试套件`**：一键运行全量 150 项自动化单元测试；
 - **`[5] 查看服务运行日志`**：实时跟踪 `logs/gateway.log`；
 - **`[6] 运行 Hermes MCP 连通性测试`**：一键执行 `hermes mcp test MCPHub`。
 
@@ -260,6 +260,28 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### v1.9.4 — 普通股真实PB自算挂载(Q1)、现金流补充资料隔离去双计(Q2)、涨停板空表彻底清除(Q3)、业绩披露日期ISO规范化(Q4)、选股器抖动重试(Q6)与股东数据分期截取(Q7) (150项全绿)
+
+- **核心接口与新一轮实测口径陷阱精准治理 (Q1 ~ Q7 陷阱与缺陷 100% 修复)**：
+  - **Q1 600030 普通股真实市净率 (PB) 自动计算挂载与永续债/股本增发口径隔离**：针对上游行情 BPS（19.937）采用报告期股本（148.20 亿股）且归母权益含有 555.6 亿其他权益工具（优先股/永续债），导致原生行情 PB（1.28）比普通股真实市净率（1.3458）低估 4.9% 的口径陷阱。网关层自动调阅 F10 财务指标，在行情字段中新增规范挂载【`市净率_PB_自算_普通股`】（1.3458），并在【`pb_note`】中全面披露普通股真实 PB 计算依据（`总市值 ÷ (归母所有者权益 − 其他权益工具)`），消除银行/券商/保险横比前因分母不统一造成的低估偏误；
+  - **Q2 金融现金流量表同值别名清除与补充资料规范隔离（彻底消除整表遍历双计）**：针对通达信金融类现金流专线报表中将间接法补充科目的 N082 键名直接赋为“现金及现金等价物净增加额”，导致主表中同时存在主表科目与核对科目、整表求和产生严重双计（601336 为 -98.33 亿，600030 为 1,820.80 亿）的问题，网关在底层字典中将 N077~N082 统一更名并自动隔离入二级字典【`补充资料_间接法`】，主表层严格切除同值别名与松散核对项，确保主表仅保留唯一权威的【`现金及现金等价物净增加额`】；
+  - **Q3 limit_up 与 unlocks 游离空表彻底清除 (零残留承诺兑现)**：修复此前无涨停或无解禁记录标的（如 601658 邮储银行）因分支判断漏 pop 导致响应中仍残留空 `table0: []` 的缺陷，改为无条件切除内部未格式化临时表，`formatted_tables` 唯一规范返回 `limit_up_records`（无记录时规范返回空列表与【`无记录说明`】），兑现 100% 无残留声明；
+  - **Q4 summary.table0 业绩披露日期规范化为标准 ISO 格式**：针对上游原始接口下发的 8 位纯数字日期字符串（如 601658 邮储银行 `"20280328"`、002293 罗莱生活 `"20270430"`）与 null 混杂、非标准 ISO 格式的问题，网关层自动清洗转换为标准 ISO 日期格式【`YYYY-MM-DD`】（如 `"2028-03-28"`），无计划时规范返回 null/None，并新增挂载【`业绩披露日期说明`】；
+  - **Q5 setcode 错误信封描述对齐与规范化**：澄清接口规范，将文档中历史遗留的“抛出 ValueError”声明更正为标准 MCP JSON-RPC 错误信封（`{"error": {"code": -1, "message": "..."}, "isError": true}`），行为与文档 100% 吻合；
+  - **Q6 stock_screener 遭遇通达信 NLPSE RPC 抖动自动重试**：针对上游通达信 JNLPSE 自然语言选股服务端偶发抛出 -7405 / -7404 瞬时 503 异常，在引擎层增加指数退避自动重试机制（默认重试 1 次，间隔 600ms），大幅提升 AI 选股工具在瞬时抖动下的可用性；
+  - **Q7 stock_f10.top_holders 新增 periods 与 limit 入参（大幅优化 Token 消耗）**：针对历史版本一次性返回 18 期 × 10 行（约 9.3 万字符）导致单次请求极度浪费 Token 的问题，在 Schema 与网关层新增可选入参 `periods`（1~30，默认不填返回全量）和 `limit`（1~200），支持传入 `periods=1` 仅截取最新一期（约 1,500 字符，带宽缩减 98%），并同步挂载【`期次与截断说明`】；
+  - **额外口径防范印证全面固化**：
+    1. 险企 601336 现金流 98.6% 靠自陈不可做内部结构分析（严禁用于明细分析，只用三净额与期末现金）；
+    2. 601658 邮储银行年化 EPS 0.8577 不扣永续债利息（换算乘数 2.144 非 2），动态 PE 6.39 相比官方 EPS 0.40 偏低约 7%；
+    3. 休市后涨停价/跌停价为上一交易日限价，次日涨跌停须使用【`次日参考涨停价`】/【`次日参考跌停价`】；
+    4. A+H 标的前十大流通股东“占流通A股比例”合计可超 100%（601658 为 119.69%），明确为“占 A 股流通盘比例”，占总股本口径 100% 闭合；
+    5. indicators 与 summary 的 9 张表逐位同哈希同源，明确不可作为两路数据交叉印证。
+- **Skill 行动规范与 References 静态技术资料库 100% 对齐**：
+  - `mcphub-finance/SKILL.md` 正式升级为 **74 大口径陷阱防范律**，增补 600030 PB 自算普通股（陷阱 68）、金融现金流补充资料隔离去双计（陷阱 69）、涨停板空表彻底清除（陷阱 70）、业绩披露日期 ISO 规范化（陷阱 71）、top_holders periods 参数支持（陷阱 72）、选股器 -7405 抖动重试（陷阱 73）、A+H 股东流通A股占比超 100% 语义（陷阱 74）；
+  - `mcphub-finance/references/tool_api_reference.md` 底层技术手册同步更新入参约束矩阵（新增 `periods`/`limit`）、错误信封描述与字段自陈规范；
+- **全量测试套件扩充与自动化工程验证**：
+  - 新增 `test_q1_quotes_pb_calculated_for_capital_change_and_perpetual_bond`、`test_q2_financial_cashflow_no_duplicate_main_keys`、`test_q3_limit_up_no_empty_table0`、`test_q4_summary_table0_report_date_iso_format`、`test_q7_top_holders_periods_filtering` 针对实测新发现问题的 5 项专属单元测试，全套件测试扩充至 **150 项测试用例**，全部 100% 绿灯通过。
 
 ### v1.9.3 — 金融分支资产侧自陈与结构限制(P1-1)、普通股真实PB重算(P2-1)、质押比例双分母自算(P2-2)、指标四键对齐(P3-1)、盘口镜像别名切除及资料库100%对齐 (145项全绿)
 

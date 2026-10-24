@@ -2494,6 +2494,57 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertIn("截断说明", res)
         self.assertIn("300", res["截断说明"])
 
+    def test_q1_quotes_pb_calculated_for_capital_change_and_perpetual_bond(self):
+        """验证 Q1: 600030 股本变动与永续债标的挂载 市净率_PB_自算_普通股 (真值约 1.3458)"""
+        res_q = self.gw.stock_quotes({"symbol": "600030"})
+        ext = res_q.get("估值与基本盘面", {})
+        self.assertIn("市净率_PB_自算_普通股", ext)
+        pb_calc = ext["市净率_PB_自算_普通股"]
+        self.assertAlmostEqual(pb_calc, 1.3458, places=2)
+        note = ext.get("估值口径说明", "")
+        self.assertIn("市净率_PB_自算_普通股", note)
+
+    def test_q2_financial_cashflow_no_duplicate_main_keys(self):
+        """验证 Q2: 金融现金流主表切除 现金及现金等价物净增加额_主表，杜绝遍历双计"""
+        res_cf = self.gw.stock_financials({"symbol": "601336", "report_type": "cashflow", "limit_periods": 1})
+        st = res_cf.get("statements", [])[0]
+        self.assertNotIn("现金及现金等价物净增加额_主表", st)
+        self.assertIn("现金及现金等价物净增加额", st)
+        self.assertIn("补充资料_间接法", st)
+        supp = st.get("补充资料_间接法", {})
+        self.assertIn("补充资料_现金及现金等价物净增加额", supp)
+
+    def test_q3_limit_up_no_empty_table0(self):
+        """验证 Q3: 无涨停标的 (601658) 唯一下发 limit_up_records: []，彻底剔除空 table0"""
+        res_lu = self.gw.stock_f10({"symbol": "601658", "category": "limit_up"})
+        tables = res_lu.get("formatted_tables", {})
+        self.assertNotIn("table0", tables)
+        self.assertIn("limit_up_records", tables)
+        self.assertEqual(len(tables["limit_up_records"]), 0)
+        self.assertIn("无记录说明", res_lu)
+
+    def test_q4_summary_table0_report_date_iso_format(self):
+        """验证 Q4: summary.table0 业绩披露日期规范转换为 YYYY-MM-DD 或 None"""
+        res_601658 = self.gw.stock_f10({"symbol": "601658", "category": "summary"})
+        t0_601658 = res_601658.get("formatted_tables", {}).get("table0", [])[0]
+        self.assertIn("业绩披露日期", t0_601658)
+        self.assertEqual(t0_601658["业绩披露日期"], "2028-03-28")
+        self.assertIn("业绩披露日期说明", t0_601658)
+
+        res_002293 = self.gw.stock_f10({"symbol": "002293", "category": "summary"})
+        t0_002293 = res_002293.get("formatted_tables", {}).get("table0", [])[0]
+        self.assertEqual(t0_002293["业绩披露日期"], "2027-04-30")
+
+    def test_q7_top_holders_periods_filtering(self):
+        """验证 Q7: stock_f10 top_holders 支持 periods=1 过滤，将 18 期大幅压缩为最新 1 期 10 行"""
+        res_th = self.gw.stock_f10({"symbol": "600875", "category": "top_holders", "periods": 1})
+        tables = res_th.get("formatted_tables", {})
+        t0 = tables.get("table0", [])
+        t1 = tables.get("table1", [])
+        self.assertEqual(len(t0), 1)
+        self.assertEqual(len(t1), 10)
+        self.assertIn("期次与截断说明", res_th)
+
 
 if __name__ == "__main__":
     unittest.main()

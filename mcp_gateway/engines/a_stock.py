@@ -576,6 +576,10 @@ class AStockEngine(BaseMarketEngine):
                             mapped_ext["总股本_股"] = t6_zgb
                         if t6_ltgb > 0:
                             mapped_ext["流通股本_股"] = t6_ltgb
+                        t6_sjl = float(t6_row.get("sjl") or 0.0)
+                        if t6_sjl > 0:
+                            mapped_ext["市净率_PB_自算_普通股"] = round(t6_sjl, 4)
+                            mapped_ext["市净率_PB_F10"] = round(t6_sjl, 4)
 
                     if t4_row and t4_row.get("bgq"):
                         f10_bgq = str(t4_row.get("bgq"))
@@ -619,6 +623,8 @@ class AStockEngine(BaseMarketEngine):
             if mgjzc > 0:
                 if now_p > 0 and "市净率_PB" not in mapped_ext:
                     mapped_ext["市净率_PB"] = round(now_p / mgjzc, 2)
+            if "市净率_PB_自算_普通股" not in mapped_ext and mapped_ext.get("市净率_PB") is not None:
+                mapped_ext["市净率_PB_自算_普通股"] = round(float(mapped_ext["市净率_PB"]), 4)
             if syl != 0:
                 mapped_ext["动态市盈率_PE"] = round(syl, 2)
                 if now_p > 0 and "年化每股收益_EPS" not in mapped_ext:
@@ -661,11 +667,16 @@ class AStockEngine(BaseMarketEngine):
             else:
                 ttm_note = ""
             pb_val = mapped_ext.get("市净率_PB")
+            pb_calc = mapped_ext.get("市净率_PB_自算_普通股")
+            pb_calc_str = f"，网关自算普通股市净率为 {pb_calc} 倍" if pb_calc is not None else ""
+            pb_diff_warn = ""
+            if pb_val is not None and pb_calc is not None and abs(pb_val - pb_calc) > 0.03:
+                pb_diff_warn = f"（注：行情市净率 {pb_val} 倍由于BPS分母停留在报告期旧总股本存在滞后低估偏差，真实普通股PB请以自算的【市净率_PB_自算_普通股】{pb_calc} 倍为准）。"
             pb_note = (
-                f"市净率_PB({pb_val}倍)由[现价÷每股净资产_BPS]派生；若标的近期发生送转增发导致总股本变动，"
+                f"市净率_PB({pb_val}倍{pb_calc_str})由[现价÷每股净资产_BPS]派生；若标的近期发生送转增发导致总股本变动，"
                 "上游每股净资产若停留在报告期旧股本口径将导致PB低估。精确普通股PB建议结合资产负债表重算：普通工商业标的为[总市值 ÷ 归母所有者权益]；"
                 "金融企业（券商/银行/保险）或发行了永续债/优先股的标的，分母必须扣除其他权益工具，即[总市值 ÷ (归母所有者权益 − 其他权益工具/优先股/永续债)]，"
-                "严禁直接以归母总权益计算导致估值大幅低估（如中信证券会低估约16%，邮储银行会低估约13%）；"
+                f"严禁直接以归母总权益计算导致估值大幅低估（如中信证券会低估约16%，邮储银行会低估约13%）；{pb_diff_warn}"
             ) if pb_val is not None else ""
             loss_pe_warn = f" 【高危警示·亏损股市盈率不可用】标的处于亏损状态，市盈率为负({ttm_val}倍)，负市盈率属于亏损代号而非低估值，严禁带入PEG或参与横向排序！" if (ttm_val is not None and ttm_val < 0) else ""
             mapped_ext["估值口径说明"] = (
@@ -1112,13 +1123,15 @@ class AStockEngine(BaseMarketEngine):
                         period_dict["补充资料_间接法"] = supp_dict
 
                     if rtype in ("cashflow", "cashflow_statement", "xjllb"):
+                        for hk in ("现金的期末余额_核对", "减_现金的期初余额_核对", "加_现金等价物的期末余额_核对", "减_现金等价物的期初余额_核对", "现金及现金等价物净增加额_主表", "现金及现金等价物净增加额_补充法"):
+                            period_dict.pop(hk, None)
                         if is_financial:
                             period_dict["现金流量表加总纪律说明"] = (
                                 "【金融企业现金流量表核算规范】本表遵循《金融企业财务报表格式》（银行/保险/证券）。"
                                 "因底层行情专线未采集保险原保费收入、证券代理买卖等特殊金融科目明细，流入/流出细项之和与小计可能存在差额，"
                                 "差额已自动自陈至不可加总差额科目。财务分析必须且只能引用三大活动净额（经营净额、投资净额、筹资净额）"
                                 "与期末现金及现金等价物余额。\n"
-                                "【商业银行现金流明细覆盖度限制警示】通达信及公开专线对商业银行现金流量表明细采集不全（筹资流出残差常占小计70%~90%，经营流入残差占5%~20%），明细科目严重缺失，严禁用于现金流内部结构分析！财务建模与流动性分析时，必须且只能引用三大活动净额与期末现金及现金等价物余额（三净额与期末现金桥28/28严格闭合）。\n"
+                                "【金融企业（银行/保险/证券）现金流明细覆盖度限制特别警示】通达信及公开专线对金融企业现金流量表明细采集严重缺失（如保险企业601336经营流入98.6%靠自陈差额、银行企业601658筹资流出70%~90%靠自陈差额），明细科目严重空洞，严禁用于现金流内部百分比结构分析！财务建模与流动性分析时，必须且只能引用三大活动净额与期末现金及现金等价物余额（三净额与期末现金桥28/28严格闭合）。\n"
                                 "【间接法补充资料披露规则】依据《企业会计准则第31号》，上市公司季报（一季报03-31/三季报09-30）依法无需披露间接法附表，故季报期【补充资料_间接法】为空，仅中报(06-30)与年报(12-31)完整披露。"
                             )
                             # 金融企业经营活动现金流入不可加总差额 (原保险保费、代理买卖证券、拆入回购等缺项，修复 D2)
@@ -1701,6 +1714,23 @@ class AStockEngine(BaseMarketEngine):
         }]
         url = f"{self.api_endpoint}?Entry=JNLPSE:wendaQuery"
         raw = self._post(url, req_body)
+        if isinstance(raw, dict) and raw.get("ErrorCode") in (-7405, -7404):
+            time.sleep(0.6)
+            raw = self._post(url, req_body)
+
+        if isinstance(raw, dict) and raw.get("ErrorCode") in (-7405, -7404):
+            return {
+                "message": message,
+                "matched_count": 0,
+                "returned_count": 0,
+                "page": page,
+                "pageSize": fetch_size,
+                "filter_st": filter_st,
+                "filtered_st_count": 0,
+                "headers": [],
+                "results": [],
+                "上游状态说明": f"通达信自然语言选股服务瞬时会话过载 (RPC ErrorCode {raw.get('ErrorCode')})，此为网络会话瞬时抖动，已自动执行重试仍未恢复，建议间隔 1-2 秒后重试。",
+            }
 
         results: list[dict[str, Any]] = []
         headers: list[str] = []

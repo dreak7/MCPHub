@@ -1,6 +1,6 @@
 # MCPHub 证券与金融专属工具集技术参考手册 (Securities & Finance Tools API Reference & Data Dictionary)
 
-> **版本**：v1.9.3  
+> **版本**：v1.9.4  
 > **受众**：人类软件工程师、量化策略分析师、或需要精确核对底层字段/Schema的大模型（按需渐进式调阅）。  
 > **定位**：静态技术基准参考库（API Reference）、参数约束边界矩阵与 80+ 财务科目官方数据字典（Data Dictionary）。  
 > **使用规程**：日常 Agent 推理行动请直接遵循 [mcphub-finance/SKILL.md](../SKILL.md)；本白皮书提供底层最详尽的技术规格、参数边界与数据字典映射。
@@ -25,20 +25,22 @@
 | `stock_lookup` | `query` | string | 是 | 无 | 任意非空字符串（股票代码/中文全称/简称/拼音） | 空字符串抛错；优先提取纯数字；正则白名单防注入；严格依据 range 过滤实体防跨市场代码污染；候选为空时自适应提示无相关标的 |
 | | `range` | string | 否 | `"AG"` | `["AG", "HK-GP", "HK-JJ", "JJ", "MG-GP", "ZS"]` | 非法枚举回退为 `"AG"`；支持 `market_range` 入参别名 |
 | `market_context` | (无入参) | object | 否 | `{}` | 无 | 接受空对象 `{}`，读取本机及东八区标准时间 |
-| `stock_quotes` | `symbol` | string | 是 | 无 | A 股 6 位数字 (`^\d{6}$`)，港股 5 位数字 (`^\d{5}$`) | 自动去除空格；纯数字自动补齐位数；无效代码显式拦截；无条件挂载最新财报报告期与自适应换期说明；估值口径警示送转后 PB 需结合净资产重算与 PETTM 刷新时差；A+H 标的明确披露总市值与 PE_TTM 均基于全部已发行总股本(含A+H)乘H股价口径 |
-| | `setcode` | string | 否 | `null` | `["0", "1", "2", "31"]` (深市/沪市/北交所/港交所) | 缺省时底层按代码前缀自动嗅探路由；严格校验传入 setcode 与标的真实市场一致性，冲突时主动抛出 ValueError 拦截，杜绝跨市场静默错标 |
+| `stock_quotes` | `symbol` | string | 是 | 无 | A 股 6 位数字 (`^\d{6}$`)，港股 5 位数字 (`^\d{5}$`) | 自动去除空格；纯数字自动补齐位数；无效代码显式拦截；无条件挂载最新财报报告期与自适应换期说明；估值口径警示送转后 PB 需结合净资产重算与 PETTM 刷新时差；A+H 标的明确披露总市值与 PE_TTM 均基于全部已发行总股本(含A+H)乘H股价口径；自动挂载自算的【市净率_PB_自算_普通股】(扣除永续债/其他权益工具)，消除股本变动低估 |
+| | `setcode` | string | 否 | `null` | `["0", "1", "2", "31"]` (深市/沪市/北交所/港交所) | 缺省时底层按代码前缀自动嗅探路由；严格校验传入 setcode 与标的真实市场一致性，冲突时主动强拦截，返回标准 JSON-RPC 错误信封 `{"error": {"code": -1, "message": "..."}, "isError": true}`，杜绝跨市场静默错标 |
 | `stock_kline` | `symbol` | string | 是 | 无 | A 股 6 位数字，港股 5 位数字 | 代码格式同上；无效代码拦截报错 |
 | | `period` | string | 否 | `"day"` | `["day", "week", "month", "60m", "30m", "15m", "5m", "1m"]` | 非法周期回退为 `"day"`；港股 30m 包含 CAS 竞价量额，15m 网格对齐；港股日内分钟线在请求条数超出当日最大可用根数时注入超限提示 |
-| | `count` | integer| 否 | `30` | `1 <= count <= 500` (日线最大 800) | 超出范围自动截断至 `[1, 500]`；港股 1m 分钟线扩容至 500 根以完整覆盖当日 330 根以上行情，请求条数不足时在顶层注入截断说明 |
+| | `count` | integer| 否 | `30` | `1 <= count <= 500` (日线最大 800) | 超出范围自动截断至 `[1, 500]`；A股与港股均在超出时挂载截断说明与超限提示 |
 | | `adjust` | string | 否 | `"qfq"` | `["qfq", "hfq", "none"]` (前复权/后复权/不复权) | 非法取值回退为 `"qfq"`；A股与港股均全面支持真实前复权(qfq)/后复权(hfq)/不复权(none) |
 | | `setcode` | string | 否 | `null` | `["0", "1", "2", "31"]` | 选填；缺省自动识别；严格与代码前缀校验一致 |
 | | `with_indicators`| boolean| 否 | `true` | `true` / `false` | 默认为 `true`，纯 Python 服务端原生防幻觉技术指标 |
-| `stock_financials` | `symbol` | string | 是 | 无 | A 股 6 位数字，港股 5 位数字 | 无效代码拦截报错；A 股三表截止日期与报告期日期严格输出 ISO-8601 YYYY-MM-DD 标准机器可读日期，文字标签收纳于报告期；顶层与各期明细显式输出 currency/unit/币种/金额单位 (CNY/元)；利润表中归母净利润与归属于母公司股东的净利润互为镜像别名双向支持；库存股统一收敛为唯一规范键【库存股】（彻底切除'减_库存股'与'库存股_抵减项'等正数别名防遍历双计）；归母所有者权益严格扣减库存股并自陈专项储备缺项差额；自动适配工商业(isjr=0)与金融企业(isjr=1)准则；港股建立双重金融嗅探自适应注入 is_financial 与 accounting_standard（金融保险企业全三表闭合统一）；校准金融资产负债表科目(N003 货币资金，N010 拆出资金)；流动负债明细白名单补齐预计流动负债与待转销项税额；非流动资产自动核算 CAS 21 新租赁准则使用权资产缺项自陈；金融利润表公式严格遵循【营业利润 = 营业收入 − 营业支出】；自动披露 CAS25/IFRS17 保险收入与投资现金流缺口自陈；定期报告季提示三表异步入库时差；现金流量表加总纪律说明依据财政部《企业会计准则第31号》注入一三季报免于披露现金流间接法附注说明与补充资料_间接法说明 |
+| `stock_financials` | `symbol` | string | 是 | 无 | A 股 6 位数字，港股 5 位数字 | 无效代码拦截报错；A 股三表截止日期与报告期日期严格输出 ISO-8601 YYYY-MM-DD 标准机器可读日期，文字标签收纳于报告期；顶层与各期明细显式输出 currency/unit/币种/金额单位 (CNY/元)；现金流量表主表彻底切除【现金及现金等价物净增加额_主表】与松散核对项，间接法补充资料独立隔离于二级字典【补充资料_间接法】防遍历双计；利润表中归母净利润与归属于母公司股东的净利润互为镜像别名双向支持；库存股统一收敛为唯一规范键【库存股】；归母所有者权益严格扣减库存股并自陈专项储备缺项差额；金融资产负债表挂载【资产总计不可加总差额_金融投资及信贷专有科目缺项】与金融资产结构限制说明；自动披露 CAS25/IFRS17 保险收入与金融现金流缺口自陈 |
 | | `report_type` | string | 否 | `"balance"` | `["balance", "income", "cashflow"]` (资产负债/利润/现金流) | 非法取值回退为 `"balance"` |
 | | `period_type` | string | 否 | `"report"` | `["report", "quarter"]` (报告期累计 / 单季度做差) | 非法取值回退为 `"report"`；港股半年度披露标的自适应保留中报(H1)与年报单期(H2，标签标明单期) |
 | | `limit_periods`| integer| 否 | `4` | `1 <= limit_periods <= 10` | 超出范围自动截断至 `[1, 10]` |
-| `stock_f10` | `symbol` | string | 是 | 无 | A 股 6 位数字，港股 5 位数字 | 无效代码拦截报错；非法枚举回退为 `"concepts"`；lhb 龙虎榜外层直连上榜记录与席位明细（彻底切除同哈希重复表 lhb_daily_details）并消除假否定句；港股 buyback 聚合全面对齐新浪表头实现明细真实累加，repurchases 底层清洗无回购占位行；top_holders 注入港股法定申报时效缺口提示；basic_info 补齐港股注册地址/办公地址/董事长/已发行股本/网址等映射；indicators/financials 双向对齐截止日期与报告期；港股 concepts/industry, events/dividends, indicators/financials, repurchases/buyback 四组分类彻底异构解耦；summary.table5 质押客观说明未收录事实(杜绝武断零质押)；margin_trading.table0 空表输出无记录说明且日期统一为 ISO-8601 YYYY-MM-DD；limit_up 唯一规范交付 limit_up_records（切除 table0 杜绝同哈希重复表），历史成交额缺失时注入明确补充说明；basic_info.table2 为空时注入 ESG 披露说明；unlocks 唯一规范交付 unlock_schedule（切除 table0 杜绝同哈希重复表与双计），日期统一规范为字符串且表级与行内状态一致消除自相矛盾；events 催化日期格式化为 YYYY-MM-DD；dividends 金额列强制转换为规范 float；indicators 子表 table1/2/3/5/7 裸码与拼音缩写 100% 汉化并剔除 rec_id，顶层挂载与 summary 逐位同源说明；financials/indicators/summary 顶层对称挂载最新财报报告期与换期说明；unlocks 确立引用铁律(只信解禁股数，占比基于当前法定总股本一律自算，上游T014标为申报批次历史比例消除冲突，多阶段明细严格取当期解禁值 CURRENT_FREE_SHARES)；top_holders 交付校准后的持股占总股本比与占流通A股比双口径字段，明确声明 A+H 标的持股占流通A股比允许大于 100% |
+| `stock_f10` | `symbol` | string | 是 | 无 | A 股 6 位数字，港股 5 位数字 | 无效代码拦截报错；非法枚举回退为 `"concepts"`；lhb 龙虎榜外层直连上榜记录与席位明细并消除假否定句；limit_up 无论有无记录 formatted_tables 唯一规范交付 limit_up_records（table0 彻底零残留）；unlocks 唯一交付 unlock_schedule（table0 零残留）；summary table0 业绩披露日期规范化为 YYYY-MM-DD（无披露日为 null，挂载远期占位说明）；top_holders 交付持股占总股本比与占流通A股比双口径字段，声明 A+H 标的持股占流通A股比允许大于 100%；支持 periods 参数按需调阅最新 N 期股东数据 |
 | | `category` | string | 否 | `"concepts"`| 18 大合法枚举（详见第三章能力矩阵） | 见上；lhb 外层直连真实流水，dividends 接入新浪权威历年分红送转专线（数值强制 float），indicators/financials 规范化为 summary 并交付核心指标大表，repurchases 与 buyback 实现明细流水与宏观聚合统计分工 |
+| | `periods` | integer| 否 | `null` | `1 <= periods <= 30` | 历史期次限制（针对 top_holders 等多期数据，默认返回全部历史期次如 18 期；指定为 1 可仅取最新期，大幅降低传输体积） |
+| | `limit` | integer| 否 | `null` | `1 <= limit <= 200` | 单表行数限制（可选） |
 | `stock_screener` | `message` | string | 是 | 无 | 自然语言选股条件，如 `"主板 绩优 储能"` | 长度限制 200 字符；自动清洗特殊字符；检测港股意图注入市场范围与 warning 警示；支持 `message` / `query` / `condition` 别名入参 |
 | | `limit` | integer| 否 | `10` | `1 <= limit <= 100` | 超出范围自动截断至 `[1, 100]`；底层 pageSize 严格与 limit 保持 1:1 对齐，杜绝偏移量翻倍与漏标的；跨页遍历逐页并集严格守恒 |
 | | `page` | integer| 否 | `1` | `1 <= page <= 20` | 超出范围截断至 `[1, 20]` |

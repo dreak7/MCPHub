@@ -90,6 +90,18 @@ STOCK_F10_SCHEMA = {
                 ],
                 "default": "concepts",
                 "description": "基本面分类：concepts/industry=热点题材板块族谱, events/dividends=事件驱动催化与分红派息, forecast=机构盈利预测, shareholders=股东人数与大股东增减持流水, top_holders=十大流通股东(港股为持股5%以上主要股东), repurchases/buyback=股份回购明细(港股), capital_flow=主力资金流向, margin_trading=融资融券, limit_up/lhb=涨停分析与龙虎榜席位, unlocks=限售解禁, summary=公司概要, basic_info=公司基本工商与发行信息, indicators/financials=核心财务与经营指标宽表"
+            },
+            "periods": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 30,
+                "description": "历史期次数量限制（针对 top_holders 等多期数据，可选；默认返回全部历史期次如 18 期；指定为 1 可仅取最新期，大幅降低传输体积）"
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "description": "单表返回行数限制（可选）"
             }
         },
         "required": ["symbol"],
