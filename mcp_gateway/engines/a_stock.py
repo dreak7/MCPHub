@@ -682,16 +682,17 @@ class AStockEngine(BaseMarketEngine):
             else:
                 r_limit = 0.10
 
-            if now_p > 0:
-                next_zt = round(now_p * (1.0 + r_limit) + 1e-6, 2)
-                next_dt = round(now_p * (1.0 - r_limit) + 1e-6, 2)
+            ref_price = now_p if now_p > 0 else close_p
+            if ref_price > 0:
+                next_zt = round(ref_price * (1.0 + r_limit) + 1e-6, 2)
+                next_dt = round(ref_price * (1.0 - r_limit) + 1e-6, 2)
                 mapped_ext["次日参考涨停价"] = next_zt
                 mapped_ext["次日参考跌停价"] = next_dt
                 mapped_ext["次日涨跌幅限制_pct"] = round(r_limit * 100.0, 1)
                 mapped_ext["涨跌停价时效说明"] = (
                     f"【涨跌停价时效与次日限价说明】表中【涨停价】/【当日涨停价】({zt_curr}元)为上游交易所针对当日交易日（基于昨收价）设定的法定限价；"
                     f"盘后休市期间，上游字段尚未更新至下一个交易日（如 600875 盘后字段 24.15元 仍为当日限价）。"
-                    f"网关已依据当日最新收盘现价({now_p}元)及标的板块涨跌幅限制(±{int(r_limit*100)}%)自算生成【次日参考涨停价】({next_zt}元)与【次日参考跌停价】({next_dt}元)供隔夜推演参考；"
+                    f"网关已依据当日最新基准现价({ref_price}元)及标的板块涨跌幅限制(±{int(r_limit*100)}%)自算生成【次日参考涨停价】({next_zt}元)与【次日参考跌停价】({next_dt}元)供隔夜推演参考；"
                     "次日官方实际涨跌停价请以交易所早间开盘清算价为准。"
                 )
 
