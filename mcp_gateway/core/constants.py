@@ -80,7 +80,7 @@ F10_TABLE4_FINANCIAL_MAP: dict[str, str] = {
 }
 
 F10_TABLE6_VALUATION_MAP: dict[str, str] = {
-    "sylttm": "动态市盈率_PE_TTM",
+    "sylttm": "滚动市盈率_PETTM",
     "syllyr": "静态市盈率_PE_LYR",
     "sjl": "市净率_PB_昨收",
     "zsz": "总市值_元",

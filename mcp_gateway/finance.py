@@ -1783,8 +1783,17 @@ class FinanceGateway:
                     if ok in row:
                         row[cn] = row.pop(ok)
 
+                # 修复问题 1: 消除动态 PE 同名不同义歧义
+                # F10 table6 中的 sylttm 为真实的 TTM 滚动市盈率，与 stock_quotes 中的【滚动市盈率_PETTM】同值同源
+                # 显式挂载标准名称【滚动市盈率_PETTM】与【滚动市盈率_PE_TTM】，同时保留【动态市盈率_PE_TTM】作为同值兼容别名
+                pe_ttm_val = row.get("滚动市盈率_PETTM") if "滚动市盈率_PETTM" in row else row.get("动态市盈率_PE_TTM")
+                if pe_ttm_val is not None:
+                    row["滚动市盈率_PETTM"] = pe_ttm_val
+                    row["滚动市盈率_PE_TTM"] = pe_ttm_val
+                    row["动态市盈率_PE_TTM"] = pe_ttm_val
+
                 # 检验 PE_TTM 是否由于快照批处理入库滞后而落后于最新报告期 (修复 P1-2)
-                curr_pe_ttm = row.get("动态市盈率_PE_TTM")
+                curr_pe_ttm = row.get("滚动市盈率_PETTM") or row.get("动态市盈率_PE_TTM")
                 if curr_pe_ttm is not None and table4_bgq:
                     try:
                         clean_code = tdx_res.get("symbol", "")
@@ -1798,6 +1807,8 @@ class FinanceGateway:
                             if real_ttm is not None and str(real_ttm).strip() != "":
                                 real_ttm_val = round(float(real_ttm), 2)
                                 if abs(real_ttm_val - float(curr_pe_ttm)) > 1.0:
+                                    row["滚动市盈率_PETTM"] = real_ttm_val
+                                    row["滚动市盈率_PE_TTM"] = real_ttm_val
                                     row["动态市盈率_PE_TTM"] = real_ttm_val
                                     row["PE_TTM校准说明"] = (
                                         f"上游F10估值快照期次入库滞后(原值{curr_pe_ttm})，"
@@ -1806,6 +1817,7 @@ class FinanceGateway:
                     except Exception:
                         pass
 
+                row["口径辨析提示"] = "table6 中的【滚动市盈率_PETTM】(sylttm) 为基于过去4个季度滚动归母净利的真 TTM 市盈率，与 stock_quotes 中的【滚动市盈率_PETTM】同口径；请勿将其与 quotes 中的【动态市盈率_PE】(单季年化口径) 直接横比。"
                 row["估值时效提示"] = f"市净率(PB)/市盈率(PE)基于上一交易日清算日({gxrq or '前一交易日'})，盘中请结合 stock_quotes 实时现价动态重算。"
 
         # 3.5 增强 table8 (基础信息与行业分类汉化映射，修复 P3 杜绝裸英文字段外泄)

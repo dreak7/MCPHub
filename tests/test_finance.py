@@ -2169,6 +2169,26 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertRegex(str(row_hk["截止日期"]), r"^\d{4}-\d{2}-\d{2}$")
 
 
+    def test_f10_table6_pe_ttm_standard_naming_and_alignment(self):
+        """验证最新问题 1: F10 table6 滚动市盈率_PETTM 标准命名与 quotes 滚动市盈率 100% 对齐"""
+        # 1. 验证 601658 (邮储银行) F10 summary table6
+        res_f10 = self.gw.stock_f10({"symbol": "601658", "category": "summary"})
+        t6_rows = res_f10.get("formatted_tables", {}).get("table6", [])
+        self.assertGreater(len(t6_rows), 0)
+        t6_0 = t6_rows[0]
+        # 验证同时包含标准名 滚动市盈率_PETTM 与兼容名 动态市盈率_PE_TTM
+        self.assertIn("滚动市盈率_PETTM", t6_0)
+        self.assertIn("动态市盈率_PE_TTM", t6_0)
+        self.assertIn("口径辨析提示", t6_0)
+        self.assertEqual(t6_0["滚动市盈率_PETTM"], t6_0["动态市盈率_PE_TTM"])
+
+        # 2. 验证与 quotes 滚动市盈率_PETTM 保持同一口径 (约 7.34 倍)
+        quotes = self.gw.stock_quotes({"symbol": "601658"})
+        q_ttm = quotes.get("估值与基本盘面", {}).get("滚动市盈率_PETTM")
+        self.assertIsNotNone(q_ttm)
+        self.assertAlmostEqual(float(t6_0["滚动市盈率_PETTM"]), float(q_ttm), delta=0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
 
