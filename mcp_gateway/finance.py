@@ -51,6 +51,24 @@ from .core.constants import *
 # =========================================================================
 from .core.indicators import calculate_indicators
 from .core.market_utils import get_market_context, infer_market_setcode
+from .invariants import verify_all_financial_invariants
+
+
+# =========================================================================
+# 【功能块 2.1：第一道防翻车安全门（代数闭环安检网装饰器）】
+# - 输入：func (Callable): 网关对外接口方法
+# - 功能：自动对对外交付的财报、行情估值与龙虎榜执行代数恒等式闭环审查
+# - 输出：经过安检认证的数据字典
+# =========================================================================
+def _enforce_gate_invariants(func: Callable) -> Callable:
+    """第一道防翻车安全门：自动拦截并审查网关对外输出的代数闭环"""
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        res = func(*args, **kwargs)
+        if isinstance(res, dict):
+            return verify_all_financial_invariants(res, strict=False)
+        return res
+    return wrapper
+
 
 
 # =========================================================================
@@ -881,6 +899,9 @@ class PublicFallbackClient:
 
 # =========================================================================
 # 【功能块 8：金融高可用调度网关核心类 (FinanceGateway)】
+# 【第二道防翻车安全门：单一事实源 SSOT 架构治理公约】
+# - 底层洗净 (Engine Level): 原始数据抓取、万元转换、汇率反解与代数推导 100% 留在 engines/ 内部；
+# - 外层纯净 (Gateway Level): 本网关只负责协议路由、参数校验、异常包装与第一道安检门禁；严禁在外层二次投药！
 # - 输入：配置参数、日志记录器
 # - 功能：整合通达信官方专线与公开备用数据源，负责参数校验、多源熔断切换、
 #         Token 掩码脱敏与大模型友好响应封装
@@ -963,6 +984,7 @@ class FinanceGateway:
             res["候选为空说明"] = f"在指定市场范围 ({market_range}) 中未检索到与 '{query}' 相关的证券标的或候选实体，请核对代码或名称。"
         return res
 
+    @_enforce_gate_invariants
     def stock_quotes(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """工具 2：实时盘口与完整证券行情"""
         symbol = arguments.get("symbol", "").strip()
@@ -990,6 +1012,7 @@ class FinanceGateway:
             with_indicators=with_indicators,
         )
 
+    @_enforce_gate_invariants
     def stock_financials(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """工具 4：三大财务报表 (资产负债表, 利润表, 现金流量表) 与经营主营分析"""
         symbol = arguments.get("symbol", "").strip()
@@ -1005,6 +1028,7 @@ class FinanceGateway:
             limit_periods=limit_periods,
         )
 
+    @_enforce_gate_invariants
     def stock_f10(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """工具 5：F10 深度基本面（热点题材板块族谱、业绩预告、股东变动、龙虎榜、限售解禁）"""
         symbol = arguments.get("symbol", "").strip()
@@ -1122,6 +1146,7 @@ class FinanceGateway:
                 },
                 "data": billboard_records[:15] if billboard_records else {"status": "近期无龙虎榜登榜记录"},
                 "龙虎榜说明": "收录股票近期异动登榜的营业部席位买卖金额、机构专用席位博弈与成交占比。",
+                "成交额口径说明": lhb_data.get("成交额口径说明", "【龙虎榜成交额口径说明】上榜总览表【市场总成交额_万元】为交易所异动统计窗口期（如连续2个或3个交易日）内的多日累计成交总额，席位明细表【占总成交比例_pct】的分母即为此多日合计总额，非单日成交额。按单日成交额读会显著低估席位实际权重。"),
                 "盘后入库说明": (
                     "【龙虎榜披露时效与规则】交易所官方龙虎榜异动及席位明细由上交所/深交所于交易日 16:30–17:30 盘后清算后统一公布入库。"
                     "盘中交易时段或清算完成前查询无当日记录；若收盘清算后仍无记录，表明该标的当日价格振幅、换手率或涨跌幅未触发交易所法定披露标准"
@@ -1180,11 +1205,16 @@ class FinanceGateway:
                     "buyback_summary": [buyback_summary],
                     "buyback_details": rep_list,
                 }
+                out_data = {
+                    "summary": buyback_summary,
+                    "details": rep_list,
+                }
             else:
                 cat_name = "股份回购方案与实施明细"
                 tbls = {
                     "repurchases": rep_list,
                 }
+                out_data = rep_list
 
             res_obj = {
                 "symbol": clean_code,
@@ -1192,8 +1222,14 @@ class FinanceGateway:
                 "category_name": cat_name,
                 "source": "eastmoney_repurchases (东方财富A股回购权威专线)",
                 "formatted_tables": tbls,
-                "data": rep_data,
+                "data": out_data,
                 "回购说明": "A股上市公司实施股份回购的最新进展、回购金额上限/下限、已回购股数与方案进度。",
+                "表关系说明": (
+                    "【参数分工与表关系声明】buyback 聚焦于回购累计实施规模与状态的宏观聚合概览 (提供 buyback_summary 统计与 buyback_details 明细)；"
+                    "repurchases 聚焦于历次方案明细流水列表 (repurchases)。"
+                    "buyback.buyback_details 与 repurchases.repurchases 数据完全同源；"
+                    "下游取数指引：若需宏观统计全貌请传 category=buyback，若只需遍历流水明细请传 category=repurchases。"
+                ),
             }
             if norm_cat == "buyback":
                 res_obj["参数说明"] = "buyback 聚焦于回购累计实施规模与状态的高维聚合概览 (buyback_summary)；repurchases 聚焦于历次方案明细流水。"
@@ -1524,30 +1560,35 @@ class FinanceGateway:
                         )
                 elif norm_cat == "limit_up":
                     t0_data = formatted_tables.pop("table0", [])
+                    formatted_tables["limit_up_records"] = t0_data
                     has_records = len(t0_data) > 0
                     if not has_records:
                         tdx_res["无记录说明"] = "该股票在近期统计周期内无涨停或异动记录（白马蓝筹股/低波动标的未触发涨停机制属于常态）。"
                     else:
-                        # 修复 B6：通达信官方专线对'超涨10%'类异动记录的成交金额恒返回0，智能对齐日K线成交额全量补齐
-                        need_kline = any(r.get("当日成交金额_万元") in (0, 0.0, "0", None) for r in t0_data)
+                        # 修复 D6 & B6：拉取日K线成交额，对齐全天成交额并披露封板时段与全天总额口径差异
                         kline_map = {}
-                        if need_kline:
-                            try:
-                                kline_res = self.tdx_client.get_kline(clean_code, period="day", count=300)
-                                for b in (kline_res.get("klines") or kline_res.get("bars") or []):
-                                    b_time = str(b.get("time", ""))[:10]
-                                    b_amt = b.get("amount")
-                                    if b_time and b_amt and float(b_amt) > 0:
-                                        kline_map[b_time] = round(float(b_amt) / 10000.0, 2)
-                            except Exception:
-                                pass
+                        try:
+                            kline_res = self.tdx_client.get_kline(clean_code, period="day", count=300)
+                            for b in (kline_res.get("klines") or kline_res.get("bars") or []):
+                                b_time = str(b.get("time", ""))[:10]
+                                b_amt = b.get("amount")
+                                if b_time and b_amt and float(b_amt) > 0:
+                                    kline_map[b_time] = round(float(b_amt) / 10000.0, 2)
+                        except Exception:
+                            pass
 
                         for row in t0_data:
                             # 预设统一列名，确保所有标的与行的列结构完全一致，杜绝 8 列与 10 列漂移 (修复 P3)
                             row.setdefault("成交额补充说明", None)
                             row.setdefault("封板说明", None)
+                            trade_d = str(row.get("涨停日期", ""))[:10]
+                            kline_amt = kline_map.get(trade_d)
+                            if kline_amt is not None:
+                                row["全天总成交金额_日K_万元"] = kline_amt
+                            else:
+                                row["全天总成交金额_日K_万元"] = None
+
                             if row.get("当日成交金额_万元") in (0, 0.0, "0", None):
-                                trade_d = str(row.get("涨停日期", ""))[:10]
                                 if trade_d in kline_map:
                                     row["当日成交金额_万元"] = kline_map[trade_d]
                                     row["成交额补充说明"] = "由日K线历史成交额精确补全(解决上游超涨10%缺值)"
@@ -1564,12 +1605,23 @@ class FinanceGateway:
                                 if row.get("成交额补充说明") is None:
                                     row["成交额补充说明"] = "历史异动上游专线未单独披露成交金额，日K线回溯超出覆盖范围"
                             else:
-                                if row.get("成交额补充说明") is None:
-                                    row["成交额补充说明"] = "上游官方专线原始披露成交额"
+                                up_amt = float(row.get("当日成交金额_万元") or 0.0)
+                                if kline_amt is not None and kline_amt > 0 and abs(up_amt - kline_amt) > 1.0:
+                                    ratio = round((up_amt / kline_amt) * 100.0, 1)
+                                    row["成交额补充说明"] = (
+                                        f"上游专线披露值为【封板/异动时段成交金额】({up_amt:,.2f}万元，约占全天{ratio}%)；"
+                                        f"全天总成交额请以【全天总成交金额_日K_万元】({kline_amt:,.2f}万元)或日K线为准。"
+                                    )
+                                else:
+                                    row["成交额补充说明"] = "上游官方专线原始披露成交额与全天日K线成交额一致"
                             if row.get("封板时间") == "--":
                                 row["封板说明"] = "盘中超涨10%异动，未触发封死涨停板"
-                    formatted_tables["limit_up_records"] = t0_data
-                    formatted_tables.pop("table0", None)
+                        formatted_tables["limit_up_records"] = t0_data
+                        formatted_tables.pop("table0", None)
+                        tdx_res["涨停成交额口径说明"] = (
+                            "【涨停分析成交额双口径说明】上游通达信涨停分析专线的【当日成交金额_万元】为标的在触发涨停/异动封板时段的特定披露成交额；"
+                            "全天完整交易时段的实际总换手与总资金体量请统一引用【全天总成交金额_日K_万元】（或调用 stock_kline 取日K成交额）。"
+                        )
                 elif norm_cat == "unlocks":
                     tdx_res["解禁口径与核算规则说明"] = (
                         "【解禁口径与核对铁律（已修复 P1-1）】："
@@ -1676,6 +1728,11 @@ class FinanceGateway:
                         tdx_res["业务构成说明"] = "上游数据源 table1 业务构成明细暂缺或未采集，属实为空，请参考 table0 主营业务简述。"
                     else:
                         tdx_res["业务构成说明"] = f"table1 包含上市公司主营产品/行业构成明细（共 {len(t1_rows)} 行）。"
+                    tdx_res["字段完整性说明"] = (
+                        "【工商信息字段完整性说明】标的若存在如【英文简称】等字段返回 null 或空字符串，"
+                        "系该上市公司未在官方工商登记或交易所注册该信息（或上游专线未收录该非必填字段），"
+                        "字段键名真实存在但值为空，非系统数据传输中断或解析异常。"
+                    )
 
                 # 增强 F10 摘要表：汉化关键财务与估值指标、依据“利润变动方向”精确校准亏损标的同比含义、注入隔日风格标签与破净动态复核指引
                 if norm_cat == "summary" or ("table3" in formatted_tables and "table4" in formatted_tables):
@@ -2064,6 +2121,39 @@ class FinanceGateway:
                                         row["市盈率可用状态"] = "亏损不可用"
                                         row["市盈率亏损标记"] = True
                                         row["亏损警示"] = f"校准后滚动市盈率({real_ttm_val}倍)为负，代表标的过去4季处于亏损状态，不可用于横比、排序或PEG推演。"
+                    except Exception:
+                        pass
+
+                # 检验 PB 是否由于快照批处理入库滞后而落后于最新报告期 BPS (修复 D4)
+                curr_pb = row.get("市净率_PB_昨收") or row.get("市净率_PB")
+                table4_mgjzc = 0.0
+                if "table4" in formatted_tables and formatted_tables["table4"]:
+                    try:
+                        table4_mgjzc = float(formatted_tables["table4"][0].get("每股净资产_BPS") or formatted_tables["table4"][0].get("mgjzc") or 0.0)
+                    except (ValueError, TypeError):
+                        table4_mgjzc = 0.0
+
+                if curr_pb is not None and table4_mgjzc > 0:
+                    try:
+                        clean_code = tdx_res.get("symbol", "")
+                        if clean_code:
+                            q_info = self.tdx_client.get_quotes(clean_code) if 'q_info' not in locals() else q_info
+                            core_q = q_info.get("盘口核心行情", {}) if isinstance(q_info, dict) else {}
+                            close_p = float(core_q.get("昨收") or 0.0)
+                            now_p = float(core_q.get("现价") or 0.0)
+                            ref_p = now_p if now_p > 0 else close_p
+                            if ref_p > 0:
+                                pb_recalc_now = round(ref_p / table4_mgjzc, 4)
+                                pb_recalc_close = round(close_p / table4_mgjzc, 4) if close_p > 0 else pb_recalc_now
+                                curr_pb_val = float(curr_pb)
+                                if curr_pb_val > 0 and abs(curr_pb_val - pb_recalc_now) / curr_pb_val > 0.005:
+                                    row["市净率_PB"] = pb_recalc_now
+                                    row["市净率_PB_昨收"] = pb_recalc_close
+                                    row["市净率_PB_昨收_换期重算"] = pb_recalc_close
+                                    row["PB校准说明"] = (
+                                        f"上游F10估值快照中市净率(原值{curr_pb_val})仍滞留于旧报告期净资产；"
+                                        f"已自动以最新披露的{table4_bgq}每股净资产({table4_mgjzc}元)与实时现价({ref_p}元)校准为真实市净率({pb_recalc_now}倍，昨收清算口径为{pb_recalc_close}倍)。"
+                                    )
                     except Exception:
                         pass
 

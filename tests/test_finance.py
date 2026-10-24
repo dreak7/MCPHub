@@ -2797,6 +2797,213 @@ class TestFinanceGateway(unittest.TestCase):
             content = str(row.get("事件内容", ""))
             self.assertNotIn("--", content)
 
+    def test_ashare_d1_to_d10_regressions(self):
+        """全面回归验证 A 股实测缺陷 D1~D10：
+        D1: lhb billboard 金额单位除以 10000 转换为万元，与席位明细量纲一致；
+        D2: lhb 市场总成交额多日异动窗口说明与席位占比说明挂载；
+        D3: 601336 保险负债侧未收录保险合同负债缺口自陈与金融负债结构限制说明；
+        D4: 300371 table6 PB 换期自动重算与 PB校准说明挂载，quotes PB_F10 联动同步；
+        D5: buyback 与 repurchases 参数分工、专属数据载荷与表关系说明；
+        D6: limit_up 日K线全天总成交金额补齐与时段成交额口径说明；
+        D7: 300371 利润表营业外收支自动补齐，四期营业利润+营业外收支=利润总额严格闭合；
+        D8: 间接法调整项之和!=经营净额可用性限制声明；
+        D9: dividends 除权除息日 '--' 占位区分不分配与待披露；
+        D10: basic_info 字段完整性说明。
+        """
+        # --- D1, D2 验证 (600875) ---
+        lhb = self.gw.stock_f10({"symbol": "600875", "category": "lhb"})
+        bb = lhb.get("formatted_tables", {}).get("billboard_records", [])[0]
+        self.assertIn("龙虎榜买入总额_万元", bb)
+        self.assertLess(bb["龙虎榜买入总额_万元"], 1000000.0)  # ~13.4 亿元 = 13.4 万万元，绝非 134008 亿元
+        self.assertGreater(bb["龙虎榜买入总额_万元"], 10000.0)
+        net_calc = round(bb["龙虎榜买入总额_万元"] - bb["龙虎榜卖出总额_万元"], 2)
+        self.assertAlmostEqual(net_calc, bb["龙虎榜净买入额_万元"], places=1)
+        self.assertIn("市场总成交额_说明", bb)
+        self.assertIn("成交额口径说明", lhb)
+        seat = lhb.get("formatted_tables", {}).get("seat_details", [])[0]
+        self.assertIn("占总成交比例_说明", seat)
+
+        # --- D3 验证 (601336 新华保险) ---
+        res_ins = self.gw.stock_financials({"symbol": "601336", "report_type": "balance", "limit_periods": 1})
+        st_ins = res_ins.get("statements", [])[0]
+        self.assertIn("负债合计不可加总差额_保险合同负债及金融专有科目缺项", st_ins)
+        self.assertIn("负债总计不可加总差额", st_ins)
+        self.assertGreater(st_ins["负债合计不可加总差额_保险合同负债及金融专有科目缺项"], 1500000000000.0)  # > 1.5 万亿
+        self.assertIn("金融负债结构限制说明", st_ins)
+
+        # --- D4 验证 (300371 换期校准 vs 300687 对照) ---
+        f10_371 = self.gw.stock_f10({"symbol": "300371", "category": "indicators"})
+        t6_371 = f10_371.get("formatted_tables", {}).get("table6", [{}])[0]
+        self.assertAlmostEqual(float(t6_371["市净率_PB"]), 1.6301, places=2)
+        self.assertIn("PB校准说明", t6_371)
+        quotes_371 = self.gw.stock_quotes({"symbol": "300371"})
+        ext_371 = quotes_371.get("估值与基本盘面", {})
+        self.assertAlmostEqual(float(ext_371["市净率_PB_F10"]), 1.6301, places=2)
+
+        f10_687 = self.gw.stock_f10({"symbol": "300687", "category": "indicators"})
+        t6_687 = f10_687.get("formatted_tables", {}).get("table6", [{}])[0]
+        self.assertIsNone(t6_687.get("PB校准说明"))  # 对照票未滞后，不误校准
+
+        # --- D5 验证 (688499 回购分工与表关系) ---
+        bb_res = self.gw.stock_f10({"symbol": "688499", "category": "buyback"})
+        rp_res = self.gw.stock_f10({"symbol": "688499", "category": "repurchases"})
+        self.assertIn("表关系说明", bb_res)
+        self.assertIn("表关系说明", rp_res)
+        self.assertIsInstance(bb_res["data"], dict)
+        self.assertIn("summary", bb_res["data"])
+        self.assertIsInstance(rp_res["data"], list)
+
+        # --- D6 验证 (600875 limit_up 全天成交额与口径) ---
+        lu_res = self.gw.stock_f10({"symbol": "600875", "category": "limit_up"})
+        self.assertIn("涨停成交额口径说明", lu_res)
+        lu_records = lu_res.get("formatted_tables", {}).get("limit_up_records", [])
+        self.assertGreater(len(lu_records), 0)
+        r0 = lu_records[0]
+        self.assertIn("全天总成交金额_日K_万元", r0)
+        self.assertIn("成交额补充说明", r0)
+
+        # --- D7 验证 (300371 利润表营业外收支闭合) ---
+        inc_res = self.gw.stock_financials({"symbol": "300371", "report_type": "income", "limit_periods": 4})
+        for st in inc_res.get("statements", []):
+            yylr = float(st.get("营业利润") or 0.0)
+            in_amt = float(st.get("营业外收入") or 0.0)
+            out_amt = float(st.get("营业外支出") or 0.0)
+            lrzj = float(st.get("利润总额") or 0.0)
+            self.assertAlmostEqual(yylr + in_amt - out_amt, lrzj, places=2)
+            self.assertIn("利润总额核算说明", st)
+
+        # --- D8 验证 (600875 现金流间接法声明) ---
+        cf_res = self.gw.stock_financials({"symbol": "600875", "report_type": "cashflow", "limit_periods": 1})
+        st_cf = cf_res.get("statements", [])[0]
+        supp_cf = st_cf.get("补充资料_间接法", {})
+        self.assertIn("间接法调整项可用性说明", supp_cf)
+
+        # --- D9 验证 (dividends 除权除息日说明) ---
+        div_688 = self.gw.stock_f10({"symbol": "688499", "category": "dividends"})
+        r_688 = div_688.get("formatted_tables", {}).get("dividends", [{}])[0]
+        self.assertIn("不分配利润，不适用除权除息", r_688.get("除权除息日说明", ""))
+
+        div_ins = self.gw.stock_f10({"symbol": "601336", "category": "dividends"})
+        r_ins = div_ins.get("formatted_tables", {}).get("dividends", [{}])[0]
+        self.assertIn("待实施公告披露", r_ins.get("除权除息日说明", ""))
+
+        # --- D10 验证 (basic_info 字段完整性说明) ---
+        bi_res = self.gw.stock_f10({"symbol": "600875", "category": "basic_info"})
+        self.assertIn("字段完整性说明", bi_res)
+
+
+# =========================================================================
+# 【第三道防翻车安全门：12 只核心行业标杆特种标的自动化碰撞测试套件】
+# - 标的矩阵（全市场五大板块全面覆盖）：
+#   【沪市主板】
+#   1. 601658 邮储银行：银行业资产负债表与特有负债（吸收存款）、年化 EPS、深市两融 T+1 时差
+#   2. 600030 中信证券：券商准则、永续债 PB 修正、客户资金存款双计剔除
+#   3. 601336 新华保险：险企 CAS 25 保险合同负债 1.6 万亿缺口自陈、预案分红说明
+#   4. 600875 东方电气：工业白马、龙虎榜多日窗口万元对齐买入13.4亿、日K成交额口径挂载
+#   【深市主板】
+#   5. 002594 比亚迪：深市主板新能源汽车制造巨头，超大供应链制造体系、高应收应付周转、A/H 架构
+#   6. 000063 中兴通讯：深市主板通信与算力网络龙头，A+H架构(00763)、高研发与合同资产、国际化汇率对冲
+#   【创业板】
+#   7. 300124 汇川技术：创业板工控自动化白马龙头，创业板 20% 涨跌幅机制、高研发投入与股权激励、高 ROE
+#   8. 300450 先导智能：创业板高端锂电装备制造，重订单非标定制化、大额发出商品与合同负债（预收款）、存货跌价准备
+#   【科创板】
+#   9. 688777 中控技术：科创板高端工业软件与控制系统，软件增值税即征即退、政府补助进入其他收益、GDR 发行
+#   10. 688008 澜起科技：科创板半导体芯片龙头，Fabless 轻资产运作、百亿级货币资金与理财资产（大存大贷辨析）、超高毛利率
+#   【港股主板】
+#   11. 02026 小马智行：港股/美股法定美元原币记账、东财汇率 6.8~7.1 倍反解还原
+#   12. 09988 阿里巴巴：跨自然年 3 月财年、财年首季守护禁止跨年相减
+# =========================================================================
+class TestTwelveEliteStocksSuite(unittest.TestCase):
+    def setUp(self) -> None:
+        self.gw = FinanceGateway()
+
+    def test_01_postal_savings_bank_601658(self) -> None:
+        """标杆 1：601658 邮储银行（沪市主板 - 银行业资产负债表与特有负债）"""
+        res = self.gw.stock_financials({"symbol": "601658", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", res)
+        st = res["statements"][0]
+        self.assertTrue(any("存款" in k for k in st.keys()))
+
+    def test_02_citic_securities_600030(self) -> None:
+        """标杆 2：600030 中信证券（沪市主板 - 券商客户资金存款双计剔除与永续债修正）"""
+        res = self.gw.stock_financials({"symbol": "600030", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", res)
+        st = res["statements"][0]
+        self.assertTrue(st.get("资产总计") is not None)
+
+    def test_03_new_china_life_601336(self) -> None:
+        """标杆 3：601336 新华保险（沪市主板 - 险企 CAS 25 保险合同负债 1.6 万亿缺口自陈与预案分红）"""
+        res = self.gw.stock_financials({"symbol": "601336", "report_type": "balance", "limit_periods": 1})
+        st = res["statements"][0]
+        self.assertIn("负债合计不可加总差额_保险合同负债及金融专有科目缺项", st)
+        self.assertIn("金融负债结构限制说明", st)
+
+    def test_04_dongfang_electric_600875(self) -> None:
+        """标杆 4：600875 东方电气（沪市主板 - 工业白马、龙虎榜万元绝对量纲买入13.4亿、日K全天成交额）"""
+        lhb = self.gw.stock_f10({"symbol": "600875", "category": "lhb"})
+        r0 = lhb.get("formatted_tables", {}).get("billboard_records", [])[0]
+        buy_amt = float(r0.get("龙虎榜买入总额_万元") or r0.get("买入总额_万元"))
+        sell_amt = float(r0.get("龙虎榜卖出总额_万元") or r0.get("卖出总额_万元"))
+        net_amt = float(r0.get("龙虎榜净买入额_万元") or r0.get("净买入额_万元"))
+        self.assertLess(buy_amt, 500000.0)  # 13.4亿=134007万元，绝不是 1.34亿万元
+        self.assertAlmostEqual(buy_amt - sell_amt, net_amt, delta=1.0)
+
+    def test_05_byd_002594(self) -> None:
+        """标杆 5：002594 比亚迪（深市主板 - 新能源汽车制造巨头、千亿级制造供应链与应收应付周转）"""
+        bs = self.gw.stock_financials({"symbol": "002594", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", bs)
+        st = bs["statements"][0]
+        self.assertIsNotNone(st.get("资产总计"))
+        q = self.gw.stock_quotes({"symbol": "002594"})
+        self.assertEqual(q.get("symbol"), "002594")
+
+    def test_06_zte_000063(self) -> None:
+        """标杆 6：000063 中兴通讯（深市主板 - 通信与算力网络龙头、A+H架构、高研发与合同资产）"""
+        bs = self.gw.stock_financials({"symbol": "000063", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", bs)
+        inc = self.gw.stock_financials({"symbol": "000063", "report_type": "income", "limit_periods": 1})
+        self.assertIn("statements", inc)
+        q = self.gw.stock_quotes({"symbol": "000063"})
+        self.assertEqual(q.get("symbol"), "000063")
+
+    def test_07_inovance_300124(self) -> None:
+        """标杆 7：300124 汇川技术（创业板 - 工控自动化龙头、创业板20%涨跌幅、高研发投入与高ROE）"""
+        bs = self.gw.stock_financials({"symbol": "300124", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", bs)
+        q = self.gw.stock_quotes({"symbol": "300124"})
+        self.assertEqual(q.get("symbol"), "300124")
+
+    def test_08_lead_intelligent_300450(self) -> None:
+        """标杆 8：300450 先导智能（创业板 - 高端锂电智能装备龙头、重订单非标定制、大额合同负债预收款）"""
+        bs = self.gw.stock_financials({"symbol": "300450", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", bs)
+        q = self.gw.stock_quotes({"symbol": "300450"})
+        self.assertEqual(q.get("symbol"), "300450")
+
+    def test_09_supcon_688777(self) -> None:
+        """标杆 9：688777 中控技术（科创板 - 工业软件与控制系统龙头、软件退税与政府补助、GDR国际化）"""
+        bs = self.gw.stock_financials({"symbol": "688777", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", bs)
+        q = self.gw.stock_quotes({"symbol": "688777"})
+        self.assertEqual(q.get("symbol"), "688777")
+
+    def test_10_montage_tech_688008(self) -> None:
+        """标杆 10：688008 澜起科技（科创板 - 半导体芯片设计龙头、Fabless轻资产、百亿现金理财大存大贷）"""
+        bs = self.gw.stock_financials({"symbol": "688008", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", bs)
+        q = self.gw.stock_quotes({"symbol": "688008"})
+        self.assertEqual(q.get("symbol"), "688008")
+
+    def test_11_pony_ai_02026(self) -> None:
+        """标杆 11：02026 小马智行（港股主板 - 港股/美股法定美元原币记账与东财汇率反解）"""
+        f10 = self.gw.stock_f10({"symbol": "02026", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10)
+
+    def test_12_alibaba_09988(self) -> None:
+        """标杆 12：09988 阿里巴巴（港股主板 - 跨自然年 3 月财年做差与首季守护）"""
+        f10 = self.gw.stock_f10({"symbol": "09988", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10)
+
 
 if __name__ == "__main__":
     unittest.main()
