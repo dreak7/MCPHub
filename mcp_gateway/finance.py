@@ -1437,7 +1437,8 @@ class FinanceGateway:
                                     row["成交额补充说明"] = "上游官方专线原始披露成交额"
                             if row.get("封板时间") == "--":
                                 row["封板说明"] = "盘中超涨10%异动，未触发封死涨停板"
-                elif category == "unlocks":
+                        formatted_tables["limit_up_records"] = t0_data
+                elif norm_cat == "unlocks":
                     tdx_res["解禁口径与核算规则说明"] = (
                         "【解禁口径与核对铁律（已修复 P1-1）】："
                         "1.【占比自算铁律】：表中【占总股本比例_pct】一律基于标的当前真实法定总股本严格自算(解禁股数÷法定总股本)，杜绝上游历史申报批次比例引发的语义冲突；"
@@ -1447,6 +1448,7 @@ class FinanceGateway:
                     )
                     t0_data = formatted_tables.get("table0", [])
                     if t0_data:
+                        formatted_tables["unlock_schedule"] = t0_data
                         today_iso = datetime.date.today().strftime("%Y-%m-%d")
                         latest_date_str = str(t0_data[0].get("解禁日期", ""))
                         has_pending = any(r.get("解禁进度") == "未实施" for r in t0_data)

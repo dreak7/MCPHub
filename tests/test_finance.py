@@ -1985,6 +1985,7 @@ class TestFinanceGateway(unittest.TestCase):
         # 7. 验证 P3-7: limit_up 历史行成交额缺失时具备明确补充说明
         res_lu = fin_gw.stock_f10({"symbol": "688499", "category": "limit_up"})
         lu_list = res_lu.get("formatted_tables", {}).get("limit_up_records", [])
+        self.assertGreater(len(lu_list), 0)
         for item in lu_list:
             if not item.get("当日成交金额_万元"):
                 self.assertTrue(len(str(item.get("成交额补充说明", ""))) > 0)
@@ -1996,12 +1997,15 @@ class TestFinanceGateway(unittest.TestCase):
         # 9. 验证 P3-9: 600875 unlocks 日期为 str，行内与表级状态不自相矛盾
         ul_600875 = fin_gw.stock_f10({"symbol": "600875", "category": "unlocks"})
         ul_rows = ul_600875.get("formatted_tables", {}).get("unlock_schedule", [])
+        self.assertGreater(len(ul_rows), 0)
         for row in ul_rows:
             self.assertIsInstance(row.get("解禁日期"), str)
             if "公告日期" in row and row.get("公告日期"):
                 self.assertIsInstance(row.get("公告日期"), str)
         if any("未实施" in str(r.get("解禁进度", "")) for r in ul_rows):
-            self.assertNotIn("已实施完成，上游批处理滞后", ul_600875.get("全流通及实施状态说明", ""))
+            status_desc = ul_600875.get("解禁状态说明", "")
+            self.assertIn("未实施", status_desc)
+            self.assertNotIn("已实施完成，当前处于全流通状态", status_desc)
 
         # 10. 验证 P3-10: code_docs_search 元数据准确，查 stock_kline 复权优先返回 MCP 工具官方文档
         import logging
