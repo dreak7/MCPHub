@@ -593,7 +593,7 @@ class PublicFallbackClient:
         # 1. 主力通道：新浪财经新闻搜索接口（风控宽松、响应极速、原生标准 JSON）
         try:
             encoded_q = urllib.parse.quote(search_term)
-            sina_url = f"https://search.sina.com.cn/api/news?q={encoded_q}&size={req_limit + 5}&page=1"
+            sina_url = f"https://search.sina.com.cn/api/news?q={encoded_q}&size={max(req_limit * 3, 20)}&page=1"
             req = Request(
                 sina_url,
                 headers={
@@ -642,10 +642,10 @@ class PublicFallbackClient:
                         if is_broker_pub:
                             item_obj["内容属性说明"] = "券商行业研报观点(标题格式为'券商名：观点'，系该券商研究团队对外发表的行业分析，非本公司自身日常经营公告)"
                         news_list.append(item_obj)
-                        if len(news_list) >= req_limit:
-                            break
                     if news_list:
-                        return news_list
+                        # 严格按发布时间倒序排列，确保首条即为最新资讯 (修复 P3-1)
+                        news_list.sort(key=lambda x: str(x.get("time") or x.get("datetime") or ""), reverse=True)
+                        return news_list[:req_limit]
         except Exception:
             pass
 
@@ -699,7 +699,9 @@ class PublicFallbackClient:
                         if len(news_list) >= req_limit:
                             break
                     if news_list:
-                        return news_list
+                        # 严格按发布时间倒序排列 (修复 P3-1)
+                        news_list.sort(key=lambda x: str(x.get("time") or x.get("datetime") or ""), reverse=True)
+                        return news_list[:req_limit]
         except Exception:
             pass
 
@@ -732,7 +734,9 @@ class PublicFallbackClient:
                                 "summary": f"【上市公司法定公告】{ann_title}",
                             })
                         if ann_list:
-                            return ann_list
+                            # 严格按公告时间倒序排列 (修复 P3-1)
+                            ann_list.sort(key=lambda x: str(x.get("time") or x.get("datetime") or ""), reverse=True)
+                            return ann_list[:req_limit]
             except Exception:
                 pass
 
@@ -1109,7 +1113,6 @@ class FinanceGateway:
                 "formatted_tables": {
                     "billboard_records": billboard_records,
                     "seat_details": seat_details,
-                    "lhb_daily_details": billboard_records,
                 },
                 "data": billboard_records[:15] if billboard_records else {"status": "近期无龙虎榜登榜记录"},
                 "龙虎榜说明": "收录股票近期异动登榜的营业部席位买卖金额、机构专用席位博弈与成交占比。",
@@ -1490,6 +1493,7 @@ class FinanceGateway:
                             if row.get("封板时间") == "--":
                                 row["封板说明"] = "盘中超涨10%异动，未触发封死涨停板"
                         formatted_tables["limit_up_records"] = t0_data
+                        formatted_tables.pop("table0", None)
                 elif norm_cat == "unlocks":
                     tdx_res["解禁口径与核算规则说明"] = (
                         "【解禁口径与核对铁律（已修复 P1-1）】："
@@ -1501,6 +1505,7 @@ class FinanceGateway:
                     t0_data = formatted_tables.get("table0", [])
                     if t0_data:
                         formatted_tables["unlock_schedule"] = t0_data
+                        formatted_tables.pop("table0", None)
                         today_iso = datetime.date.today().strftime("%Y-%m-%d")
                         latest_date_str = str(t0_data[0].get("解禁日期", ""))
                         has_pending = any(r.get("解禁进度") == "未实施" for r in t0_data)
@@ -1586,10 +1591,6 @@ class FinanceGateway:
                 if cat_lower == "indicators":
                     tdx_res["category"] = "indicators"
                     tdx_res["category_name"] = "核心财务与经营指标概览 (公司主要财务与估值比率)"
-                    formatted_tables["profitability"] = formatted_tables.get("table0", [])
-                    formatted_tables["indicators"] = formatted_tables.get("table4", [])
-                    formatted_tables["valuation"] = formatted_tables.get("table6", [])
-                    formatted_tables["summary"] = formatted_tables.get("table8", [])
                     tdx_res["估值快照清算说明"] = "【估值基准说明】本表收盘后总市值基于当日收盘清算价计算；盘中时段为上一交易日清算口径，盘中精准估值请结合 stock_quotes 实时行情总市值。"
                     # 修复 P2-4：明确 indicators 内嵌表与 summary 逐位相同哈希的同源关系，杜绝下游误解为两路独立交叉印证
                     tdx_res["数据源同源与交叉印证说明"] = "【数据源同源说明】indicators 与 summary 的 table0/4/5/6/8 共享通达信专线同一 F10 概要接口底表，二者逐位哈希相同，属于同一底层数据源在不同业务视图下的挂载，无需重复交叉印证，任取一处即可。"
@@ -1854,6 +1855,17 @@ class FinanceGateway:
                 if pe_ttm_val is not None:
                     row["滚动市盈率_PETTM"] = pe_ttm_val
                     row["滚动市盈率_PE_TTM"] = pe_ttm_val
+                    try:
+                        pe_ttm_num = float(pe_ttm_val)
+                        if pe_ttm_num < 0:
+                            row["市盈率可用状态"] = "亏损不可用"
+                            row["市盈率亏损标记"] = True
+                            row["亏损警示"] = f"滚动市盈率({pe_ttm_num:.2f}倍)为负，代表标的过去4季累计净利润为负（亏损状态），该数值不可用于横比、排序或PEG推演。"
+                        else:
+                            row["市盈率可用状态"] = "正常"
+                            row["市盈率亏损标记"] = False
+                    except (ValueError, TypeError):
+                        pass
 
                 # 检验 PE_TTM 是否由于快照批处理入库滞后而落后于最新报告期 (修复 P1-2)
                 curr_pe_ttm = row.get("滚动市盈率_PETTM") or row.get("滚动市盈率_PE_TTM")
@@ -1877,13 +1889,18 @@ class FinanceGateway:
                                         f"上游F10估值快照期次入库滞后(原值{curr_pe_ttm})，"
                                         f"已自动自算校准为最新{table4_bgq}期次真实TTM值({real_ttm_val}倍)。"
                                     )
+                                    if real_ttm_val < 0:
+                                        row["市盈率可用状态"] = "亏损不可用"
+                                        row["市盈率亏损标记"] = True
+                                        row["亏损警示"] = f"校准后滚动市盈率({real_ttm_val}倍)为负，代表标的过去4季处于亏损状态，不可用于横比、排序或PEG推演。"
                     except Exception:
                         pass
 
+                loss_clause = f" 【高危警示·亏损股市盈率不可用】当前滚动市盈率为负值({pe_ttm_val}倍)，代表公司处于亏损状态，负市盈率属于亏损代号而非低估值，严禁用于横比、排序或PEG公式计算！" if (pe_ttm_val is not None and str(pe_ttm_val).startswith("-")) else ""
                 row["口径辨析提示"] = (
                     "table6 中的【滚动市盈率_PETTM】(及别名【滚动市盈率_PE_TTM】) 实质为基于过去4个季度滚动归母净利的真 TTM 市盈率，"
                     "与 stock_quotes 中的【滚动市盈率_PETTM】同值同口径；请勿将其与 quotes 中的【动态市盈率_PE】(单季年化口径) 直接横比；"
-                    "网关已彻底剔除自相矛盾的'动态市盈率_PE_TTM'旧别名以防误导。"
+                    f"网关已彻底剔除自相矛盾的'动态市盈率_PE_TTM'旧别名以防误导。{loss_clause}"
                 )
                 row["估值时效提示"] = f"市净率(PB)/市盈率(PE)基于上一交易日清算日({gxrq or '前一交易日'})，盘中请结合 stock_quotes 实时现价动态重算。"
 
@@ -1934,6 +1951,8 @@ class FinanceGateway:
 
         limit = int(arguments.get("limit", 5))
         news = self.fallback_client.get_news(symbol=symbol, limit=limit, entity_name=entity_name)
+        if news and isinstance(news, list):
+            news.sort(key=lambda x: str(x.get("time") or x.get("datetime") or ""), reverse=True)
         return {"symbol": symbol, "news_count": len(news), "news": news}
 
     def market_context(self, arguments: dict[str, Any] | None = None) -> dict[str, Any]:

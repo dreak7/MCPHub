@@ -1628,9 +1628,10 @@ class TestFinanceGateway(unittest.TestCase):
         """测试 v1.8.7: 实测 14 项缺陷（P0-P3）全面回归验证"""
         fin_gw = FinanceGateway()
 
-        # 1. 验证 Issue 1 (P0): A 股 stock_f10 支持 indicators / financials 枚举
+        # 1. 验证 Issue 1 (P0): A 股 stock_f10 支持 indicators / financials 枚举 (P2-1 剔除 formatted_tables 内部同名重复表)
         res_ind = fin_gw.stock_f10({"symbol": "600519", "category": "indicators"})
-        self.assertIn("indicators", res_ind.get("formatted_tables", {}))
+        self.assertIn("table4", res_ind.get("formatted_tables", {}))
+        self.assertNotIn("indicators", res_ind.get("formatted_tables", {}))
         self.assertIn("核心财务与经营指标概览", res_ind.get("category_name", ""))
 
         # 2. 验证 Issue 2 (P0): stock_lookup 市场范围跨市场隔离与 exact_match 精确匹配
@@ -2038,7 +2039,7 @@ class TestFinanceGateway(unittest.TestCase):
         tables = res_600875.get("formatted_tables", {})
         self.assertIn("billboard_records", tables)
         self.assertIn("seat_details", tables)
-        self.assertIn("lhb_daily_details", tables)
+        self.assertNotIn("lhb_daily_details", tables)  # P2-1 剔除同哈希重复表
         self.assertGreater(len(tables["billboard_records"]), 0)
         self.assertIsNone(res_600875.get("无记录说明"))
         self.assertEqual(res_600875.get("source"), "eastmoney_billboard (东方财富龙虎榜官方数据专线)")
@@ -2142,14 +2143,12 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertGreater(diff_val, 130000000.0)  # 约 1.35 亿元
         self.assertLess(diff_val, 140000000.0)
 
-        # 2. 验证 002293 (罗莱生活) 库存股抵减项别名挂载与权益闭合
+        # 2. 验证 002293 (罗莱生活) 库存股收敛唯一规范键与抵减项权益闭合 (修复 P2-2)
         res_002293 = self.gw.stock_financials({"symbol": "002293", "report_type": "balance", "limit_periods": 1})
         st_002293 = res_002293.get("statements", [])[0]
         self.assertEqual(st_002293.get("库存股"), 6060960.0)
-        self.assertIn("库存股_抵减项", st_002293)
-        self.assertIn("减_库存股", st_002293)
-        self.assertEqual(st_002293["库存股_抵减项"], 6060960.0)
-        self.assertEqual(st_002293["减_库存股"], 6060960.0)
+        self.assertNotIn("库存股_抵减项", st_002293)
+        self.assertNotIn("减_库存股", st_002293)
         # 扣除库存股后，所有者权益明细与归母总额完全闭合，无不可加总差额
         self.assertNotIn("归母所有者权益不可加总差额_专项储备及其他权益项等", st_002293)
 
@@ -2344,6 +2343,91 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertIn("lhb", f10_cats)
         self.assertIn("buyback", f10_cats)
         self.assertIn("repurchases", f10_cats)
+
+    # =========================================================================
+    # 【功能块：最新实测口径与缺陷回归验证用例集 (P1-1, P2-1, P2-2, P2-4, P3-1)】
+    # =========================================================================
+    def test_p1_1_cost_sum_residual_closure(self):
+        """验证 P1-1: 营业总成本合计补入营业税金及附加，科目完全闭合，虚报缺口彻底消除"""
+        stocks = ["002293", "688499", "300687", "600694", "300371"]
+        for sym in stocks:
+            res = self.gw.stock_financials({"symbol": sym, "report_type": "income", "limit_periods": 1})
+            st = res.get("statements", [])[0]
+            # 真实残差为 0，不应存在虚假差额说明
+            self.assertNotIn("营业总成本构成差额说明", st, f"标的 {sym} 不应报出虚假营业总成本差额")
+            self.assertIn("营业总成本构成说明", st)
+            self.assertIn("科目完全闭合", st["营业总成本构成说明"])
+
+    def test_p2_1_table_deduplication(self):
+        """验证 P2-1: 清除单响应内同名数据双表，杜绝 49 组同哈希重复表造成双计"""
+        sym = "600875"
+        # 1. limit_up
+        res_lu = self.gw.stock_f10({"symbol": sym, "category": "limit_up"})
+        lu_tables = res_lu.get("formatted_tables", {})
+        self.assertIn("limit_up_records", lu_tables)
+        self.assertNotIn("table0", lu_tables)
+
+        # 2. lhb
+        res_lhb = self.gw.stock_f10({"symbol": sym, "category": "lhb"})
+        lhb_tables = res_lhb.get("formatted_tables", {})
+        self.assertIn("billboard_records", lhb_tables)
+        self.assertIn("seat_details", lhb_tables)
+        self.assertNotIn("lhb_daily_details", lhb_tables)
+
+        # 3. unlocks
+        res_unl = self.gw.stock_f10({"symbol": sym, "category": "unlocks"})
+        unl_tables = res_unl.get("formatted_tables", {})
+        self.assertIn("unlock_schedule", unl_tables)
+        self.assertNotIn("table0", unl_tables)
+
+        # 4. indicators
+        res_ind = self.gw.stock_f10({"symbol": sym, "category": "indicators"})
+        ind_tables = res_ind.get("formatted_tables", {})
+        self.assertIn("table0", ind_tables)
+        self.assertIn("table4", ind_tables)
+        self.assertIn("table6", ind_tables)
+        self.assertIn("table8", ind_tables)
+        self.assertNotIn("profitability", ind_tables)
+        self.assertNotIn("indicators", ind_tables)
+        self.assertNotIn("valuation", ind_tables)
+        self.assertNotIn("summary", ind_tables)
+
+    def test_p2_2_treasury_stock_single_canonical_key(self):
+        """验证 P2-2: 库存股收敛唯一规范键【库存股】，彻底切除【减_库存股】与【库存股_抵减项】"""
+        stocks = ["688499", "002293"]
+        for sym in stocks:
+            res = self.gw.stock_financials({"symbol": sym, "report_type": "balance", "limit_periods": 1})
+            st = res.get("statements", [])[0]
+            self.assertIn("库存股", st)
+            self.assertGreater(float(st["库存股"]), 0.0)
+            self.assertNotIn("库存股_抵减项", st)
+            self.assertNotIn("减_库存股", st)
+
+    def test_p2_4_loss_pe_negative_status_and_warning(self):
+        """验证 P2-4: 亏损股负PE显式标注【亏损不可用】状态并提供高危警示"""
+        res_q = self.gw.stock_quotes({"symbol": "300687"})
+        base = res_q.get("估值与基本盘面", {})
+        self.assertEqual(base.get("市盈率可用状态"), "亏损不可用")
+        self.assertTrue(base.get("市盈率亏损标记"))
+        self.assertIn("亏损股市盈率不可用", base.get("估值口径说明", ""))
+
+        res_f10 = self.gw.stock_f10({"symbol": "300687", "category": "indicators"})
+        t6 = res_f10.get("formatted_tables", {}).get("table6", [])
+        self.assertTrue(len(t6) > 0)
+        self.assertEqual(t6[0].get("市盈率可用状态"), "亏损不可用")
+        self.assertTrue(t6[0].get("市盈率亏损标记"))
+        self.assertIn("亏损警示", t6[0])
+
+    def test_p3_1_stock_news_strictly_reverse_chronological(self):
+        """验证 P3-1: stock_news 返回新闻严格按时间倒序排列 (首条为最新)"""
+        for sym in ["600875", "600371"]:
+            res = self.gw.stock_news({"symbol": sym, "limit": 5})
+            news = res.get("news", [])
+            self.assertGreaterEqual(len(news), 2)
+            for i in range(len(news) - 1):
+                t_curr = str(news[i].get("time") or news[i].get("datetime") or "")
+                t_next = str(news[i + 1].get("time") or news[i + 1].get("datetime") or "")
+                self.assertGreaterEqual(t_curr, t_next, f"标的 {sym} 新闻未按时间倒序: {t_curr} < {t_next}")
 
 
 if __name__ == "__main__":
