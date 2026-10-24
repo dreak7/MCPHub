@@ -1315,12 +1315,40 @@ class FinanceGateway:
                                 col_title = col_raw
                             row_dict[col_title] = val
 
-                        # 修复 J (P3): 报告期与截止日期两市对齐互通
+                        # 修复 J (P3): 报告期与截止日期两市对齐互通并落地统一四键 (P3-1)
                         if norm_cat in ("summary", "indicators"):
-                            if "报告期" in row_dict and "截止日期" not in row_dict:
-                                row_dict["截止日期"] = row_dict["报告期"]
-                            elif "截止日期" in row_dict and "报告期" not in row_dict:
-                                row_dict["报告期"] = row_dict["截止日期"]
+                            cand_dt = str(row_dict.get("报告期日期") or row_dict.get("截止日期") or row_dict.get("报告期") or row_dict.get("bgq") or "").strip()
+                            if cand_dt:
+                                iso_d = ""
+                                lbl_d = ""
+                                if re.match(r"^\d{4}-\d{2}-\d{2}", cand_dt):
+                                    iso_d = cand_dt[:10]
+                                    month = iso_d[5:7]
+                                    rpt_name = "一季报" if month == "03" else ("中报" if month == "06" else ("三季报" if month == "09" else ("年报" if month == "12" else "")))
+                                    lbl_d = f"{iso_d[:4]}{rpt_name}" if rpt_name else iso_d
+                                elif re.match(r"^\d{8}$", cand_dt):
+                                    iso_d = f"{cand_dt[:4]}-{cand_dt[4:6]}-{cand_dt[6:8]}"
+                                    month = iso_d[5:7]
+                                    rpt_name = "一季报" if month == "03" else ("中报" if month == "06" else ("三季报" if month == "09" else ("年报" if month == "12" else "")))
+                                    lbl_d = f"{iso_d[:4]}{rpt_name}" if rpt_name else iso_d
+                                else:
+                                    m_lbl = re.match(r"^(\d{4})\s*(一季报|中报|三季报|年报)", cand_dt)
+                                    if m_lbl:
+                                        y_str, rpt_txt = m_lbl.group(1), m_lbl.group(2)
+                                        md_map = {"一季报": "03-31", "中报": "06-30", "三季报": "09-30", "年报": "12-31"}
+                                        iso_d = f"{y_str}-{md_map.get(rpt_txt, '12-31')}"
+                                        lbl_d = f"{y_str}{rpt_txt}"
+
+                                if iso_d:
+                                    row_dict["截止日期"] = iso_d
+                                    row_dict["报告期日期"] = iso_d
+                                    row_dict["报告期"] = iso_d
+                                    row_dict["报告期标签"] = lbl_d if lbl_d else iso_d
+                                else:
+                                    row_dict["报告期"] = cand_dt
+                                    row_dict["截止日期"] = cand_dt
+                                    row_dict["报告期日期"] = cand_dt
+                                    row_dict["报告期标签"] = cand_dt
 
                         # 针对 margin_trading：清洗数字字符串类型漂移，统一规范为 float (修复 B3)
                         if norm_cat == "margin_trading":
@@ -1547,6 +1575,9 @@ class FinanceGateway:
                             tdx_res["质押状态说明"] = "F10 摘要未收录当前股东股权质押明细（暂无质押披露记录或数据源未采集，不可直接等同于已核实零质押，请以中登公司及交易所官方质押公告为准）。"
                     else:
                         tdx_res["质押状态说明"] = f"该公司存在股东股权质押明细记录（共 {len(t5_rows)} 条记录，详见 table5 质押明细表）。"
+                        tdx_res["质押比例口径说明"] = (
+                            "【质押比例分母口径与自算说明】通达信上游 F10 原始【质押股份比例_pct】字段在不同标的间混用不同分母（部分标的按总股本，部分标的按流通A股，A+H标的可能因历史基数与两地市场股本差异两者均不吻合）。为保证量化与风控口径统一严谨，已挂载基于标的真实法定总股本自算的【质押占总股本比_自算_pct】与按流通A股自算的【质押占流通A股比_自算_pct】；下游引用质押比例请以自算字段为准。"
+                        )
                 elif norm_cat == "margin_trading":
                     if "table2" in formatted_tables:
                         for row in formatted_tables["table2"]:
@@ -1582,8 +1613,8 @@ class FinanceGateway:
                     self._enrich_f10_summary_tables(formatted_tables, tdx_res)
                     if cat_lower == "summary":
                         tdx_res["数据源同源说明"] = (
-                            "【数据源同源说明】summary 与 indicators 的 table0/4/5/6/8 共享通达信专线同一 F10 概要底表，"
-                            "二者逐位哈希相同。若需要核心财务与估值宽表，建议直接调用 indicators 分类获取。"
+                            "【数据源同源说明】summary 与 indicators 的全量 9 张表 (table0~table8) 共享通达信专线同一 F10 概要底层数据源，"
+                            "二者逐位哈希相同（indicators 为其规范业务别名）。属于同一底层数据源在不同业务视图下的挂载，无需重复交叉印证，任取一处即可。"
                         )
 
                 # 修复 Issue 1: 针对 indicators / financials，挂载宽表字段与专属分类名
@@ -1593,7 +1624,7 @@ class FinanceGateway:
                     tdx_res["category_name"] = "核心财务与经营指标概览 (公司主要财务与估值比率)"
                     tdx_res["估值快照清算说明"] = "【估值基准说明】本表收盘后总市值基于当日收盘清算价计算；盘中时段为上一交易日清算口径，盘中精准估值请结合 stock_quotes 实时行情总市值。"
                     # 修复 P2-4：明确 indicators 内嵌表与 summary 逐位相同哈希的同源关系，杜绝下游误解为两路独立交叉印证
-                    tdx_res["数据源同源与交叉印证说明"] = "【数据源同源说明】indicators 与 summary 的 table0/4/5/6/8 共享通达信专线同一 F10 概要接口底表，二者逐位哈希相同，属于同一底层数据源在不同业务视图下的挂载，无需重复交叉印证，任取一处即可。"
+                    tdx_res["数据源同源与交叉印证说明"] = "【数据源同源说明】indicators 与 summary 的全量 9 张表 (table0~table8) 共享通达信专线同一 F10 概要接口底层数据源，二者逐位哈希相同，属于同一底层数据源在不同业务视图下的挂载，无需重复交叉印证，任取一处即可。"
                 elif cat_lower == "financials":
                     tdx_res["category"] = "financials"
                     tdx_res["category_name"] = "财务三大报表核心数据精要 (利润表/资产负债表/现金流量表)"
@@ -1763,11 +1794,39 @@ class FinanceGateway:
                     if ok in row:
                         row[cn] = row.pop(ok)
 
-                # 修复 J (P3): 报告期与截止日期两市对齐互通
-                if "报告期" in row and "截止日期" not in row:
-                    row["截止日期"] = row["报告期"]
-                elif "截止日期" in row and "报告期" not in row:
-                    row["报告期"] = row["截止日期"]
+                # 修复 J (P3-1): 落地两市统一四键（报告期、截止日期、报告期日期、报告期标签）
+                cand_dt = str(row.get("报告期日期") or row.get("截止日期") or row.get("报告期") or row.get("bgq") or "").strip()
+                if cand_dt:
+                    iso_d = ""
+                    lbl_d = ""
+                    if re.match(r"^\d{4}-\d{2}-\d{2}", cand_dt):
+                        iso_d = cand_dt[:10]
+                        month = iso_d[5:7]
+                        rpt_name = "一季报" if month == "03" else ("中报" if month == "06" else ("三季报" if month == "09" else ("年报" if month == "12" else "")))
+                        lbl_d = f"{iso_d[:4]}{rpt_name}" if rpt_name else iso_d
+                    elif re.match(r"^\d{8}$", cand_dt):
+                        iso_d = f"{cand_dt[:4]}-{cand_dt[4:6]}-{cand_dt[6:8]}"
+                        month = iso_d[5:7]
+                        rpt_name = "一季报" if month == "03" else ("中报" if month == "06" else ("三季报" if month == "09" else ("年报" if month == "12" else "")))
+                        lbl_d = f"{iso_d[:4]}{rpt_name}" if rpt_name else iso_d
+                    else:
+                        m_lbl = re.match(r"^(\d{4})\s*(一季报|中报|三季报|年报)", cand_dt)
+                        if m_lbl:
+                            y_str, rpt_txt = m_lbl.group(1), m_lbl.group(2)
+                            md_map = {"一季报": "03-31", "中报": "06-30", "三季报": "09-30", "年报": "12-31"}
+                            iso_d = f"{y_str}-{md_map.get(rpt_txt, '12-31')}"
+                            lbl_d = f"{y_str}{rpt_txt}"
+
+                    if iso_d:
+                        row["截止日期"] = iso_d
+                        row["报告期日期"] = iso_d
+                        row["报告期"] = iso_d
+                        row["报告期标签"] = lbl_d if lbl_d else iso_d
+                    else:
+                        row["报告期"] = cand_dt
+                        row["截止日期"] = cand_dt
+                        row["报告期日期"] = cand_dt
+                        row["报告期标签"] = cand_dt
 
                 g_profit = row.get("归母净利润_元")
                 g_tb = row.get("归母净利润同比增减_pct")
@@ -1817,6 +1876,27 @@ class FinanceGateway:
                                 row["扣非净利润变动方向判定"] = f"扣非净利润同比下滑 {abs(tb_k_val):.2f}%"
                     except (ValueError, TypeError):
                         pass
+
+        # 1.5 增强 table5 (股权质押分母自算与口径说明，修复 P2-2)
+        if "table5" in formatted_tables:
+            t6_zgb = None
+            t6_ltgb = None
+            if "table6" in formatted_tables and formatted_tables["table6"]:
+                t6_row = formatted_tables["table6"][0]
+                t6_zgb = t6_row.get("总股本_股") or t6_row.get("zgb")
+                t6_ltgb = t6_row.get("流通A股_股") or t6_row.get("ltag") or t6_row.get("ltgb")
+            for row in formatted_tables["table5"]:
+                zy_wan = float(row.get("质押总股数_万股", 0.0) or row.get("zzygf", 0.0) or 0.0)
+                if zy_wan > 0:
+                    zy_shares = zy_wan * 10000.0
+                    if t6_zgb and float(t6_zgb) > 0:
+                        row["质押占总股本比_自算_pct"] = round((zy_shares / float(t6_zgb)) * 100.0, 4)
+                    if t6_ltgb and float(t6_ltgb) > 0:
+                        row["质押占流通A股比_自算_pct"] = round((zy_shares / float(t6_ltgb)) * 100.0, 4)
+                row["质押比例口径说明"] = (
+                    "通达信上游【质押股份比例_pct】字段在不同标的间混用总股本与流通A股分母，部分标的两者皆不符；"
+                    "精确研判建议使用网关基于法定股本自算的【质押占总股本比_自算_pct】与【质押占流通A股比_自算_pct】。"
+                )
 
         # 2. 增强 table3 (概念与风格标签隔日状态及破净动态复核指南)
         if "table3" in formatted_tables:

@@ -1087,11 +1087,14 @@ class TestFinanceGateway(unittest.TestCase):
         # 3. stock_quotes: 验证 A 股与港股通用字段最高/最低/涨跌额_元/更新时间及滚动市盈率_PETTM/总市值_元
         res_q_a = fin_gw.stock_quotes({"symbol": "600519"})
         hq_a = res_q_a["盘口核心行情"]
-        self.assertIn("最高", hq_a)
         self.assertIn("最高价", hq_a)
-        self.assertIn("最低", hq_a)
+        self.assertNotIn("最高", hq_a)
         self.assertIn("最低价", hq_a)
+        self.assertNotIn("最低", hq_a)
         self.assertIn("涨跌额_元", hq_a)
+        self.assertNotIn("涨跌额", hq_a)
+        self.assertIn("日内振幅_pct", hq_a)
+        self.assertNotIn("振幅_pct", hq_a)
         self.assertIn("更新时间", hq_a)
 
         mock_hk_raw = 'v_r_hk00700="100~腾讯控股~00700~393.800~390.000~392.000~37783835.0~0~0~393.800~100~0~0~0~0~0~0~0~0~394.000~200~0~0~0~0~0~0~0~0~37783835.0~2026/10/21 16:08:26~3.800~0.97~396.000~391.200~393.800~37783835.0~14880000000.000~0~20.50~~0~0~1.23~35806.8353~35806.8353~TENCENT~0.00~450.000~260.000~0.00~66.67~0~0~0~0~0~0~0~0~0~0~0~GP~0~0~0~0~0~9092644829.00~9092644829.00~0~0~0~0~HKD~1~50";'
@@ -1105,9 +1108,13 @@ class TestFinanceGateway(unittest.TestCase):
             hq_hk = res_q_hk["盘口核心行情"]
             ext_hk = res_q_hk["估值与基本盘面"]
             self.assertIn("最高价", hq_hk)
-            self.assertIn("最高", hq_hk)
+            self.assertNotIn("最高", hq_hk)
+            self.assertIn("最低价", hq_hk)
+            self.assertNotIn("最低", hq_hk)
             self.assertIn("涨跌额_元", hq_hk)
+            self.assertNotIn("涨跌额", hq_hk)
             self.assertIn("日内振幅_pct", hq_hk)
+            self.assertNotIn("振幅_pct", hq_hk)
             self.assertIn("更新时间", hq_hk)
             self.assertIn("滚动市盈率_PETTM", ext_hk)
             self.assertIn("动态市盈率_PE", ext_hk)
@@ -2428,6 +2435,64 @@ class TestFinanceGateway(unittest.TestCase):
                 t_curr = str(news[i].get("time") or news[i].get("datetime") or "")
                 t_next = str(news[i + 1].get("time") or news[i + 1].get("datetime") or "")
                 self.assertGreaterEqual(t_curr, t_next, f"标的 {sym} 新闻未按时间倒序: {t_curr} < {t_next}")
+
+
+    def test_p1_1_financial_balance_asset_coverage_gap(self):
+        """验证 P1-1: 金融分支资产侧明细覆盖低，自陈资产总计不可加总差额及结构限制说明"""
+        # 银行标的 601658 (邮储银行)
+        res_bank = self.gw.stock_financials({"symbol": "601658", "report_type": "balance", "limit_periods": 1})
+        st_bank = res_bank.get("statements", [])[0]
+        self.assertIn("资产总计不可加总差额_金融投资及信贷专有科目缺项", st_bank)
+        self.assertIn("金融资产结构限制说明", st_bank)
+        self.assertGreater(st_bank["资产总计不可加总差额_金融投资及信贷专有科目缺项"], 5000000000000.0)  # > 5 万亿
+
+        # 保险标的 601336 (新华保险)
+        res_ins = self.gw.stock_financials({"symbol": "601336", "report_type": "balance", "limit_periods": 1})
+        st_ins = res_ins.get("statements", [])[0]
+        self.assertIn("资产总计不可加总差额_金融投资及信贷专有科目缺项", st_ins)
+        self.assertIn("金融资产结构限制说明", st_ins)
+        self.assertGreater(st_ins["资产总计不可加总差额_金融投资及信贷专有科目缺项"], 700000000000.0)  # > 7 千亿
+
+    def test_p2_1_quotes_pb_note_financial_deduction(self):
+        """验证 P2-1: 金融股与含永续债标的 PB 提示必须扣除其他权益工具"""
+        res_q = self.gw.stock_quotes({"symbol": "600030"})
+        ext = res_q.get("估值与基本盘面", {})
+        note = ext.get("估值口径说明", "")
+        self.assertIn("其他权益工具/优先股/永续债", note)
+        self.assertIn("中信证券", note)
+
+    def test_p2_2_table5_pledge_ratio_and_note(self):
+        """验证 P2-2: summary table5 提供质押占总股本比_自算_pct 与质押比例口径说明"""
+        res = self.gw.stock_f10({"symbol": "002293", "category": "summary"})
+        t5 = res.get("formatted_tables", {}).get("table5", [])
+        self.assertTrue(len(t5) > 0)
+        self.assertIn("质押占总股本比_自算_pct", t5[0])
+        self.assertIn("质押比例口径说明", t5[0])
+        self.assertIn("质押比例口径说明", res)
+
+    def test_p3_1_indicators_table4_full_four_date_keys(self):
+        """验证 P3-1: indicators table4 具备完整四键（报告期、截止日期、报告期日期、报告期标签）"""
+        res = self.gw.stock_f10({"symbol": "600519", "category": "indicators"})
+        t4 = res.get("formatted_tables", {}).get("table4", [])[0]
+        self.assertIn("报告期", t4)
+        self.assertIn("截止日期", t4)
+        self.assertIn("报告期日期", t4)
+        self.assertIn("报告期标签", t4)
+        self.assertRegex(str(t4["报告期日期"]), r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_p3_2_dual_keys_for_yyzcb(self):
+        """验证 P3-2: 600875 营业总成本不闭合时同时具备 营业总成本构成说明 与 营业总成本构成差额说明"""
+        res = self.gw.stock_financials({"symbol": "600875", "report_type": "income", "limit_periods": 1})
+        st = res.get("statements", [])[0]
+        self.assertIn("营业总成本构成说明", st)
+        self.assertIn("营业总成本构成差额说明", st)
+
+    def test_p3_7_stock_kline_a_stock_truncation_notice(self):
+        """验证 P3-7: A股 kline count=301 时返回截断说明"""
+        res = self.gw.stock_kline({"symbol": "600519", "period": "1m", "count": 301})
+        self.assertEqual(res.get("total_bars"), 300)
+        self.assertIn("截断说明", res)
+        self.assertIn("300", res["截断说明"])
 
 
 if __name__ == "__main__":

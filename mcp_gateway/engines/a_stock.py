@@ -506,19 +506,17 @@ class AStockEngine(BaseMarketEngine):
             low_p = float(hq_raw.get("MinP", 0.0) or 0.0)
             if close_p > 0 and now_p > 0:
                 mapped_hq["涨跌幅_pct"] = round(((now_p - close_p) / close_p) * 100.0, 2)
-                mapped_hq["涨跌额"] = round(now_p - close_p, 3)
+                mapped_hq["涨跌额_元"] = round(now_p - close_p, 3)
             if close_p > 0 and high_p > 0 and low_p > 0:
                 amp_val = round(((high_p - low_p) / close_p) * 100.0, 2)
                 mapped_hq["日内振幅_pct"] = amp_val
-                mapped_hq["振幅_pct"] = amp_val
-            if "最高价" in mapped_hq and "最高" not in mapped_hq:
-                mapped_hq["最高"] = mapped_hq["最高价"]
-            if "最低价" in mapped_hq and "最低" not in mapped_hq:
-                mapped_hq["最低"] = mapped_hq["最低价"]
-            if "涨跌额" in mapped_hq:
-                mapped_hq["涨跌额_元"] = mapped_hq["涨跌额"]
             if "行情时间" in mapped_hq:
                 mapped_hq["更新时间"] = mapped_hq["行情时间"]
+            # 彻底切除行内同值镜像别名【最高】、【最低】、【涨跌额】与【振幅_pct】，收敛为唯一规范键【最高价】、【最低价】、【涨跌额_元】与【日内振幅_pct】以防整表遍历求和双计
+            mapped_hq.pop("最高", None)
+            mapped_hq.pop("最低", None)
+            mapped_hq.pop("涨跌额", None)
+            mapped_hq.pop("振幅_pct", None)
             result["盘口核心行情"] = mapped_hq
 
         # 2. 估值与股本指标中文化映射与年化口径对齐
@@ -588,6 +586,16 @@ class AStockEngine(BaseMarketEngine):
                         if f10_mgsy > 0 and (abs(f10_mgsy - mgsy) > 0.001 or (f10_mgjzc > 0 and abs(f10_mgjzc - mgjzc) > 0.01)):
                             is_stale = True
 
+                        diff_factor_str = ""
+                        if mgsy > 0 and mapped_ext.get("年化每股收益_EPS"):
+                            try:
+                                actual_mult = round(float(mapped_ext["年化每股收益_EPS"]) / float(mgsy), 3)
+                                exp_mult = 2.0 if f10_bgq.endswith("-06-30") else (4.0 if f10_bgq.endswith("-03-31") else (1.333 if f10_bgq.endswith("-09-30") else 1.0))
+                                if abs(actual_mult - exp_mult) > 0.04:
+                                    diff_factor_str = f"（注：年化EPS实测乘数为{actual_mult}倍，与标准年化倍数{exp_mult}倍存在差异，系标的在报告期后发生股本变动/增发或发行永续债等，致使年化EPS基于现总股本而BPS仍基于报告期旧股本基数不同所致）。"
+                            except (ValueError, TypeError):
+                                pass
+
                         if is_stale:
                             mgsy = f10_mgsy
                             mgjzc = f10_mgjzc
@@ -602,9 +610,9 @@ class AStockEngine(BaseMarketEngine):
                                 mapped_ext["年化每股收益_EPS"] = round(now_p / syl, 4) if syl > 0 else round(ann_eps_raw, 4)
                             else:
                                 mapped_ext["年化每股收益_EPS"] = round(ann_eps_raw, 4)
-                            mapped_ext["派生指标换期说明"] = f"检测到上游行情盘口指标滞留于旧期次，已自动自算对齐至最新披露的 {f10_bgq} 财报口径 (EPS={f10_mgsy}元, BPS={f10_mgjzc}元)。"
+                            mapped_ext["派生指标换期说明"] = f"检测到上游行情盘口指标滞留于旧期次，已自动自算对齐至最新披露的 {f10_bgq} 财报口径 (EPS={f10_mgsy}元, BPS={f10_mgjzc}元)。{diff_factor_str}"
                         else:
-                            mapped_ext["派生指标换期说明"] = f"上游行情盘口指标与最新披露的 {f10_bgq} 财报完全同步对齐，无需换期重算。"
+                            mapped_ext["派生指标换期说明"] = f"上游行情盘口指标与最新披露的 {f10_bgq} 财报完全同步对齐，无需换期重算。{diff_factor_str}"
                 except Exception:
                     pass
 
@@ -655,7 +663,9 @@ class AStockEngine(BaseMarketEngine):
             pb_val = mapped_ext.get("市净率_PB")
             pb_note = (
                 f"市净率_PB({pb_val}倍)由[现价÷每股净资产_BPS]派生；若标的近期发生送转增发导致总股本变动，"
-                "上游每股净资产若停留在报告期旧股本口径将导致PB低估，精确估值建议结合资产负债表[总市值÷归母所有者权益]进行核验；"
+                "上游每股净资产若停留在报告期旧股本口径将导致PB低估。精确普通股PB建议结合资产负债表重算：普通工商业标的为[总市值 ÷ 归母所有者权益]；"
+                "金融企业（券商/银行/保险）或发行了永续债/优先股的标的，分母必须扣除其他权益工具，即[总市值 ÷ (归母所有者权益 − 其他权益工具/优先股/永续债)]，"
+                "严禁直接以归母总权益计算导致估值大幅低估（如中信证券会低估约16%，邮储银行会低估约13%）；"
             ) if pb_val is not None else ""
             loss_pe_warn = f" 【高危警示·亏损股市盈率不可用】标的处于亏损状态，市盈率为负({ttm_val}倍)，负市盈率属于亏损代号而非低估值，严禁带入PEG或参与横向排序！" if (ttm_val is not None and ttm_val < 0) else ""
             mapped_ext["估值口径说明"] = (
@@ -894,7 +904,7 @@ class AStockEngine(BaseMarketEngine):
                     "建议先调用 stock_lookup 工具核对标准证券名称与代码。"
                 )
 
-        return {
+        resp: dict[str, Any] = {
             "symbol": clean_code,
             "name": stock_name,
             "setcode": m_setcode,
@@ -904,6 +914,18 @@ class AStockEngine(BaseMarketEngine):
             "indicators_included": bool(with_indicators),
             "klines": parsed_bars,
         }
+        if int(count) > 300:
+            resp["截断说明"] = (
+                f"单次请求根数 count={count} 超过单次最大安全返回上限(300根)，已自动截断为最近 300 根。"
+                "如需更大时间跨度的历史行情，请切换为更大周期（如 day/week）或分批请求。"
+            )
+        elif int(count) > len(parsed_bars):
+            resp["超限提示"] = (
+                f"当前请求 count={count} 大于当前标的在该周期实际可提取的最大历史记录数({len(parsed_bars)}根)。"
+                "已全量交付当前标的所能提供的全部历史 K 线。"
+            )
+
+        return resp
 
 
     def get_financials(
@@ -1319,7 +1341,8 @@ class AStockEngine(BaseMarketEngine):
                                     period_dict["营业收入不可加总差额_保险服务收入及金融专有科目缺项"] = diff_yysr
                                     period_dict["保险企业收入说明"] = (
                                         "该标的执行新保险合同准则(CAS 25/IFRS 17)，上游专线未单独收录【保险服务收入/已赚保费】细项，"
-                                        f"导致营业收入与已知金融收益项之和存在客观缺口({round(diff_yysr / 100000000.0, 2)}亿元)，财务建模请直接引用官方【营业收入】整体。"
+                                        f"导致营业收入与已知金融收益项之和存在客观缺口({round(diff_yysr / 100000000.0, 2)}亿元)。"
+                                        "【可用性结论】金融/保险企业营业收入构成明细严禁用于收入结构分析；但顶层【营业收入】总额真实准确，财务建模请直接引用官方【营业收入】整体。"
                                     )
 
                             # 金融企业综合收益与扣非净利润勾稽 (P2-4, P2-5)
@@ -1381,6 +1404,9 @@ class AStockEngine(BaseMarketEngine):
                                         f"营业总成本({float(yyzcb):,.2f}元)与已列明主营与期间成本项(营业成本+营业税金及附加+销售+管理+研发+财务费用，合计{cost_sum:,.2f}元)存在差额({cost_diff:,.2f}元)。"
                                         "该差额通常由其他业务成本、资产减值损失准备或合并抵销细项构成。"
                                     )
+                                    period_dict["营业总成本构成说明"] = (
+                                        f"营业总成本({float(yyzcb):,.2f}元)与已列明成本费用合计({cost_sum:,.2f}元)存在差额({cost_diff:,.2f}元)，科目未完全闭合（详见营业总成本构成差额说明）。"
+                                    )
                                 else:
                                     period_dict["营业总成本构成说明"] = "营业总成本 = 营业成本 + 营业税金及附加 + 销售费用 + 管理费用 + 研发费用 + 财务费用，科目完全闭合。"
 
@@ -1432,6 +1458,40 @@ class AStockEngine(BaseMarketEngine):
                                 diff = round(float(zchj) - (float(fzhj) + float(qyhj)), 2)
                                 if abs(diff) > 0.01:
                                     period_dict["金融资产负债不平衡自陈差额"] = diff
+
+                            # 金融资产侧明细可加总性校验与客观缺口自陈 (修复 P1-1)
+                            # 剔除客户资金存款与货币资金双计，核算银行信贷/保险投资/证券专有科目覆盖率
+                            if zchj is not None and isinstance(zchj, (int, float)):
+                                known_fin_assets = [
+                                    "存放同业及其他金融机构款项", "货币资金", "现金及存放中央银行款项",
+                                    "结算备付金", "存出备付金", "融出资金", "贵金属", "拆出资金",
+                                    "交易性金融资产", "衍生金融资产", "买入返售金融资产", "应收款项",
+                                    "应收保费", "应收分保账款", "应收分保未到期责任准备金", "应收分保未决赔款准备金",
+                                    "应收分保寿险责任准备金", "应收分保长期健康险责任准备金", "保户质押贷款",
+                                    "应收股利", "应收利息", "定期存款", "发放贷款及垫款", "存出保证金",
+                                    "存出资本保证金", "债权投资", "其他债权投资", "其他权益工具投资",
+                                    "长期应收款", "长期股权投资", "存出资本保证金_保险", "投资性房地产",
+                                    "固定资产清理", "固定资产", "在建工程", "无形资产", "开发支出",
+                                    "独立账户资产", "长期待摊费用", "其他非流动资产", "递延所得税资产",
+                                    "商誉", "其他资产"
+                                ]
+                                # 若无'货币资金'但有'客户资金存款'，计入客户资金存款；若已有'货币资金'，客户资金为其内部明细切勿重复累加
+                                extra_client_fund = 0.0
+                                if "货币资金" not in period_dict and "客户资金存款" in period_dict:
+                                    extra_client_fund = float(period_dict.get("客户资金存款") or 0.0)
+
+                                sub_fin_assets = sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_fin_assets) + extra_client_fund
+                                diff_fin_assets = round(float(zchj) - sub_fin_assets, 2)
+                                if abs(diff_fin_assets) > 0.01:
+                                    period_dict["资产总计不可加总差额_金融投资及信贷专有科目缺项"] = diff_fin_assets
+                                    coverage_pct = round((sub_fin_assets / float(zchj)) * 100.0, 2)
+                                    period_dict["金融资产结构限制说明"] = (
+                                        f"【金融企业资产侧明细覆盖度限制警示】通达信底层专线金融资产负债表未收录商业银行（如以摊余成本计量的金融投资、债权投资等大额科目）"
+                                        f"与保险公司（如大额保单投资、准备金分保资产等）核心大额资产科目，已知明细和仅占资产总计约 {coverage_pct}%，"
+                                        f"客观缺口达 {round(diff_fin_assets / 100000000.0, 2)} 亿元已自陈至【资产总计不可加总差额_金融投资及信贷专有科目缺项】。"
+                                        "金融机构资产结构分析严禁使用明细项机械累加或内部占比分析，财务分析与资产规模评估必须且只能引用官方【资产总计】、【负债合计】、【所有者权益合计】等顶层科目！"
+                                    )
+
                             period_dict["资产负债表核算说明"] = (
                                 "【金融企业资产负债表核算规范】本表遵循《金融企业财务报表格式》（银行业/保险业/证券业）。"
                                 "金融企业资产负债表不区分流动与非流动资产/负债，以资产流动性从高到低排列（现金及存放央行款项排在最前）。"
