@@ -932,10 +932,16 @@ class FinanceGateway:
         if exact_match:
             res["命中说明"] = f"已精确匹配到目标证券标的 (代码: {matched_code})"
         elif clean_q.isdigit() and len(clean_q) in (5, 6):
-            res["未命中说明"] = (
-                f"在指定市场范围 ({market_range}) 中未检索到代码为 '{query}' 的上市证券标的；"
-                "下方返回列表为语义模型相关度最近的关联候选（非正主标的），请核对代码后再行查询。"
-            )
+            if entities:
+                res["未命中说明"] = (
+                    f"在指定市场范围 ({market_range}) 中未检索到代码为 '{query}' 的上市证券标的；"
+                    "下方返回列表为语义模型相关度最近的关联候选（非正主标的），请核对代码后再行查询。"
+                )
+            else:
+                res["未命中说明"] = (
+                    f"在指定市场范围 ({market_range}) 中未检索到代码为 '{query}' 的上市证券标的（亦无相关候选标的），"
+                    "请核对代码有效性后再行查询。"
+                )
         return res
 
     def stock_quotes(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1112,21 +1118,42 @@ class FinanceGateway:
             rep_data = self.tdx_client._get_ashare_repurchases(clean_code)
             rep_list = rep_data.get("formatted_tables", {}).get("repurchases", [])
             has_records = len(rep_list) > 0
-            cat_name = "股份回购方案与实施明细" if norm_cat == "repurchases" else "股份回购与注销实施进度 (Buyback 专线)"
-            tbl_key = "repurchases" if norm_cat == "repurchases" else "buyback_details"
+            if norm_cat == "buyback":
+                cat_name = "股份回购实施进展与累计聚合概览 (Buyback Overview)"
+                total_spent = round(sum(float(r.get("已实施回购金额_万元") or 0.0) for r in rep_list), 2)
+                ongoing_count = sum(1 for r in rep_list if "实施" in str(r.get("回购进展状态", "")) and "完成" not in str(r.get("回购进展状态", "")))
+                completed_count = sum(1 for r in rep_list if "完成" in str(r.get("回购进展状态", "")))
+                latest_plan_date = rep_list[0].get("公告日期") if rep_list else None
+                latest_status = rep_list[0].get("回购进展状态") if rep_list else "无"
+                buyback_summary = {
+                    "累计已实施回购总额_万元": total_spent,
+                    "回购计划总数": len(rep_list),
+                    "当前实施中方案数": ongoing_count,
+                    "已实施完成方案数": completed_count,
+                    "最新方案公告日": latest_plan_date,
+                    "最新方案实施进度": latest_status,
+                }
+                tbls = {
+                    "buyback_summary": [buyback_summary],
+                    "buyback_details": rep_list,
+                }
+            else:
+                cat_name = "股份回购方案与实施明细"
+                tbls = {
+                    "repurchases": rep_list,
+                }
+
             res_obj = {
                 "symbol": clean_code,
                 "category": norm_cat,
                 "category_name": cat_name,
                 "source": "eastmoney_repurchases (东方财富A股回购权威专线)",
-                "formatted_tables": {
-                    tbl_key: rep_list,
-                },
+                "formatted_tables": tbls,
                 "data": rep_data,
                 "回购说明": "A股上市公司实施股份回购的最新进展、回购金额上限/下限、已回购股数与方案进度。",
             }
             if norm_cat == "buyback":
-                res_obj["参数说明"] = "buyback 为 repurchases 的英文专业术语别名，统一由东方财富权威回购专线直通驱动。"
+                res_obj["参数说明"] = "buyback 聚焦于回购累计实施规模与状态的高维聚合概览 (buyback_summary)；repurchases 聚焦于历次方案明细流水。"
             if not has_records:
                 res_obj["无记录说明"] = f"标的 {symbol} 近期无公开披露的股份回购方案或实施记录。"
             return res_obj
@@ -1379,8 +1406,12 @@ class FinanceGateway:
                         latest_date_str = str(t0_data[0].get("解禁日期", ""))
                         today_str = datetime.date.today().strftime("%Y%m%d")
                         if latest_date_str and latest_date_str < today_str:
+                            for row in t0_data:
+                                if str(row.get("解禁日期", "")) < today_str and row.get("解禁进度") == "未实施":
+                                    row["解禁进度说明"] = f"法定解禁日({row.get('解禁日期')})已过，上游数据库标注'未实施'系结果公告批处理滞后所致，实际已过承诺解禁日。"
                             tdx_res["解禁状态说明"] = (
                                 f"该标的最近一次限售解禁已于 {latest_date_str} 实施完成，当前股票处于全流通状态或近期无待解禁日程。"
+                                "（注：上游若仍标记'未实施'系数据库公告录入批处理滞后所致，实际已过承诺解禁日）。"
                             )
                     try:
                         fb_unlocks = self.fallback_client.get_f10(symbol=clean_code, category="unlocks")
@@ -1441,6 +1472,7 @@ class FinanceGateway:
                     except Exception:
                         formatted_tables["financials_overview"] = formatted_tables.get("table4", [])
                     tdx_res["formatted_tables"] = formatted_tables
+                    tdx_res["估值快照清算说明"] = "【估值基准说明】本表收盘后总市值基于当日收盘清算价计算；盘中时段为上一交易日清算口径，盘中精准估值请结合 stock_quotes 实时行情总市值。"
 
                 # 防空壳无效标的校验：严格校验所有格式化表中是否存在任何实质有效非空单元格（防止全 None 占位行被误判为有效数据）
                 has_any_data = any(
@@ -1539,6 +1571,27 @@ class FinanceGateway:
                     if ok in row:
                         row[cn] = row.pop(ok)
 
+        # 0.1 汉化 table1 (主营业务简述与申万行业，彻底清除 T017/hy1/hy2 裸码)
+        if "table1" in formatted_tables:
+            for row in formatted_tables["table1"]:
+                for ok, cn in F10_TABLE1_BIZ_MAP.items():
+                    if ok in row:
+                        row[cn] = row.pop(ok)
+
+        # 0.2 汉化 table2 (概念题材分类，彻底清除 rec_id/T001/T002 裸码)
+        if "table2" in formatted_tables:
+            for row in formatted_tables["table2"]:
+                for ok, cn in F10_TABLE2_CONCEPTS_MAP.items():
+                    if ok in row:
+                        row[cn] = row.pop(ok)
+
+        # 0.3 汉化 table7 (CDR存托凭证属性，彻底清除 iscdr 裸码)
+        if "table7" in formatted_tables:
+            for row in formatted_tables["table7"]:
+                for ok, cn in F10_TABLE7_CDR_MAP.items():
+                    if ok in row:
+                        row[cn] = row.pop(ok)
+
         # 1. 增强 table4 (关键财务指标映射与亏损同比方向精确判定，修复 B10 与 P3)
         if "table4" in formatted_tables:
             for row in formatted_tables["table4"]:
@@ -1610,6 +1663,9 @@ class FinanceGateway:
                         f"盘中若股价上涨且最新现价 >= {mgjzc}元（即即时 PB >= 1.0），则已脱离破净状态！"
                         "盘中必须调用 stock_quotes 取得最新价核算，严禁直接盲从隔日静态标签。"
                     )
+                for ok, cn in F10_TABLE3_TAGS_MAP.items():
+                    if ok in row:
+                        row[cn] = row.pop(ok)
 
         # 3. 增强 table6 (估值指标映射与盘中重算提示，修复 P1-2 PE_TTM 期次落后自算)
         if "table6" in formatted_tables:

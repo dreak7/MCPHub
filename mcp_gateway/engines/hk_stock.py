@@ -1120,6 +1120,92 @@ class HKStockEngine(BaseMarketEngine):
                 for p in statements:
                     p["单季度说明"] = "资产负债表为特定时点截面存量数据，各期末数值均为该时点真实余额，无需做差。"
 
+        # =========================================================================
+        # 【功能块 5.3.1：港股标的金融属性智能嗅探与双轨制 (与 A 股契约 100% 镜像对齐)】
+        # - 输入：clean_code (5位港股数字代码), statements (各报告期财报列表)
+        # - 功能：
+        #   1. 双重自动嗅探判定金融属性 (is_financial)：
+        #      - 实体名称嗅探：检查公司实体名是否包含银行/保险/证券/信托/金融/理财/券商/建行/工行/招行等关键词；
+        #      - 报表科目特征嗅探：检查已解析科目中是否出现"客户存款"、"客户贷款及其他款项"、
+        #        "存放中央银行款项"、"向中央银行借款"、"利息净收入"、"已赚保费"、"拆入资金"等金融专有科目；
+        #   2. 会计准则双轨制对齐 (accounting_standard)：
+        #      - 金融标的：挂载"国际/香港财务报告准则 (银行 / 保险 / 证券 / 金融控股)"；
+        #      - 工商业实体：挂载"国际财务报告准则 (IFRS) / 香港财务报告准则 (HKFRS) - 一般工商业"；
+        #   3. 金融报表核算规范与资产负债恒等式检验原地注入：
+        #      - 资产负债表：注入不严格区分流动性说明，核验【总资产 = 权益及负债合计】或【总资产 = 总负债 + 股东权益】，
+        #        若存在残差自动注入"金融资产负债不平衡自陈差额"；
+        #      - 利润表：注入以利息净收入、手续费及佣金与投资收益为核心的金融利润表核算规范；
+        #      - 现金流量表：注入客户存贷款与央行款项净增加额核算指引；
+        # - 输出：is_financial (bool), standard_name (str), 增强后的 statements
+        # =========================================================================
+        is_financial = False
+        entity = self._resolve_exact_security_entity(clean_code)
+        corp_name = ""
+        if isinstance(entity, dict):
+            corp_name = str(entity.get("entity_name") or "")
+        elif entity is not None:
+            corp_name = str(getattr(entity, "name", "") or getattr(entity, "entity_name", "") or "")
+        if any(k in corp_name for k in ("银行", "保险", "证券", "信托", "金融", "理财", "平安", "友邦", "汇丰", "建行", "工行", "招行", "券商")):
+            is_financial = True
+
+        if not is_financial and statements:
+            sample_keys = set()
+            for p in statements:
+                sample_keys.update(p.keys())
+            fin_feature_keys = {
+                "客户存款", "客户贷款及其他款项", "向中央银行借款", "存放中央银行款项",
+                "银行同业及其他金融机构存款(负债)", "银行同业及其他金融机构存款(资产)",
+                "利息净收入", "利息收入", "已赚保费", "保险业务收入", "买入返售金融资产",
+                "卖出回购金融资产", "拆入资金", "拆出资金", "衍生金融工具-资产", "衍生金融工具-负债"
+            }
+            if any(k in sample_keys for k in fin_feature_keys):
+                is_financial = True
+
+        if is_financial:
+            standard_name = "国际/香港财务报告准则 (银行 / 保险 / 证券 / 金融控股)"
+        else:
+            standard_name = "国际财务报告准则 (IFRS) / 香港财务报告准则 (HKFRS) - 一般工商业"
+
+        rtype_lower = report_type.lower()
+        if statements:
+            for p in statements:
+                if is_financial:
+                    if rtype_lower in ("balance", "balance_sheet", "zcfzb"):
+                        p["资产负债表核算说明"] = (
+                            "【金融企业资产负债表核算规范】本表遵循国际/香港财务报告准则金融机构专用列报格式。"
+                            "金融企业资产负债表不严格区分流动与非流动划分，以资产与负债的流动性由高到低排列（库存现金、存放央行、同业款项居前）。"
+                            "基本会计恒等式为：【总资产 = 总负债 + 股东权益合计】（或【总资产 = 权益及负债合计】）。"
+                        )
+                        tot_a = p.get("总资产")
+                        tot_l = p.get("总负债")
+                        tot_e = p.get("股东权益合计") or p.get("总权益") or p.get("归属于母公司股东权益")
+                        tot_le = p.get("权益及负债合计")
+                        if tot_a is not None and tot_le is not None:
+                            try:
+                                diff = round(float(tot_a) - float(tot_le), 2)
+                                if abs(diff) > 0.05:
+                                    p["金融资产负债不平衡自陈差额"] = diff
+                            except (ValueError, TypeError):
+                                pass
+                        elif tot_a is not None and tot_l is not None and tot_e is not None:
+                            try:
+                                diff = round(float(tot_a) - (float(tot_l) + float(tot_e)), 2)
+                                if abs(diff) > 0.05:
+                                    p["金融资产负债不平衡自陈差额"] = diff
+                            except (ValueError, TypeError):
+                                pass
+                    elif rtype_lower in ("income", "income_statement", "lyb"):
+                        p["利润表加总纪律说明"] = (
+                            "【金融企业利润表核算规范】利息净收入、手续费及佣金净收入与投资收益为金融机构主要核心收益来源。"
+                            "财务建模与分析请直接引用官方公布的【营业额/营业收入】、【税前溢利/利润总额】与【股东应占溢利/归属于母公司股东的净利润】。"
+                        )
+                    elif rtype_lower in ("cashflow", "cashflow_statement", "xjllb"):
+                        p["现金流量表加总纪律说明"] = (
+                            "【金融企业现金流量表核算规范】本表遵循金融企业现金流量格式。"
+                            "客户存贷款变动、央行及同业款项净增加额为经营活动现金流核心组成。"
+                            "财务分析请重点引用经营、投资、筹资三大活动净额与期末现金及等价物余额。"
+                        )
+
         type_names = {
             "income": "综合损益表 (利润表)",
             "balance": "资产负债表",
@@ -1135,9 +1221,12 @@ class HKStockEngine(BaseMarketEngine):
             "period_type": period_type,
             "source": source,
             "period_count": len(statements or []),
+            "is_financial": is_financial,
+            "accounting_standard": standard_name,
             "statements": statements or [],
             "会计口径与说明": (
                 f"港股会计报表按国际财务报告准则 (IFRS) 或香港财务报告准则 (HKFRS) 编制。当前口径：【{period_suffix}】。\n"
+                f"准则类别：【{standard_name}】。\n"
                 "1.【数据源与金额单位说明】：本接口采用双源高可用容灾架构：以东方财富港股数据中心专线为主力数据源（统一金额单位为【元】，币种统一为【CNY】），"
                 "当 period_type=quarter 时针对利润表与现金流量表按同财年相邻累计报告期自动做差生成单季度数据（资产负债表为时点存量不作差）。\n"
                 "2.【报告期披露频率说明】：港交所主板强制规则仅要求披露半年度(中报)与全年度(年报)；除 A+H 两地上市标的（因中国证监会要求必须按季披露 Q1/Q3）及腾讯控股等少数自愿披露标的外，多数纯 H 股无一季报/三季报。\n"

@@ -215,11 +215,19 @@ class AStockEngine(BaseMarketEngine):
                 for c in re.findall(r"<t[dh][^>]*>(.*?)</(?:td|th)>", r, re.S)
             ]
             if len(cells) >= 8 and cells[0] not in ("公告日期", ""):
+                def _parse_div_num(val_str: str) -> float:
+                    if not val_str or val_str.strip() in ("--", "-", "null", "None"):
+                        return 0.0
+                    try:
+                        return round(float(val_str.strip()), 4)
+                    except (ValueError, TypeError):
+                        return 0.0
+
                 results.append({
                     "公告日期": cells[0],
-                    "送股_每10股": cells[1],
-                    "转增_每10股": cells[2],
-                    "派息_每10股_含税": cells[3],
+                    "送股_每10股": _parse_div_num(cells[1]),
+                    "转增_每10股": _parse_div_num(cells[2]),
+                    "派息_每10股_含税": _parse_div_num(cells[3]),
                     "进度": cells[4],
                     "除权除息日": cells[5],
                     "股权登记日": cells[6],
@@ -539,12 +547,16 @@ class AStockEngine(BaseMarketEngine):
                         f10_mgsy = float(t4_row.get("mgsy") or 0.0)
                         f10_mgjzc = float(t4_row.get("mgjzc") or 0.0)
                         f10_gmjlr = float(t4_row.get("gmjlr") or 0.0)
-                        if f10_mgsy > 0 and (f10_mgsy != mgsy or f10_mgjzc != mgjzc):
+                        mapped_ext["最新财报报告期"] = f10_bgq
+                        is_stale = False
+                        if f10_mgsy > 0 and (abs(f10_mgsy - mgsy) > 0.001 or (f10_mgjzc > 0 and abs(f10_mgjzc - mgjzc) > 0.01)):
+                            is_stale = True
+
+                        if is_stale:
                             mgsy = f10_mgsy
                             mgjzc = f10_mgjzc
                             mapped_ext["报告期每股收益_EPS"] = mgsy
                             mapped_ext["每股净资产_BPS"] = mgjzc
-                            mapped_ext["最新财报报告期"] = f10_bgq
                             ann_factor = 4.0 if f10_bgq.endswith("-03-31") else (2.0 if f10_bgq.endswith("-06-30") else (4.0 / 3.0 if f10_bgq.endswith("-09-30") else 1.0))
                             annualized_eps = round(mgsy * ann_factor, 4)
                             mapped_ext["年化每股收益_EPS"] = round(annualized_eps, 3)
@@ -556,7 +568,9 @@ class AStockEngine(BaseMarketEngine):
                                 else:
                                     syl = round(now_p / annualized_eps, 2)
                                 mapped_ext["动态市盈率_PE"] = syl
-                            mapped_ext["派生指标换期说明"] = f"上游行情专线每股指标滞留上一期，已实时对齐同步至最新披露的 {f10_bgq} 财报口径。"
+                            mapped_ext["派生指标换期说明"] = f"检测到上游行情盘口指标滞留于旧期次，已自动自算对齐至最新披露的 {f10_bgq} 财报口径 (EPS={f10_mgsy}元, BPS={f10_mgjzc}元)。"
+                        else:
+                            mapped_ext["派生指标换期说明"] = f"上游行情盘口指标与最新披露的 {f10_bgq} 财报完全同步对齐，无需换期重算。"
                 except Exception:
                     pass
 
@@ -959,7 +973,8 @@ class AStockEngine(BaseMarketEngine):
                                 "【金融企业现金流量表核算规范】本表遵循《金融企业财务报表格式》（银行/保险/证券）。"
                                 "因底层行情专线未采集保险原保费收入、证券代理买卖等特殊金融科目明细，流入/流出细项之和与小计可能存在差额，"
                                 "差额已自动自陈至不可加总差额科目。财务分析必须且只能引用三大活动净额（经营净额、投资净额、筹资净额）"
-                                "与期末现金及现金等价物余额。"
+                                "与期末现金及现金等价物余额。\n"
+                                "【间接法补充资料披露规则】依据《企业会计准则第31号》，上市公司季报（一季报03-31/三季报09-30）依法无需披露间接法附表，故季报期【补充资料_间接法】为空，仅中报(06-30)与年报(12-31)完整披露。"
                             )
                             # 金融企业经营活动现金流入不可加总差额 (原保险保费、代理买卖证券、拆入回购等缺项，修复 D2)
                             jy_in = period_dict.get("经营活动现金流入小计")
@@ -1049,8 +1064,11 @@ class AStockEngine(BaseMarketEngine):
                             period_dict["现金流量表加总纪律说明"] = (
                                 "因上游数据模板中缺失'收到的税费返还'等流入细分项，流入/流出细项之和与小计可能存在不可闭合差额。"
                                 "量化与财报分析时禁止机械累加细项计算小计，必须且只能引用三大活动净额（经营净额、投资净额、筹资净额）"
-                                "与期末现金余额。"
+                                "与期末现金余额。\n"
+                                "【间接法补充资料披露规则】依据《企业会计准则第31号》，上市公司季报（一季报03-31/三季报09-30）依法无需披露间接法附表，故季报期【补充资料_间接法】为空，仅中报(06-30)与年报(12-31)完整披露。"
                             )
+                            if "补充资料_间接法" not in period_dict:
+                                period_dict["补充资料_间接法说明"] = "上游专线未收录该期次间接法编制细项（季报依法无需编制附表），分析现金流请直接引用主表现金流量净额与期末现金余额。"
                             # 经营活动现金流入/流出不可加总差额自陈 (财务公司拆借/存贷款/税费返还等科目缺项)
                             jy_in = period_dict.get("经营活动现金流入小计")
                             if jy_in is not None and isinstance(jy_in, (int, float)):

@@ -106,6 +106,31 @@ F10_MARGIN_TABLE2_MAP: dict[str, str] = {
     "bshow": "是否展示两融标的",
 }
 
+F10_TABLE1_BIZ_MAP: dict[str, str] = {
+    "T017": "主营业务简述",
+    "hy1": "申万一级行业",
+    "hy2": "申万二级行业",
+}
+
+F10_TABLE2_CONCEPTS_MAP: dict[str, str] = {
+    "rec_id": "概念序号",
+    "T001": "概念板块代码",
+    "T002": "概念题材名称",
+}
+
+F10_TABLE3_TAGS_MAP: dict[str, str] = {
+    "T060": "风格属性标签_1",
+    "T061": "风格属性标签_2",
+    "T062": "风格属性标签_3",
+    "T063": "风格属性标签_4",
+    "T064": "风格属性标签_5",
+    "T065": "风格属性标签_6",
+}
+
+F10_TABLE7_CDR_MAP: dict[str, str] = {
+    "iscdr": "是否CDR存托凭证",
+}
+
 # 港股主要财务与经营指标 (indicators) 宽表汉化映射表 (修复 HK-7)
 HK_MAININDICATOR_MAP: dict[str, str] = {
     "BASIC_EPS": "基本每股收益_元",

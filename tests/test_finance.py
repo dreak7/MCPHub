@@ -1790,6 +1790,34 @@ class TestFinanceGateway(unittest.TestCase):
                         fin_gw.stock_financials({"symbol": bad_code, "report_type": rt, "period_type": pt, "limit_periods": 4})
                     self.assertIn(f"未查询到证券代码 '{bad_code}' 的财务报表数据", str(cm.exception))
 
+    # =========================================================================
+    # 【功能块 T4：港股金融财报框架与准则双轨制契约对齐测试】
+    # - 输入：港股金融标的 (03968/00005) 与工商业标的 (00700)
+    # - 功能：验证港股引擎 is_financial 布尔标志、accounting_standard 准则对齐与金融核算说明注入
+    # - 输出：单元测试断言 100% 通过
+    # =========================================================================
+    def test_v190_hk_financials_dual_track_and_financial_framework(self) -> None:
+        """测试 v1.9.0: 港股引擎金融财报框架与 A 股契约 100% 对称对齐 (is_financial, accounting_standard 与金融核算说明)"""
+        fin_gw = FinanceGateway()
+
+        # 1. 验证港股金融标的 (03968 招商银行)：is_financial 为 True，准则标明金融行业专用列报，资产负债表注入核算说明
+        res_bank = fin_gw.stock_financials({"symbol": "03968", "report_type": "balance", "limit_periods": 1})
+        self.assertTrue(res_bank.get("is_financial"))
+        self.assertIn("金融控股", res_bank.get("accounting_standard", ""))
+        self.assertIn("资产负债表核算说明", res_bank["statements"][0])
+        self.assertIn("金融企业资产负债表核算规范", res_bank["statements"][0]["资产负债表核算说明"])
+
+        # 2. 验证港股工商业标的 (00700 腾讯控股)：is_financial 为 False，准则标明一般工商业
+        res_tech = fin_gw.stock_financials({"symbol": "00700", "report_type": "balance", "limit_periods": 1})
+        self.assertFalse(res_tech.get("is_financial"))
+        self.assertIn("一般工商业", res_tech.get("accounting_standard", ""))
+        self.assertNotIn("资产负债表核算说明", res_tech["statements"][0])
+
+        # 3. 验证港股金融标的利润表与现金流量表说明注入 (00005 汇丰控股)
+        res_inc = fin_gw.stock_financials({"symbol": "00005", "report_type": "income", "limit_periods": 1})
+        self.assertTrue(res_inc.get("is_financial"))
+        self.assertIn("利润表加总纪律说明", res_inc["statements"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
