@@ -1,10 +1,10 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v1.9.0)
+# Local MCP Search, Coding & Finance Fallback Gateway (v1.9.1)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 118 Passed](https://img.shields.io/badge/Tests-118%20Passed-success.svg)](tests/)
+[![Tests: 121 Passed](https://img.shields.io/badge/Tests-121%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 </div>
@@ -56,7 +56,7 @@ MCPHub/
 ├── mcphub-finance/              # 【可选外挂】Hermes 专属证券金融分析规范 Skill
 ├── logs/                        # 运行日志目录 (gateway.log)
 ├── state/                       # 持久化状态目录 (provider-state.json 冷却状态与提取缓存)
-├── tests/                       # 116 项全量自动化单元测试套件 (100% 通过)
+├── tests/                       # 121 项全量自动化单元测试套件 (100% 通过)
 ├── MCPHub服务管理面板.bat          # Windows 双击即用一键管理控制台
 ├── README.md                    # 项目全景使用与配置说明文档
 └── LICENSE                      # MIT 开源许可证
