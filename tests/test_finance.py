@@ -2574,8 +2574,87 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertIn("市净率_PB_自算_普通股", note)
 
 
+    # =========================================================================
+    # 【功能块 测试集：A股换期校准、PB昨收重算与实测乘数回归测试】
+    # - 输入：标的代码 300371 (换期样本)
+    # - 功能：验证 P2-1 市净率_PB_昨收_换期重算与校准说明挂载，验证 P2-2 实测乘数基于新 EPS 重算
+    # - 输出：断言通过，消除同 payload 内自相矛盾与假阳性归因
+    # =========================================================================
+    def test_p2_1_and_p2_2_a_stock_pb_yishou_and_diff_factor(self):
+        """验证 P2-1 & P2-2: 300371 换期后挂载 PB_昨收_换期重算与校准说明，实测乘数不产生假阳性"""
+        res_q = self.gw.stock_quotes({"symbol": "300371"})
+        ext = res_q.get("估值与基本盘面", {})
+        self.assertEqual(ext.get("最新财报报告期"), "2026-09-30")
+        self.assertIn("市净率_PB_昨收_换期重算", ext)
+        self.assertIn("市净率_PB_昨收_校准说明", ext)
+        self.assertAlmostEqual(ext.get("市净率_PB_昨收_换期重算"), 1.63, places=1)
+        note = ext.get("派生指标换期说明", "")
+        # 300371 标准乘数应匹配，不应出现异常股本变动误报
+        self.assertNotIn("实测乘数为0.25", note)
+
+    # =========================================================================
+    # 【功能块 测试集：A股两融时差说明、K线技术指标别名说明与预测日期ISO化】
+    # - 输入：标的代码 002293, 600519
+    # - 功能：验证 P2-3 两融入库时差说明、P3-2 K线别名声明、P3-1 预测日期 ISO 化
+    # - 输出：断言通过
+    # =========================================================================
+    def test_p2_3_margin_trading_latency_and_p3_kline_aliases(self):
+        """验证 P2-3: 两融包含最新期入库时差说明; P3-2: K线包含指标别名声明"""
+        res_margin = self.gw.stock_f10({"symbol": "002293", "category": "margin_trading"})
+        self.assertIn("最新期入库时差说明", res_margin)
+        self.assertIn("两融最新期入库时差提示", res_margin["最新期入库时差说明"])
+
+        res_kline = self.gw.stock_kline({"symbol": "600519", "period": "daily", "count": 10, "with_indicators": True})
+        self.assertIn("技术指标别名说明", res_kline)
+        self.assertIn("boll_upper", res_kline["技术指标别名说明"])
+
+    # =========================================================================
+    # 【功能块 测试集：港股工商业实体嗅探纠偏与成本科目双向映射】
+    # - 输入：标的代码 01186 (中国铁建), 01088 (中国神华)
+    # - 功能：验证 P2-2 中国铁建 balance 与 income 均为 is_financial=False; P3-3 成本科目映射
+    # - 输出：断言通过，工商业与金融业口径彻底解耦
+    # =========================================================================
+    def test_hk_p2_2_industrial_sniffer_and_p3_3_cost_mapping(self):
+        """验证 HK P2-2: 01186 is_financial=False; HK P3-3: 01088 销售成本与营运支出双向对齐"""
+        res_bal = self.gw.stock_financials({"symbol": "01186", "report_type": "balance", "limit_periods": 1})
+        res_inc = self.gw.stock_financials({"symbol": "01186", "report_type": "income", "limit_periods": 1})
+        self.assertFalse(res_bal.get("is_financial"))
+        self.assertFalse(res_inc.get("is_financial"))
+        self.assertIn("一般工商业", res_bal.get("accounting_standard", ""))
+
+        res_shenhua = self.gw.stock_financials({"symbol": "01088", "report_type": "income", "limit_periods": 1})
+        st_sh = res_shenhua.get("statements", [])[0]
+        self.assertIn("销售成本", st_sh)
+        self.assertIn("营运支出", st_sh)
+        self.assertEqual(st_sh["销售成本"], st_sh["营运支出"])
+
+    # =========================================================================
+    # 【功能块 测试集：港股主要股东申报时效提示与规则表有效行数收敛】
+    # - 输入：标的代码 00688, 00700
+    # - 功能：验证 P2-4 港股大股东最新申报日期暴露与时效提示; 验证规则表数据有效行数=0
+    # - 输出：断言通过，下游统计行数时杜绝假阳性
+    # =========================================================================
+    def test_hk_p2_4_top_holders_staleness_and_rules_tables_zero_rows(self):
+        """验证 HK P2-4: top_holders 最新申报日期与时效提示; 机制表数据有效行数=0"""
+        res_holders = self.gw.stock_f10({"symbol": "00688", "category": "top_holders"})
+        self.assertIn("最新申报日期", res_holders)
+        self.assertIn("最新申报时效提示", res_holders)
+        self.assertIn("时效风险提示", res_holders.get("formatted_tables", {}).get("top_holders", [])[0])
+
+        for cat in ("lhb", "unlocks", "capital_flow", "margin", "limit_up"):
+            res_rule = self.gw.stock_f10({"symbol": "00700", "category": cat})
+            self.assertEqual(res_rule.get("数据有效行数"), 0)
+            self.assertEqual(res_rule.get("规则声明行数"), 1)
+            self.assertIn("记录计数说明", res_rule)
+
+        res_fc = self.gw.stock_f10({"symbol": "00700", "category": "forecast"})
+        self.assertFalse(res_fc.get("是否包含未来预测记录"))
+        self.assertEqual(res_fc.get("数据有效行数"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

@@ -596,6 +596,11 @@ class AStockEngine(BaseMarketEngine):
                         if f10_mgsy > 0 and (abs(f10_mgsy - mgsy) > 0.001 or (f10_mgjzc > 0 and abs(f10_mgjzc - mgjzc) > 0.01)):
                             is_stale = True
 
+                        # 修复 P2-2（根因）：diff_factor_str 必须分两路计算——
+                        # is_stale=False 路径：mgsy 即是最终报告期值，用旧 mgsy 计算实测乘数无误；
+                        # is_stale=True 路径：mgsy 将被换成 f10_mgsy，需在换期之后用新值重算，
+                        # 否则用旧 mgsy 基准算出的乘数会指向旧期次 EPS，导致归因假阳性。
+                        # 此处先用旧 mgsy 计算供 is_stale=False 路径使用；is_stale=True 路径在下方单独重算。
                         diff_factor_str = ""
                         raw_ann_eps = mapped_ext.get("年化每股收益_EPS") or (round(now_p / syl, 4) if (syl > 0 and now_p > 0) else None)
                         if mgsy > 0 and raw_ann_eps:
@@ -632,6 +637,36 @@ class AStockEngine(BaseMarketEngine):
                                     pb_recalc = round((now_p / mgjzc) * equity_factor, 4)
                                 mapped_ext["市净率_PB_自算_普通股"] = pb_recalc
                                 mapped_ext["市净率_PB_换期重算标记"] = True
+
+                            # 修复 P2-2（is_stale=True 路径）：换期后用 f10_mgsy（新值）重算实测乘数，
+                            # 覆盖上面用旧 mgsy 算出的 diff_factor_str，消除归因假阳性。
+                            new_ann_eps = mapped_ext.get("年化每股收益_EPS") or raw_ann_eps
+                            if f10_mgsy > 0 and new_ann_eps:
+                                try:
+                                    actual_mult_stale = round(float(new_ann_eps) / float(f10_mgsy), 3)
+                                    exp_mult_stale = 2.0 if f10_bgq.endswith("-06-30") else (4.0 if f10_bgq.endswith("-03-31") else (1.333 if f10_bgq.endswith("-09-30") else 1.0))
+                                    if abs(actual_mult_stale - exp_mult_stale) > 0.04:
+                                        diff_factor_str = f"（注：年化EPS实测乘数为{actual_mult_stale}倍，与标准年化倍数{exp_mult_stale}倍存在差异，系标的在报告期后发生股本变动/增发或发行永续债等，致使年化EPS基于现总股本而BPS仍基于报告期旧股本基数不同所致）。"
+                                    else:
+                                        diff_factor_str = ""
+                                except (ValueError, TypeError):
+                                    diff_factor_str = ""
+
+                            # 修复 P2-1：换期触发时，f10 indicators/summary/quotes 同响应内
+                            # table6.市净率_PB_昨收（sjl 字段）是上游 F10 通道 raw 映射（上一交易日收盘清算 PB），
+                            # 不随 quotes 换期引擎重算，会停留在旧期次净资产计算的旧 PB 值，形成自相矛盾。
+                            # 修复方式：在 quotes 估值字段注入 市净率_PB_昨收_校准说明，
+                            # 并用新 BPS 与最后已知收盘价自算覆盖 市净率_PB_昨收 字段，保持响应内代数一致。
+                            if t6_sjl > 0 and mgjzc > 0:
+                                close_ref = close_p if close_p > 0 else now_p
+                                if close_ref > 0:
+                                    pb_yishou_recalc = round(close_ref / mgjzc, 4)
+                                    mapped_ext["市净率_PB_昨收_换期重算"] = pb_yishou_recalc
+                                    mapped_ext["市净率_PB_昨收_校准说明"] = (
+                                        f"F10 table6.市净率_PB_昨收(sjl)={t6_sjl} 系上游 F10 通道基于旧期次净资产({raw_mgjzc}元/股)的收盘清算 PB，"
+                                        f"未随本次换期({f10_bgq})自动重算；网关已以最新报告期 BPS({mgjzc}元)与昨收价({close_ref}元)自算得 "
+                                        f"PB_昨收_换期重算={pb_yishou_recalc}倍；下游横比时请使用换期重算值，切勿直接引用原始 sjl 字段。"
+                                    )
 
                             mapped_ext["派生指标换期说明"] = f"检测到上游行情盘口指标滞留于旧期次，已自动自算对齐至最新披露的 {f10_bgq} 财报口径 (EPS={f10_mgsy}元, BPS={f10_mgjzc}元)；PB 分母已同步换期重算为 {mapped_ext.get('市净率_PB_自算_普通股')} 倍。{diff_factor_str}"
                         else:
@@ -953,6 +988,17 @@ class AStockEngine(BaseMarketEngine):
             "indicators_included": bool(with_indicators),
             "klines": parsed_bars,
         }
+        # 修复 P3-2：技术指标别名键并存声明
+        # boll_up/boll_upper、boll_dn/boll_lower、macd_bar/macd_hist 三对别名键逐位同值（无错值风险），
+        # 为保持向后兼容暂不删除任何一方；但整表遍历或写入数据库时会产生重复列，请按需选取一套后丢弃另一套。
+        if with_indicators:
+            resp["技术指标别名说明"] = (
+                "【K线技术指标别名并存提示】每根 bar 同时存在以下三对逐位相同的同义别名键，纯为向后兼容保留，无错值风险但入库时会产生重复列：\n"
+                "  · BOLL上轨：boll_up = boll_upper（两者逐位相同）；\n"
+                "  · BOLL下轨：boll_dn = boll_lower（两者逐位相同）；\n"
+                "  · MACD柱：macd_bar = macd_hist（两者逐位相同）。\n"
+                "建议入库/分析时各取一个规范键（推荐 boll_upper/boll_lower/macd_hist），丢弃另一套别名，避免重复列。"
+            )
         if int(count) > 300:
             resp["截断说明"] = (
                 f"单次请求根数 count={count} 超过单次最大安全返回上限(300根)，已自动截断为最近 300 根。"

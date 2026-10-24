@@ -265,7 +265,7 @@ class HKStockEngine(BaseMarketEngine):
                 ),
                 "52周价格区间说明": (
                     "52周最高/最低价统计周期为最近52周滚动交易日，上游行情源底层采用滚动现金分红前复权(QFQ)口径计算；"
-                    "若与不复权历史K线(adjust='none')的高低点存在轻微偏差（通常约 1%~2%，等于期间派息分红金额），属于前复权派息扣减所致的正常口径差异。"
+                    "若与不复权历史真实成交K线(adjust='none')的高低点存在偏差（高股息标的如煤炭/基建/银行等因累计分红派息，偏差通常在 1%~7% 不等，差额精确对应期间累计派息分红金额），属于前复权派息扣减所致的正常口径差异；若需真实历史极值成交价，请使用 adjust='none' 的不复权 K 线。"
                     "上市不足52周的次新股则等同于上市以来历史区间。"
                 ),
             },
@@ -1171,11 +1171,14 @@ class HKStockEngine(BaseMarketEngine):
                 "客户存款", "客户贷款及其他款项", "向中央银行借款", "存放中央银行款项",
                 "银行同业及其他金融机构存款(负债)", "银行同业及其他金融机构存款(资产)",
                 "利息净收入", "已赚保费", "保险业务收入", "买入返售金融资产",
-                "卖出回购金融资产", "拆入资金", "拆出资金", "衍生金融工具-资产", "衍生金融工具-负债",
+                "卖出回购金融资产", "拆入资金", "拆出资金",
                 "保费", "保户储金", "赔付款项", "质押贷款", "客户存款和同业存放款项净增加额",
                 "存放中央银行和同业款项净减少额", "向中央银行借款净增加额"
             }
-            if any(k in sample_keys for k in fin_feature_keys):
+            # 只有当包含纯金融专有科目且不具备主营工商业特征时才判定为金融企业 (修复 P2-2)
+            has_fin_keys = any(k in sample_keys for k in fin_feature_keys)
+            has_industrial_keys = any(k in sample_keys for k in ("存货", "在建工程", "固定资产", "销售成本", "营业额"))
+            if has_fin_keys and not (has_industrial_keys and not any(k in corp_name for k in ("银行", "保险", "证券", "信托", "金融", "理财", "券商"))):
                 is_financial = True
 
         if is_financial:
@@ -1186,12 +1189,21 @@ class HKStockEngine(BaseMarketEngine):
         rtype_lower = report_type.lower()
         if statements:
             for p in statements:
+                # 修复 P3-3: 港股成本键名双向映射（销售成本 vs 营运支出）
+                if rtype_lower in ("income", "income_statement", "lyb"):
+                    if "销售成本" in p and "营运支出" not in p:
+                        p["营运支出"] = p["销售成本"]
+                    elif "营运支出" in p and "销售成本" not in p:
+                        p["销售成本"] = p["营运支出"]
+
                 if is_financial:
                     if rtype_lower in ("balance", "balance_sheet", "zcfzb"):
                         p["资产负债表核算说明"] = (
                             "【金融企业资产负债表核算规范】本表遵循国际/香港财务报告准则金融机构专用列报格式。"
                             "金融企业资产负债表不严格区分流动与非流动划分，以资产与负债的流动性由高到低排列（库存现金、存放央行、同业款项居前）。"
-                            "基本会计恒等式为：【总资产 = 总负债 + 股东权益合计】（或【总资产 = 权益及负债合计】）。"
+                            "基本会计恒等式为：【总资产 = 总负债 + 股东权益合计】（或【总资产 = 权益及负债合计】）。\n"
+                            "【非运算项目禁止求和声明】：报表中的【非运算项目】属于数据源用于平衡展示的统计插补列，非实际资产或负债细项，严禁参与整表字段遍历累加求和（若重复累加会导致资产总计虚增一倍以上）。\n"
+                            "【保险行业中报其他项目归集特性提示】：港股专线在半年度报告(中报)中对部分保险机构（如 02601 中国太保）的细项大幅归集至【资产其他项目】与【负债其他项目】（占比可能超 85%），明细覆盖率低于季报/年报，分析细分资产负债构成时需审慎。"
                         )
                         tot_a = p.get("总资产")
                         tot_l = p.get("总负债")
@@ -1223,6 +1235,7 @@ class HKStockEngine(BaseMarketEngine):
                             "财务分析请重点引用经营、投资、筹资三大活动净额与期末现金及等价物余额。"
                         )
 
+
         type_names = {
             "income": "综合损益表 (利润表)",
             "balance": "资产负债表",
@@ -1248,7 +1261,9 @@ class HKStockEngine(BaseMarketEngine):
                 "当 period_type=quarter 时针对利润表与现金流量表按同财年相邻累计报告期自动做差生成单期数据（资产负债表为时点存量不作差）。\n"
                 "2.【单期与单季度口径区别】：港交所主板强制规则仅要求披露半年度(中报)与全年度(年报)；除 A+H 两地上市标的（因中国证监会要求必须按季披露 Q1/Q3）及腾讯控股等少数自愿披露标的外，多数纯 H 股无一季报/三季报。"
                 "因此对于实行半年度披露的标的，做差推算的单期其本质是半年度单期（如年报扣除中报得到下半年单期 H2，中报累计值即为上半年单期 H1），非真正三月单季；仅按季披露标的才对应真正三月单季(Q1-Q4)。具体每期单期属性已在【单期标签】与【单季度计算说明】中明确标注。\n"
-                "3.【金融与保险业明细说明】：港股专线未对保险等特殊金融行业设立细分子模板，保险公司（如中国太保 02601）的主营负债与资产大额归集于【负债其他项目】/【资产其他项目】，分析资产负债细项结构时须注意该口径特性。"
+                "3.【金融与保险业明细说明】：港股专线未对保险等特殊金融行业设立细分子模板，保险公司（如中国太保 02601）的主营负债与资产大额归集于【负债其他项目】/【资产其他项目】，分析资产负债细项结构时须注意该口径特性。\n"
+                "4.【非运算项目与插补列纪律】：报表中出现的【非运算项目】为数据源排版统计插补列，绝对禁止整表字段累加求和。\n"
+                "5.【成本科目双向别名】：为消除港股功能法（销售成本）与性质法（营运支出）列报分裂，接口已自动映射【销售成本】与【营运支出】为互通别名。"
             ),
         }
 
@@ -1446,10 +1461,17 @@ class HKStockEngine(BaseMarketEngine):
                     unique_holders[h_key] = row_copy
 
             top_list = list(unique_holders.values())
+            latest_decl_date = ""
+            for item in top_list:
+                dt = str(item.get("事件日期") or "").strip()
+                if dt and dt > latest_decl_date:
+                    latest_decl_date = dt
+
             # 港股为流水式申报记录，按申报日期倒序排列，以“申报顺位”替代静态“名次”
             for idx, item in enumerate(top_list, 1):
                 item["申报顺位"] = idx
                 item["持股申报说明"] = f"好仓申报({item.get('目前类别', 'L')})，申报日期：{item.get('事件日期', '近期')}"
+                item["时效风险提示"] = f"申报日期为 {item.get('事件日期', '早期')}，仅代表该法定申报时点历史截面，不代表当前静态持股"
 
             return {
                 "symbol": clean_code,
@@ -1457,6 +1479,13 @@ class HKStockEngine(BaseMarketEngine):
                 "category": category,
                 "category_name": "港股持股5%以上主要股东与权益披露 (替代前十大股东)",
                 "source": "sina_hk_rights (新浪港股大股东权益变动专线)",
+                "最新申报日期": latest_decl_date or "无",
+                "最新申报时效提示": (
+                    f"表内主要股东最新法定申报日期为【{latest_decl_date or '未知'}】。"
+                    "依据香港《证券及期货条例》，持股 5% 以上大股东仅在持股跨越整百分点门槛时依法强制申报流水。"
+                    "若大股东长期无跨界增减持则无新申报，最新公开披露申报记录可能停留于数年前（如 00688 最新申报为 2020 年，02628 为 2019 年）。"
+                    "表内数据仅代表各股东各自最近一次法定申报截面，绝非当前时点的最新静态持股名册！"
+                ),
                 "formatted_tables": {
                     "top_holders": top_list[:10],
                 },
@@ -1580,6 +1609,7 @@ class HKStockEngine(BaseMarketEngine):
                 },
                 "data": buyback_summary,
                 "回购说明": "buyback 聚焦于回购累计实施规模与状态的宏观聚合概览 (buyback_summary)；repurchases 聚焦于历次方案明细流水。",
+                "表关系说明": "buyback_details 表与 repurchases 分类返回的回购流水完全同源（逐位哈希相同），明细取数推荐优先使用 buyback_details。",
             }
 
         # 分类 3.1：分红派息与历史分红 (dividends / bonus)
@@ -1701,6 +1731,12 @@ class HKStockEngine(BaseMarketEngine):
                 },
                 "data": em_data[0] if em_data else {"status": "暂无指标数据"},
                 "指标说明": "东方财富港股数据中心核心财务与盈利能力指标汇总宽表（含每股收益、ROE、毛利率与主要营运比率）。",
+                "估值与市盈率口径说明": (
+                    "【港股 F10 财务指标市盈率 PE_TTM 口径与行情端差异自陈】：\n"
+                    "1. 本表【市盈率_PE_TTM】由东方财富港股数据中心基于最近四期财务报告 TTM 归母净利润与静态清算市值计算生成；\n"
+                    "2. 行情接口 (quotes) 中的【市盈率_TTM】系实时行情数据流透传（底层基于全股本总市值乘以即时 H 股价，并按日频即时港元汇率约 0.868~0.872 折算）；\n"
+                    "3. 因两端采用的市值基准时点、净利润跨期平滑口径及港元/人民币汇率折算点位不同（F10 端反解隐含汇率约 0.843~0.885），导致 F10 侧与行情端 PE_TTM 存在 ±1%~3% 的正常口径差异。严肃基本面分析请指明数据来源，跨市场或跨端横比时不可混用！"
+                ),
             }
 
         # 分类 5.2：法定三大财务报表概览精要 (financials)
@@ -1736,6 +1772,9 @@ class HKStockEngine(BaseMarketEngine):
                 "category": "lhb",
                 "category_name": "港股龙虎榜席位",
                 "source": "hkex_market_rules",
+                "数据有效行数": 0,
+                "规则声明行数": 1,
+                "记录计数说明": "返回的表格为机制不适用说明（共1行），实际业务数据记录为0行，下游统计有效记录数时请勿将其计入实际业务记录。",
                 "formatted_tables": {
                     "lhb_rules": [{
                         "机制状态": "港股不设每日龙虎榜披露机制",
@@ -1755,6 +1794,9 @@ class HKStockEngine(BaseMarketEngine):
                 "category": "unlocks",
                 "category_name": "港股限售解禁",
                 "source": "hkex_market_rules",
+                "数据有效行数": 0,
+                "规则声明行数": 1,
+                "记录计数说明": "返回的表格为机制不适用说明（共1行），实际业务数据记录为0行，下游统计有效记录数时请勿将其计入实际业务记录。",
                 "formatted_tables": {
                     "unlocks_rules": [{
                         "机制状态": "港股为全流通市场，无A股限售解禁表",
@@ -1775,11 +1817,15 @@ class HKStockEngine(BaseMarketEngine):
                 "category": "forecast",
                 "category_name": "港股机构盈利预测与指标概览",
                 "source": "eastmoney_hk_f10 (东方财富港股F10备份专线)",
+                "是否包含未来预测记录": False,
+                "数据属性": "历史财务指标快照（非未来盈利预测）",
+                "数据有效行数": 0,
+                "指标快照行数": len(em_data),
                 "formatted_tables": {
                     "indicators": em_data,
                 },
                 "data": em_data[0] if em_data else {"status": "暂无盈利预测数据覆盖"},
-                "无记录说明": "港股公开免费源无官方券商一致性业绩预测与目标价覆盖表。建议参考主要财务指标 (indicators) 或综合损益表中的历史盈利增速。",
+                "无记录说明": "港股公开免费源无官方券商一致性业绩预测与目标价覆盖表。返回的 indicators 表为最近一期历史财务指标快照（共1行），切勿因 len(rows)=1 误当成未来盈利预测数据。建议参考综合损益表中的历史盈利增速。",
             }
 
         # 分类 9：资金流向与大单机制说明 (capital_flow / funds / moneyflow) (修复 HK-4)
@@ -1790,6 +1836,9 @@ class HKStockEngine(BaseMarketEngine):
                 "category": category,
                 "category_name": "港股资金流向与大单统计机制",
                 "source": "hkex_market_rules",
+                "数据有效行数": 0,
+                "规则声明行数": 1,
+                "记录计数说明": "返回的表格为机制不适用说明（共1行），实际业务数据记录为0行，下游统计有效记录数时请勿将其计入实际业务记录。",
                 "formatted_tables": {
                     "capital_flow_rules": [{
                         "机制状态": "港股不设通达信 A 股特大单/大单/中单/小单四级主动买卖资金流向统计",
@@ -1809,6 +1858,9 @@ class HKStockEngine(BaseMarketEngine):
                 "category": category,
                 "category_name": "港股融资融券与卖空借券机制",
                 "source": "hkex_market_rules",
+                "数据有效行数": 0,
+                "规则声明行数": 1,
+                "记录计数说明": "返回的表格为机制不适用说明（共1行），实际业务数据记录为0行，下游统计有效记录数时请勿将其计入实际业务记录。",
                 "formatted_tables": {
                     "margin_rules": [{
                         "机制状态": "港股无通达信 A 股交易所集中两融余额（融资买入/融券偿还）报表",
@@ -1828,6 +1880,9 @@ class HKStockEngine(BaseMarketEngine):
                 "category": category,
                 "category_name": "港股价格限制机制 (市调机制/冷静期)",
                 "source": "hkex_market_rules",
+                "数据有效行数": 0,
+                "规则声明行数": 1,
+                "记录计数说明": "返回的表格为机制不适用说明（共1行），实际业务数据记录为0行，下游统计有效记录数时请勿将其计入实际业务记录。",
                 "formatted_tables": {
                     "limit_up_rules": [{
                         "机制状态": "港股不设 A 股固定 ±10%/±20% 涨跌停板与涨停复盘表",
@@ -1861,6 +1916,7 @@ class HKStockEngine(BaseMarketEngine):
                     "每手股数": info.get("每手股数", ""),
                     "官方网址": info.get("官方网址") or info.get("公司网址") or info.get("网址", ""),
                     "电子邮箱": info.get("电子邮箱") or info.get("电邮地址", ""),
+                    "空值字段说明": "港股公开F10概况页部分字段未收录（如上市日期、每手股数，以及部分国企未登记主席导致董事长显示为空串），此系上游源特性，交易单位请以交易所手册为准。",
                 }]
                 return {
                     "symbol": clean_code,
@@ -1873,7 +1929,7 @@ class HKStockEngine(BaseMarketEngine):
                     },
                     "data": basic_table[0],
                     "说明": "港股基本工商信息包含公司注册地址、成立上市日期、董事会高管、核数师及法定股本架构。",
-                    "字段完整性说明": "上市日期与每手股数如显示空串，系上游公开数据源F10概况页未收录该字段，可参考实时行情盘口或港交所官方披露易。",
+                    "字段完整性说明": "上市日期、每手股数及部分国企/红筹标的董事长(如01088)若为空串，系上游公开数据源F10概况页未收录该字段；每手股数请参考行情盘口，最新高管名单请参考披露易最新公司治理公告。",
                 }
 
         # 默认：公司资料与业务概况 (summary / company)
@@ -1897,6 +1953,7 @@ class HKStockEngine(BaseMarketEngine):
                 },
                 "data": info,
                 "说明": "港股公司概要包含主营业务构成、核心竞争力、恒生行业分类及经营概况。",
+                "表别名兼容说明": "formatted_tables 内 summary 与 company_profile 互为同义兼容别名表（内容逐位一致），推荐主键使用 summary；整表遍历时请注意排重。",
             }
 
         # 备份：调用东方财富主要财务指标作为 F10 备份

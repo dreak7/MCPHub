@@ -1429,12 +1429,15 @@ class FinanceGateway:
                                 row_dict["占总股本比例_pct"] = round((unl_wan / zgb_wan) * 100.0, 3)
 
                         table_rows.append(row_dict)
-                    # 修复 P3-3 与 P3-9：标准化 events, margin_trading 及 unlocks 等表格中的 8 位数字日期为 YYYY-MM-DD
-                    if norm_cat in ("events", "margin_trading", "unlocks") and table_rows:
+                    # 修复 P3-3 与 P3-9：标准化 events, margin_trading, unlocks 及 forecast 等表格中的 8 位数字日期为 YYYY-MM-DD
+                    if norm_cat in ("events", "margin_trading", "unlocks", "forecast") and table_rows:
                         if norm_cat == "events":
                             table_rows = list(reversed(table_rows))
                         for r in table_rows:
-                            for dk in ("催化日期", "cjrq", "交易日期", "变动日期", "rq", "T002", "基准日期", "cur", "截止日期", "解禁日期", "限售起始日", "公告日期"):
+                            # 修复 P3-1：forecast 表 报告期类日期字段均统一 ISO 化（defdate/mxdef/T003/T030 均可能为 8 位数字）
+                            date_keys_to_iso = ("催化日期", "cjrq", "交易日期", "变动日期", "rq", "T002", "基准日期", "cur", "截止日期", "解禁日期", "限售起始日", "公告日期",
+                                               "预测报告期", "基准报告期", "预测发布日期", "评级更新日期", "defdate", "mxdef", "T003", "T030")
+                            for dk in date_keys_to_iso:
                                 if dk in r and re.match(r"^\d{8}$", str(r[dk])):
                                     ds = str(r[dk])
                                     r[dk] = f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
@@ -1620,6 +1623,20 @@ class FinanceGateway:
                                 "历史窗口边界日（如窗口最早一天）二级市场成交三列（成交量/成交金额/收盘价）若为 None，"
                                 "系通达信官方专线两融滚动窗口首日未联合二级市场行情做联合查询回填所致的固有断档（非该日无交易），"
                                 "标的当日二级市场真实复权量价请直接调用 stock_kline 日线为准。"
+                            )
+                        # 修复 P2-3：检测最新交易日期并自陈入库时差，覆盖原说明只处理首日缺值、不处理最新期滞后的盲区
+                        _latest_dates = [
+                            str(r.get("交易日期") or r.get("rq") or r.get("T001") or "")
+                            for r in t0_data
+                        ]
+                        _latest_dates = [d for d in _latest_dates if d.strip()]
+                        if _latest_dates:
+                            _max_trade_date = max(_latest_dates)
+                            tdx_res["最新期入库时差说明"] = (
+                                f"【两融最新期入库时差提示】本表最新交易日期={_max_trade_date}。"
+                                "受沪深交易所两融数据官方入库时序差异影响，深市标的（代码 002/003/300/301 等）与沪市标的（代码 60x 等）"
+                                "最新一期入库日期可能相差 1 个自然交易日；若跨标的横比两融余额或融资买入额，"
+                                "各票首行数据可能来自不同交易日，请以各行【交易日期】字段逐日对齐后再比较，切勿直接截取首行横向混比。"
                             )
                 elif norm_cat == "capital_flow":
                     tdx_res["资金流向口径说明"] = (
