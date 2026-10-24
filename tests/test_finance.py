@@ -1919,6 +1919,107 @@ class TestFinanceGateway(unittest.TestCase):
         q_bank = fin_gw.stock_quotes({"symbol": "601658"})
         self.assertEqual(q_bank.get("估值与基本盘面", {}).get("总股本_股"), 120095053492)
 
+    def test_v191_issues_convergence_and_quality_check(self) -> None:
+        """测试 v1.9.1 实测 10 项缺陷收敛与口径保障"""
+        fin_gw = FinanceGateway()
+
+        # 1. 验证 P1-1: 港股 f10 四组枚举异构解耦 (concepts/industry, events/dividends, indicators/financials, repurchases/buyback)
+        f_concepts = fin_gw.stock_f10({"symbol": "00700", "category": "concepts"})
+        f_industry = fin_gw.stock_f10({"symbol": "00700", "category": "industry"})
+        self.assertNotEqual(f_concepts["category_name"], f_industry["category_name"])
+        self.assertIn("concepts", f_concepts.get("formatted_tables", {}))
+        self.assertIn("industry", f_industry.get("formatted_tables", {}))
+
+        f_events = fin_gw.stock_f10({"symbol": "00700", "category": "events"})
+        f_dividends = fin_gw.stock_f10({"symbol": "00700", "category": "dividends"})
+        self.assertNotEqual(f_events["category_name"], f_dividends["category_name"])
+        self.assertIn("events", f_events.get("formatted_tables", {}))
+        self.assertIn("dividends", f_dividends.get("formatted_tables", {}))
+
+        f_indicators = fin_gw.stock_f10({"symbol": "00700", "category": "indicators"})
+        f_financials = fin_gw.stock_f10({"symbol": "00700", "category": "financials"})
+        self.assertNotEqual(f_indicators["category_name"], f_financials["category_name"])
+        self.assertIn("indicators", f_indicators.get("formatted_tables", {}))
+        self.assertIn("income_summary", f_financials.get("formatted_tables", {}))
+
+        f_repurchases = fin_gw.stock_f10({"symbol": "00700", "category": "repurchases"})
+        f_buyback = fin_gw.stock_f10({"symbol": "00700", "category": "buyback"})
+        self.assertNotEqual(f_repurchases["category_name"], f_buyback["category_name"])
+        self.assertIn("repurchases", f_repurchases.get("formatted_tables", {}))
+        self.assertIn("buyback_summary", f_buyback.get("formatted_tables", {}))
+
+        # 2. 验证 P1-2: A+H 港股 PE 股本口径披露 (02628 PE_TTM 披露全部已发行总股本口径)
+        q_02628 = fin_gw.stock_quotes({"symbol": "02628"})
+        val_02628 = q_02628.get("估值与基本盘面", {})
+        self.assertIn("市盈率股本计算口径", val_02628)
+        self.assertIn("全部已发行总股本(含A+H)乘H股价", val_02628["市盈率股本计算口径"])
+        self.assertIn("A+H两地上市标的市盈率全股本口径", val_02628.get("估值口径说明", ""))
+
+        # 3. 验证 P2-3: stock_quotes 校验 setcode (错误市场抛出 ValueError)
+        with self.assertRaises(ValueError):
+            fin_gw.stock_quotes({"symbol": "600875", "setcode": "0"})
+        with self.assertRaises(ValueError):
+            fin_gw.stock_quotes({"symbol": "601658", "setcode": "0"})
+
+        # 4. 验证 P2-4: 港股 1m 上限扩容至 500 且支持截断提示
+        k_1m = fin_gw.stock_kline({"symbol": "00688", "period": "1m", "count": 500})
+        self.assertGreaterEqual(len(k_1m.get("klines", [])), 300)
+        k_1m_trunc = fin_gw.stock_kline({"symbol": "00688", "period": "1m", "count": 200})
+        self.assertIn("截断说明", k_1m_trunc)
+
+        # 5. 验证 P2-5: 02628 现金流模板标志与行业类型闭合 (金融保险)
+        cf_02628 = fin_gw.stock_financials({"symbol": "02628", "report_type": "cashflow", "limit_periods": 1})
+        self.assertTrue(cf_02628.get("is_financial"))
+        std_text = cf_02628.get("accounting_standard", "") or cf_02628.get("准则类别", "")
+        self.assertIn("保险", std_text)
+        bal_00700 = fin_gw.stock_financials({"symbol": "00700", "report_type": "balance", "limit_periods": 1})
+        self.assertFalse(bal_00700.get("is_financial"))
+
+        # 6. 验证 P2-6: A 股三表日期列机器可读 (截止日期与报告期日期为 ISO-8601，报告期保留文字标签)
+        inc_a = fin_gw.stock_financials({"symbol": "600519", "report_type": "income", "limit_periods": 1})
+        first_stmt = inc_a.get("statements", [])[0]
+        self.assertRegex(str(first_stmt.get("截止日期")), r"^\d{4}-\d{2}-\d{2}$")
+        self.assertRegex(str(first_stmt.get("报告期日期")), r"^\d{4}-\d{2}-\d{2}$")
+        self.assertIn("报告期", first_stmt)
+
+        # 7. 验证 P3-7: limit_up 历史行成交额缺失时具备明确补充说明
+        res_lu = fin_gw.stock_f10({"symbol": "688499", "category": "limit_up"})
+        lu_list = res_lu.get("formatted_tables", {}).get("limit_up_records", [])
+        for item in lu_list:
+            if not item.get("当日成交金额_万元"):
+                self.assertTrue(len(str(item.get("成交额补充说明", ""))) > 0)
+
+        # 8. 验证 P3-8: 600694 basic_info.table2 (ESG) 为空时注入客观说明
+        b_600694 = fin_gw.stock_f10({"symbol": "600694", "category": "basic_info"})
+        self.assertIn("ESG披露说明", b_600694)
+
+        # 9. 验证 P3-9: 600875 unlocks 日期为 str，行内与表级状态不自相矛盾
+        ul_600875 = fin_gw.stock_f10({"symbol": "600875", "category": "unlocks"})
+        ul_rows = ul_600875.get("formatted_tables", {}).get("unlock_schedule", [])
+        for row in ul_rows:
+            self.assertIsInstance(row.get("解禁日期"), str)
+            if "公告日期" in row and row.get("公告日期"):
+                self.assertIsInstance(row.get("公告日期"), str)
+        if any("未实施" in str(r.get("解禁进度", "")) for r in ul_rows):
+            self.assertNotIn("已实施完成，上游批处理滞后", ul_600875.get("全流通及实施状态说明", ""))
+
+        # 10. 验证 P3-10: code_docs_search 元数据准确，查 stock_kline 复权优先返回 MCP 工具官方文档
+        import logging
+        import tempfile
+        from pathlib import Path
+        from mcp_gateway.search import SearchGateway
+        sg = SearchGateway(
+            {"cooldown_seconds": 60, "providers": [
+                {"id": "context7", "type": "context7", "enabled": True, "endpoint": "https://context7.com/api/v3/search"}
+            ]},
+            Path(tempfile.mkdtemp()) / "state.json",
+            logging.getLogger("test")
+        )
+        docs = sg._context7("https://context7.com/api/v3/search", "", "stock_kline 复权", 5, {}, 10)
+        self.assertTrue(len(docs) > 0)
+        self.assertNotIn("[Unknown]", docs[0].get("title", ""))
+        self.assertIn("stock_kline", docs[0].get("title", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

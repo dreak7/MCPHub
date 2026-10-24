@@ -1346,12 +1346,12 @@ class FinanceGateway:
                                 row_dict["占总股本比例_pct"] = round((unl_wan / zgb_wan) * 100.0, 3)
 
                         table_rows.append(row_dict)
-                    # 修复 P3-3：标准化 events 及 margin_trading 等各类表格中的 8 位数字日期为 YYYY-MM-DD
-                    if norm_cat in ("events", "margin_trading") and table_rows:
+                    # 修复 P3-3 与 P3-9：标准化 events, margin_trading 及 unlocks 等表格中的 8 位数字日期为 YYYY-MM-DD
+                    if norm_cat in ("events", "margin_trading", "unlocks") and table_rows:
                         if norm_cat == "events":
                             table_rows = list(reversed(table_rows))
                         for r in table_rows:
-                            for dk in ("催化日期", "cjrq", "交易日期", "变动日期", "rq", "T002", "基准日期", "cur", "截止日期"):
+                            for dk in ("催化日期", "cjrq", "交易日期", "变动日期", "rq", "T002", "基准日期", "cur", "截止日期", "解禁日期", "限售起始日", "公告日期"):
                                 if dk in r and re.match(r"^\d{8}$", str(r[dk])):
                                     ds = str(r[dk])
                                     r[dk] = f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
@@ -1429,6 +1429,12 @@ class FinanceGateway:
                                             row["成交额补充说明"] = "盘口实时成交额补充(盘中清算前)"
                                     except Exception:
                                         pass
+                                # 修复 P3-7：若无日K线与盘口补齐，主动注入历史行缺失提示，杜绝缺失无提示
+                                if row.get("成交额补充说明") is None:
+                                    row["成交额补充说明"] = "历史异动上游专线未单独披露成交金额，日K线回溯超出覆盖范围"
+                            else:
+                                if row.get("成交额补充说明") is None:
+                                    row["成交额补充说明"] = "上游官方专线原始披露成交额"
                             if row.get("封板时间") == "--":
                                 row["封板说明"] = "盘中超涨10%异动，未触发封死涨停板"
                 elif category == "unlocks":
@@ -1441,16 +1447,22 @@ class FinanceGateway:
                     )
                     t0_data = formatted_tables.get("table0", [])
                     if t0_data:
+                        today_iso = datetime.date.today().strftime("%Y-%m-%d")
                         latest_date_str = str(t0_data[0].get("解禁日期", ""))
-                        today_str = datetime.date.today().strftime("%Y%m%d")
-                        if latest_date_str and latest_date_str < today_str:
-                            for row in t0_data:
-                                if str(row.get("解禁日期", "")) < today_str and row.get("解禁进度") == "未实施":
-                                    row["解禁进度说明"] = f"法定解禁日({row.get('解禁日期')})已过，上游数据库标注'未实施'系结果公告批处理滞后所致，实际已过承诺解禁日。"
+                        has_pending = any(r.get("解禁进度") == "未实施" for r in t0_data)
+                        if not has_pending:
+                            tdx_res["解禁状态说明"] = f"该标的历次限售解禁计划均已实施完成，当前处于全流通状态。"
+                        else:
+                            pending_count = sum(1 for r in t0_data if r.get("解禁进度") == "未实施")
                             tdx_res["解禁状态说明"] = (
-                                f"该标的最近一次限售解禁已于 {latest_date_str} 实施完成，当前股票处于全流通状态或近期无待解禁日程。"
-                                "（注：上游若仍标记'未实施'系数据库公告录入批处理滞后所致，实际已过承诺解禁日）。"
+                                f"该标的承诺解禁日({latest_date_str})已过，当前仍有 {pending_count} 笔限售股标注为'未实施'。"
+                                "在上市公司正式刊登上市流通实施公告前，相关限售股份尚未进入二级市场流通，请以交易所上市流通公告为准。"
                             )
+                            for row in t0_data:
+                                if row.get("解禁进度") == "未实施":
+                                    d_val = str(row.get("解禁日期", ""))
+                                    if d_val < today_iso:
+                                        row["解禁进度说明"] = f"承诺解禁日({d_val})已届满，上市公司尚未披露上市流通实施公告，当前仍处于未实施状态。"
                     try:
                         fb_unlocks = self.fallback_client.get_f10(symbol=clean_code, category="unlocks")
                         if fb_unlocks and isinstance(fb_unlocks, list) and len(fb_unlocks) > 1:
@@ -1519,6 +1531,12 @@ class FinanceGateway:
                         formatted_tables["financials_overview"] = formatted_tables.get("table4", [])
                     tdx_res["formatted_tables"] = formatted_tables
                     tdx_res["估值快照清算说明"] = "【估值基准说明】本表收盘后总市值基于当日收盘清算价计算；盘中时段为上一交易日清算口径，盘中精准估值请结合 stock_quotes 实时行情总市值。"
+
+                # 修复 P3-8：basic_info.table2 (ESG评级) 为空时主动注入非静默说明
+                if norm_cat == "basic_info":
+                    t2 = formatted_tables.get("table2", [])
+                    if not t2:
+                        tdx_res["ESG披露说明"] = "该标的暂未收录公开第三方 ESG 与社会责任专项评级记录 (table2 暂无条目)。"
 
                 # 修复 P2-2：在 financials / indicators / summary 顶层显式挂载 最新财报报告期 与 派生指标换期说明
                 if norm_cat in ("indicators", "financials", "summary"):

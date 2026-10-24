@@ -236,6 +236,7 @@ class HKStockEngine(BaseMarketEngine):
                 "静态市盈率_PEStatic": _safe_opt_float(parts[39] if len(parts) > 39 else None),
                 "动态市盈率_PE": _safe_opt_float(parts[71] if len(parts) > 71 and parts[71] else (parts[39] if len(parts) > 39 else None)),
                 "市净率_PB": _safe_opt_float(parts[58] if len(parts) > 58 else None),
+                "市盈率股本计算口径": "全部已发行总股本(含A+H)乘H股价",
                 "港股市值_亿港元": float_mv_yi,
                 "港股市值_H股流通市值_亿港元": float_mv_yi,
                 "流通市值_亿港元": float_mv_yi,
@@ -263,7 +264,8 @@ class HKStockEngine(BaseMarketEngine):
                 "估值口径说明": (
                     "【港股市盈率口径与汇率折算披露】：\n"
                     "1. 字段映射关系：【市盈率_TTM】与【滚动市盈率_PETTM】同源取自过去12个月净利润测算；【静态市盈率_PE_LYR】与【静态市盈率_PEStatic】同源取自上一财年经审计年报。\n"
-                    "2. 跨币种汇率换算机制：对于财报以人民币(CNY)编报但股票以港元(HKD)交易的标的（如腾讯控股、中国国航、青岛啤酒、中国电信等），行情源提供的 PE_TTM 在底层已包含港元对人民币的汇率折算（隐含换算比率约为 0.868~0.872 CNY/HKD）。如以人民币净利润手工复核，请统一折算对应汇率。"
+                    "2. 跨币种汇率换算机制：对于财报以人民币(CNY)编报但股票以港元(HKD)交易的标的（如腾讯控股、中国国航、青岛啤酒、中国电信等），行情源提供的 PE_TTM 在底层已包含港元对人民币的汇率折算（隐含换算比率约为 0.868~0.872 CNY/HKD）。如以人民币净利润手工复核，请统一折算对应汇率。\n"
+                    "3.【A+H两地上市标的市盈率全股本口径铁律】：对于 A+H 两地上市标的（如中国人寿 02628、工商银行 01398、中国国航 00753 等），上游官方行情源提供的【市盈率_TTM】与【静态市盈率】一律采用【全部已发行股份(含A+H总股本) × H股现价 × 汇率 ÷ TTM净利润】口径计算（即分子对应【总市值_全部股本乘H股价_亿港元】，而非单一 H 股流通市值）。例如中国人寿 02628：全股本乘H股市值 6653.51 亿 HKD × 汇率 0.8686 ÷ TTM 净利润 2476.36 亿 = PE_TTM 2.33；若误按纯 H 股流通市值 1751.65 亿计算会导致 PE 仅为 0.61，无法对应归母全量净利润，请务必以此全股本口径为准。"
                 ),
                 "52周价格区间说明": (
                     "52周最高/最低价统计周期为最近52周滚动交易日，上游行情源底层采用滚动现金分红前复权(QFQ)口径计算；"
@@ -319,7 +321,7 @@ class HKStockEngine(BaseMarketEngine):
         with_indicators: bool = True,
     ) -> dict[str, Any]:
         norm_code = clean_code.zfill(5)
-        limit_cnt = max(1, min(int(count), 300))
+        limit_cnt = max(1, min(int(count), 500))
         p_lower = period.lower()
         adj_lower = adjust.lower()
 
@@ -484,8 +486,9 @@ class HKStockEngine(BaseMarketEngine):
                 if with_indicators and parsed_bars:
                     parsed_bars = calculate_indicators(parsed_bars)
                 final_bars = parsed_bars[-limit_cnt:]
+                is_truncated = len(parsed_bars) > limit_cnt
 
-                return {
+                resp_payload = {
                     "symbol": norm_code,
                     "name": stock_name,
                     "setcode": "31",
@@ -514,6 +517,13 @@ class HKStockEngine(BaseMarketEngine):
                         "14:30、15:30、16:00 (收盘半小时)。"
                     ),
                 }
+                if is_truncated:
+                    resp_payload["截断说明"] = (
+                        f"受 count={count} (上限 {limit_cnt}) 参数限制，当前仅返回最近 {len(final_bars)} 根分钟线，"
+                        f"已截断当日早盘前 {len(parsed_bars) - len(final_bars)} 根分钟线。如需完整全天日内量能分析，"
+                        f"请传入 count={len(parsed_bars)} 或直接查阅日 K 线。"
+                    )
+                return resp_payload
 
         # ---------------------------------------------------------------------
         # 2. 港股跨日多周期历史 K 线 (day / week / month)
@@ -1145,7 +1155,7 @@ class HKStockEngine(BaseMarketEngine):
             corp_name = str(entity.get("entity_name") or "")
         elif entity is not None:
             corp_name = str(getattr(entity, "name", "") or getattr(entity, "entity_name", "") or "")
-        if any(k in corp_name for k in ("银行", "保险", "证券", "信托", "金融", "理财", "平安", "友邦", "汇丰", "建行", "工行", "招行", "券商")):
+        if any(k in corp_name for k in ("银行", "保险", "证券", "信托", "金融", "理财", "人寿", "国寿", "太保", "新华", "中保", "财险", "资管", "平安", "友邦", "汇丰", "建行", "工行", "招行", "券商")):
             is_financial = True
 
         if not is_financial and statements:
@@ -1155,8 +1165,10 @@ class HKStockEngine(BaseMarketEngine):
             fin_feature_keys = {
                 "客户存款", "客户贷款及其他款项", "向中央银行借款", "存放中央银行款项",
                 "银行同业及其他金融机构存款(负债)", "银行同业及其他金融机构存款(资产)",
-                "利息净收入", "利息收入", "已赚保费", "保险业务收入", "买入返售金融资产",
-                "卖出回购金融资产", "拆入资金", "拆出资金", "衍生金融工具-资产", "衍生金融工具-负债"
+                "利息净收入", "已赚保费", "保险业务收入", "买入返售金融资产",
+                "卖出回购金融资产", "拆入资金", "拆出资金", "衍生金融工具-资产", "衍生金融工具-负债",
+                "保费", "保户储金", "赔付款项", "质押贷款", "客户存款和同业存放款项净增加额",
+                "存放中央银行和同业款项净减少额", "向中央银行借款净增加额"
             }
             if any(k in sample_keys for k in fin_feature_keys):
                 is_financial = True
@@ -1495,24 +1507,67 @@ class HKStockEngine(BaseMarketEngine):
                 ),
             }
 
-        # 分类 2：股份回购明细 (repurchases / buyback)
-        if cat in ("repurchases", "buyback"):
+        # 分类 2.1：股份回购明细流水 (repurchases)
+        if cat == "repurchases":
             repurchases_data = self._get_sina_hk_table(clean_code, "rights", table_idx=2)
             return {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
-                "category": category,
-                "category_name": "港股公司股份回购明细",
+                "category": "repurchases",
+                "category_name": "港股公司股份回购明细流水",
                 "source": "sina_hk_rights (新浪港股公司回购专线)",
                 "formatted_tables": {
                     "repurchases": repurchases_data,
                 },
                 "data": repurchases_data[:15] if repurchases_data else {"status": "暂无股份回购记录"},
-                "回购说明": "港交所上市公司每日回购报告明细，包含回购日期、回购股数、最高/最低回购价及回购总耗资额。",
+                "回购说明": "港交所上市公司每日回购报告明细流水，包含回购日期、回购股数、最高/最低回购价及回购总耗资额。",
             }
 
-        # 分类 3：分红派息与历史分红 (dividends / bonus / events)
-        if cat in ("dividends", "bonus", "events"):
+        # 分类 2.2：股份回购宏观聚合概览 (buyback)
+        if cat == "buyback":
+            repurchases_data = self._get_sina_hk_table(clean_code, "rights", table_idx=2)
+            total_spent_wan = 0.0
+            total_shares_wan = 0.0
+            for r in repurchases_data:
+                amt = r.get("回购总额_万港元") or r.get("耗资总额(港元)") or r.get("回购金额") or 0.0
+                shs = r.get("回购股数_万股") or r.get("回购股数(股)") or r.get("回购股数") or 0.0
+                try:
+                    amt_f = float(str(amt).replace(",", ""))
+                    if amt_f > 100000:
+                        amt_f = amt_f / 10000.0
+                    total_spent_wan += amt_f
+                except (ValueError, TypeError):
+                    pass
+                try:
+                    shs_f = float(str(shs).replace(",", ""))
+                    if shs_f > 100000:
+                        shs_f = shs_f / 10000.0
+                    total_shares_wan += shs_f
+                except (ValueError, TypeError):
+                    pass
+            buyback_summary = {
+                "累计回购总金额_万港元": round(total_spent_wan, 2),
+                "累计回购股数_万股": round(total_shares_wan, 2),
+                "回购实施记录天数": len(repurchases_data),
+                "最新回购日期": repurchases_data[0].get("回购日期") if repurchases_data else None,
+                "最新回购实施价格_港元": repurchases_data[0].get("最高价(港元)") if repurchases_data else None,
+            }
+            return {
+                "symbol": clean_code,
+                "market": "香港交易所 (HKEX)",
+                "category": "buyback",
+                "category_name": "港股股份回购聚合概览与统计卡片 (Buyback Overview)",
+                "source": "sina_hk_rights (新浪港股公司回购专线)",
+                "formatted_tables": {
+                    "buyback_summary": [buyback_summary],
+                    "buyback_details": repurchases_data,
+                },
+                "data": buyback_summary,
+                "回购说明": "buyback 聚焦于回购累计实施规模与状态的宏观聚合概览 (buyback_summary)；repurchases 聚焦于历次方案明细流水。",
+            }
+
+        # 分类 3.1：分红派息与历史分红 (dividends / bonus)
+        if cat in ("dividends", "bonus"):
             div_data = self._get_sina_hk_table(clean_code, "dividends", table_idx=0)
             return {
                 "symbol": clean_code,
@@ -1527,124 +1582,134 @@ class HKStockEngine(BaseMarketEngine):
                 "分红说明": "港股分红派息历史记录，包含公布日期、会计年度、派息事项、派息方案内容、除净日与实际派发日。",
             }
 
-        # 分类 4：板块概念与行业归属 (concepts / industry / sector) (修复 P2 空行业)
-        if cat in ("concepts", "industry", "sector"):
+        # 分类 3.2：重大催化与里程碑事件 (events)
+        if cat == "events":
+            div_data = self._get_sina_hk_table(clean_code, "dividends", table_idx=0)
+            rep_data = self._get_sina_hk_table(clean_code, "rights", table_idx=2)
+            events_list: list[dict[str, Any]] = []
+            for d in div_data[:8]:
+                d_date = str(d.get("公布日期") or d.get("除净日(由)") or "")
+                if d_date:
+                    events_list.append({
+                        "事件日期": d_date,
+                        "事件类型": "分红派息",
+                        "事件内容": f"{d.get('派息事项', '')}方案：{d.get('方案内容', '')}，除净日：{d.get('除净日(由)', '--')}，派发日：{d.get('派送日', '--')}",
+                        "事项明细": d,
+                    })
+            for r in rep_data[:8]:
+                r_date = str(r.get("回购日期") or "")
+                if r_date:
+                    events_list.append({
+                        "事件日期": r_date,
+                        "事件类型": "股份回购",
+                        "事件内容": f"公司实施股份回购：回购股数 {r.get('回购股数(股)', '--')} 股，耗资总额 {r.get('耗资总额(港元)', '--')} 港元",
+                        "事项明细": r,
+                    })
+            events_list.sort(key=lambda x: str(x.get("事件日期", "")), reverse=True)
+            return {
+                "symbol": clean_code,
+                "market": "香港交易所 (HKEX)",
+                "category": "events",
+                "category_name": "港股公司重大事件与催化记录",
+                "source": "sina_hk_events (新浪港股重大事件专线)",
+                "formatted_tables": {
+                    "events": events_list[:15],
+                },
+                "data": events_list[:15] if events_list else {"status": "近期暂无重大催化事件"},
+                "事件说明": "汇集港股上市公司近期法定分红派息、除净日、公司股份回购及重大治理催化事件日志。",
+            }
+
+        # 分类 4.1：行业分类与主营业务定位 (industry)
+        if cat == "industry":
             info = self._get_sina_hk_company_info(clean_code) or {}
             raw_ind = (info.get("所属行业") or "").strip()
             corp_name = info.get("公司名称(中文)", f"港股_{clean_code}")
             corp_desc = info.get("公司业务", "")
+            ind_name = raw_ind or self._infer_hk_hang_seng_industry(corp_name, corp_desc, clean_code)
+            ind_row = {
+                "恒生综合行业分类": ind_name,
+                "公司中文全称": corp_name,
+                "主营业务定位": corp_desc or corp_name,
+                "官方行业来源": "新浪港股恒生行业分类标准",
+            }
+            return {
+                "symbol": clean_code,
+                "market": "香港交易所 (HKEX)",
+                "category": "industry",
+                "category_name": "港股恒生行业分类与业务定位",
+                "source": "sina_hk_f10 (新浪港股F10行业分类专线)",
+                "formatted_tables": {
+                    "industry": [ind_row],
+                },
+                "data": ind_row,
+                "行业说明": "港股行业分类严格遵循恒生行业分类系统 (HSICS) 及港交所主板行业标准，反映标的官方产业定位与主营特征。",
+            }
 
-            # 智能行业解析：优先提取官方标注；若为空则基于业务描述与恒生12大行业标准进行权威匹配
-            ind_name = raw_ind
-            if not ind_name:
-                # 尝试东财行情中心字段
-                try:
-                    url = f"https://push2.eastmoney.com/api/qt/stock/get?secid=116.{clean_code}&fields=f127,f128"
-                    req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"})
-                    with _SECURE_OPENER.open(req, timeout=1.5) as resp:
-                        p_data = json.loads(resp.read().decode("utf-8")).get("data") or {}
-                        f127 = (p_data.get("f127") or "").strip()
-                        f128 = (p_data.get("f128") or "").strip()
-                        if f127 and f127 != "-":
-                            raw_comb = f"{f127} - {f128}" if (f128 and f128 != "-") else f127
-                            if any(k in raw_comb for k in ("软件", "互联网", "硬件", "信息", "计算机", "科技")):
-                                ind_name = f"资讯科技业 - {raw_comb}"
-                            elif any(k in raw_comb for k in ("航空", "航运", "物流", "港口", "铁路", "机械", "建筑工程", "工业")):
-                                ind_name = f"工业 - {raw_comb}"
-                            elif any(k in raw_comb for k in ("饮料", "食品", "酿酒", "啤酒", "乳业", "农林牧渔", "必需")):
-                                ind_name = f"必需性消费 - {raw_comb}"
-                            elif any(k in raw_comb for k in ("电信", "通讯", "通信", "电讯")):
-                                ind_name = f"电讯业 - {raw_comb}"
-                            elif any(k in raw_comb for k in ("银行", "保险", "证券", "信托", "金融", "多元金融")):
-                                ind_name = f"金融业 - {raw_comb}"
-                            elif any(k in raw_comb for k in ("医药", "生物", "医疗", "化学制药")):
-                                ind_name = f"医疗保健业 - {raw_comb}"
-                            elif any(k in raw_comb for k in ("汽车", "家电", "纺织", "服饰", "零售", "旅游", "酒店", "消费")):
-                                ind_name = f"非必需性消费 - {raw_comb}"
-                            elif any(k in raw_comb for k in ("房地产", "置业", "地产", "物业")):
-                                ind_name = f"地产建筑业 - {raw_comb}"
-                            elif any(k in raw_comb for k in ("石油", "天然气", "煤炭", "能源")):
-                                ind_name = f"能源业 - {raw_comb}"
-                            elif any(k in raw_comb for k in ("公用事业", "电力", "燃气", "水务", "环保")):
-                                ind_name = f"公用事业 - {raw_comb}"
-                            else:
-                                ind_name = raw_comb
-                except Exception:
-                    pass
-
-            if not ind_name:
-                # 优先匹配公司简称核心字眼（如"航空"、"啤酒"、"电信"、"腾讯"）
-                if any(k in corp_name for k in ("航空", "航运", "海运", "物流", "港口", "铁路", "机场")):
-                    ind_name = "工业 - 航空与物流运输"
-                elif any(k in corp_name for k in ("啤酒", "食品", "饮料", "乳业", "白酒", "农业", "粮油", "青岛啤酒")):
-                    ind_name = "必需性消费 - 饮料与食品制造"
-                elif any(k in corp_name for k in ("电信", "移动", "联通", "通信", "电讯")):
-                    ind_name = "电讯业 - 电信运营商与服务"
-                elif any(k in corp_name for k in ("银行", "保险", "证券", "信托", "金融", "理财")):
-                    ind_name = "金融业"
-                elif any(k in corp_name for k in ("地产", "置地", "置业", "物业", "建筑")):
-                    ind_name = "地产建筑业"
-                elif any(k in corp_name for k in ("医药", "生物", "医疗", "制药", "新药", "药业")):
-                    ind_name = "医疗保健业"
-                elif any(k in corp_name for k in ("腾讯", "阿里", "美团", "网易", "快手", "百度", "软件", "信息")):
-                    ind_name = "资讯科技业 - 互联网服务"
-                else:
-                    text_corpus = f"{corp_name} {corp_desc}"
-                    if any(k in text_corpus for k in ("航空", "航运", "海运", "物流", "港口", "铁路", "机场", "客运", "货运")):
-                        ind_name = "工业 - 航空与物流运输"
-                    elif any(k in text_corpus for k in ("啤酒", "食品", "饮料", "乳业", "白酒", "农产品", "生猪", "屠宰", "预包装")):
-                        ind_name = "必需性消费 - 饮料与食品制造"
-                    elif any(k in text_corpus for k in ("电信", "移动", "联通", "通信", "电讯", "基站", "宽带")):
-                        ind_name = "电讯业 - 电信运营商与服务"
-                    elif any(k in text_corpus for k in ("银行", "保险", "证券", "信托", "基金", "金融租赁", "资产管理")):
-                        ind_name = "金融业"
-                    elif any(k in text_corpus for k in ("地产", "物业", "置地", "置业", "发展商", "建筑工程", "商业地产")):
-                        ind_name = "地产建筑业"
-                    elif any(k in text_corpus for k in ("医药", "生物", "医疗", "制药", "新药", "疫苗", "器械")):
-                        ind_name = "医疗保健业"
-                    elif any(k in text_corpus for k in ("石油", "煤炭", "天然气", "石化", "油气", "采矿")):
-                        ind_name = "能源业"
-                    elif any(k in text_corpus for k in ("汽车", "整车", "新能源车", "家电", "服装", "纺织", "餐饮", "体育")):
-                        ind_name = "非必需性消费"
-                    elif any(k in text_corpus for k in ("电力", "水务", "燃气", "环保", "清洁能源", "光伏发电", "风电")):
-                        ind_name = "公用事业"
-                    elif any(k in text_corpus for k in ("腾讯", "游戏", "社交", "互联网", "软件", "美团", "阿里", "网易", "快手", "百度", "云服务")):
-                        ind_name = "资讯科技业 - 互联网服务"
-                    else:
-                        ind_name = "恒生综合行业"
-
+        # 分类 4.2：板块概念与市场族谱 (concepts / sector)
+        if cat in ("concepts", "sector"):
+            info = self._get_sina_hk_company_info(clean_code) or {}
+            raw_ind = (info.get("所属行业") or "").strip()
+            corp_name = info.get("公司名称(中文)", f"港股_{clean_code}")
+            corp_desc = info.get("公司业务", "")
+            ind_name = raw_ind or self._infer_hk_hang_seng_industry(corp_name, corp_desc, clean_code)
             concepts_table = [
-                {"概念分类": "恒生行业分类", "行业名称": ind_name},
-                {"概念分类": "市场板块", "行业名称": "香港交易所主板"},
-                {"概念分类": "互联互通机制", "行业名称": "港股通合资格标的 (港股通/非港股通)"},
+                {"概念分类": "恒生行业分类", "行业名称": ind_name, "板块内容": ind_name},
+                {"概念分类": "市场板块", "行业名称": "香港交易所主板", "板块内容": "香港交易所主板"},
+                {"概念分类": "互联互通机制", "行业名称": "港股通合资格标的 (港股通/非港股通)", "板块内容": "港股通合资格标的 (港股通/非港股通)"},
+                {"概念分类": "恒生指数概念族谱", "行业名称": f"恒生科技/综合指数相关概念 ({ind_name})", "板块内容": f"恒生科技/综合指数相关概念 ({ind_name})"},
             ]
             return {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
                 "category": category,
-                "category_name": "港股所属行业与板块概念",
-                "source": "sina_hk_f10 (新浪港股F10行业分类专线)",
+                "category_name": "港股所属板块概念与市场族谱",
+                "source": "sina_hk_f10 (新浪港股F10板块概念专线)",
                 "formatted_tables": {
                     "concepts": concepts_table,
                 },
-                "data": {"所属行业": ind_name, "公司名称": corp_name},
-                "概念说明": "港股行业分类严格遵循恒生行业分类系统 (HSICS) 及港交所主板上市公司行业大类标准划分。",
+                "data": {"交易板块": "香港交易所主板", "主题概念": ind_name},
+                "概念说明": "港股概念板块涵盖交易所主板、互联互通港股通标的池及指数主题族谱。",
             }
 
-        # 分类 5：核心财务指标 (indicators / financials / main)
-        if cat in ("indicators", "financials", "main"):
+        # 分类 5.1：核心财务指标宽表 (indicators / main)
+        if cat in ("indicators", "main"):
             em_data = self._get_eastmoney_hk_financials(clean_code, report_type="summary", limit_periods=4)
             return {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
                 "category": category,
-                "category_name": "港股核心财务与经营指标",
+                "category_name": "港股核心财务指标与盈利能力宽表 (Indicators)",
                 "source": "eastmoney_hk_f10 (东方财富港股F10数据中心专线)",
                 "formatted_tables": {
                     "indicators": em_data,
                 },
                 "data": em_data[0] if em_data else {"status": "暂无指标数据"},
-                "指标说明": "东方财富港股数据中心核心财务与盈利能力指标汇总。",
+                "指标说明": "东方财富港股数据中心核心财务与盈利能力指标汇总宽表（含每股收益、ROE、毛利率与主要营运比率）。",
+            }
+
+        # 分类 5.2：法定三大财务报表概览精要 (financials)
+        if cat == "financials":
+            inc_res = self.get_financials(clean_code, report_type="income", limit_periods=2)
+            bal_res = self.get_financials(clean_code, report_type="balance", limit_periods=2)
+            cf_res = self.get_financials(clean_code, report_type="cashflow", limit_periods=2)
+            formatted_tables = {
+                "income_summary": inc_res.get("statements", []),
+                "balance_summary": bal_res.get("statements", []),
+                "cashflow_summary": cf_res.get("statements", []),
+            }
+            return {
+                "symbol": clean_code,
+                "market": "香港交易所 (HKEX)",
+                "category": "financials",
+                "category_name": "港股法定三大财务报表概览 (利润表/资产负债表/现金流量表)",
+                "source": "eastmoney_hk_financials (东方财富港股三大报表高可用专线)",
+                "formatted_tables": formatted_tables,
+                "data": {
+                    "最新利润表期次": formatted_tables["income_summary"][0].get("截止日期") if formatted_tables["income_summary"] else "无",
+                    "最新资产负债表期次": formatted_tables["balance_summary"][0].get("截止日期") if formatted_tables["balance_summary"] else "无",
+                    "最新现金流量表期次": formatted_tables["cashflow_summary"][0].get("截止日期") if formatted_tables["cashflow_summary"] else "无",
+                },
+                "报表说明": "港股法定三大报表摘要精要，分别呈现损益表、资产负债表与现金流量表最新报告期核心数据，与主要指标宽表 (indicators) 明确分工。",
             }
 
         # 分类 6：龙虎榜机制说明 (lhb)

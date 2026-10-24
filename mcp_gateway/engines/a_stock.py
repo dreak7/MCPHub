@@ -376,7 +376,20 @@ class AStockEngine(BaseMarketEngine):
         if len(clean_code) == 5 or symbol.strip().upper().startswith("HK"):
             raise ValueError(f"标的代码 '{symbol}' 为港股标的，请调用港股引擎。")
 
-        m_setcode = setcode if setcode is not None else infer_market_setcode(clean_code)
+        inferred = infer_market_setcode(clean_code)
+        if setcode is not None:
+            sc_str = str(setcode).strip().lower()
+            sc_map = {"sh": "1", "sse": "1", "1": "1", "sz": "0", "szse": "0", "0": "0", "bj": "2", "bse": "2", "2": "2"}
+            normalized_sc = sc_map.get(sc_str, sc_str)
+            if normalized_sc != inferred:
+                m_name = "上海证券交易所 (SSE, setcode=1)" if inferred == "1" else ("深圳证券交易所 (SZSE, setcode=0)" if inferred == "0" else "北京证券交易所 (BSE, setcode=2)")
+                raise ValueError(
+                    f"证券代码 '{clean_code}' 所属交易所市场为 {m_name}，"
+                    f"与传入的 setcode='{setcode}' 冲突。禁止跨市场错误指定 setcode，建议省略 setcode 参数由系统自动推断。"
+                )
+            m_setcode = normalized_sc
+        else:
+            m_setcode = inferred
 
         req_body = {
             "Head": {"Target": "0", "CharSet": "UTF8"},
@@ -429,13 +442,18 @@ class AStockEngine(BaseMarketEngine):
         close_p = float(hq_raw.get("Close", 0.0) or 0.0) if isinstance(hq_raw, dict) else 0.0
         zgb_wan = float(ext_raw.get("ZGB", 0.0) or 0.0) if isinstance(ext_raw, dict) else 0.0
 
-        # 防空壳/无效标的拦截：若通达信返回空盘口或现价/昨收/股本均无效，进行正主实体核验
+        # 防空壳/无效标的/跨市场静默错标拦截：若通达信返回空盘口或现价/昨收/股本均无效，进行正主实体核验
         if not hq_raw or (now_p <= 0 and close_p <= 0 and zgb_wan <= 0):
             entity = self._resolve_exact_security_entity(clean_code)
             if entity is None:
                 raise ValueError(
                     f"未查询到证券代码 '{symbol}' 的有效盘口行情（代码不存在或非有效 A 股/港股标的）。"
                     "若不确定代码，请先调用 stock_lookup 工具查询标准证券名称与代码。"
+                )
+            else:
+                raise ValueError(
+                    f"未查询到证券代码 '{symbol}' 在指定市场 (setcode={m_setcode}) 的有效盘口行情（代码在该市场无有效交易盘口）。"
+                    "请核对市场归属，或省略 setcode 参数由系统自动推断。"
                 )
 
         if isinstance(hq_raw, dict):
@@ -717,7 +735,20 @@ class AStockEngine(BaseMarketEngine):
         if len(clean_code) == 5 or symbol.strip().upper().startswith("HK"):
             raise ValueError(f"标的代码 '{symbol}' 为港股标的，请调用港股引擎。")
 
-        m_setcode = setcode if setcode is not None else infer_market_setcode(clean_code)
+        inferred = infer_market_setcode(clean_code)
+        if setcode is not None:
+            sc_str = str(setcode).strip().lower()
+            sc_map = {"sh": "1", "sse": "1", "1": "1", "sz": "0", "szse": "0", "0": "0", "bj": "2", "bse": "2", "2": "2"}
+            normalized_sc = sc_map.get(sc_str, sc_str)
+            if normalized_sc != inferred:
+                m_name = "上海证券交易所 (SSE, setcode=1)" if inferred == "1" else ("深圳证券交易所 (SZSE, setcode=0)" if inferred == "0" else "北京证券交易所 (BSE, setcode=2)")
+                raise ValueError(
+                    f"证券代码 '{clean_code}' 所属交易所市场为 {m_name}，"
+                    f"与传入的 setcode='{setcode}' 冲突。禁止跨市场错误指定 setcode，建议省略 setcode 参数由系统自动推断。"
+                )
+            m_setcode = normalized_sc
+        else:
+            m_setcode = inferred
 
         # 周期映射: day->4, week->5, month->6, 60m->3, 30m->2, 15m->1, 5m->0, 1m->7
         period_map = {"5m": 0, "15m": 1, "30m": 2, "60m": 3, "day": 4, "week": 5, "month": 6, "1m": 7}
@@ -950,22 +981,46 @@ class AStockEngine(BaseMarketEngine):
                             period_dict[clean_col_name] = parsed_val
 
                     # =========================================================================
-                    # 【功能块 7.1：财报报告期与日期标准归一化 (修复 P3-3)】
-                    # - 输入：period_dict 中原始'截止日期'或'报告期日期'文本
-                    # - 功能：将各类非标格式统一解析为 YYYY-MM-DD，并补齐'截止日期'、'报告期日期'、'报表类型'与'报告期'
-                    # - 输出：原地规范化填充 period_dict 日期相关字段
+                    # 【功能块 7.1：财报报告期与机器可读日期标准归一化 (修复 P2-6)】
+                    # - 输入：period_dict 中原始'截止日期'（常为文本如 2026中报）与'报告期日期' (Tdate)
+                    # - 功能：精准提取或推导 ISO-8601 标准日期 (YYYY-MM-DD)，写入'截止日期'与'报告期日期'，
+                    #         并将文本标签保留至'报告期'、'报表类型'与'报告期标签'，杜绝日期列文字化退化
+                    # - 输出：原地规范化填充 period_dict 日期与报告期相关字段
                     # =========================================================================
-                    end_d = str(period_dict.get("截止日期") or period_dict.get("报告期日期") or "")[:10]
-                    if end_d:
-                        if re.match(r"^\d{8}$", end_d):
-                            end_d = f"{end_d[:4]}-{end_d[4:6]}-{end_d[6:8]}"
-                        period_dict["截止日期"] = end_d
-                        period_dict["报告期日期"] = end_d
-                        month = end_d[5:7] if len(end_d) >= 7 else ""
+                    iso_date = ""
+                    # 1. 优先提取 Tdate (映射为报告期日期) 中原生的机器可读标准 ISO 日期
+                    cand_tdate = str(period_dict.get("报告期日期") or "").strip()
+                    if re.match(r"^\d{4}-\d{2}-\d{2}", cand_tdate):
+                        iso_date = cand_tdate[:10]
+                    elif re.match(r"^\d{8}$", cand_tdate):
+                        iso_date = f"{cand_tdate[:4]}-{cand_tdate[4:6]}-{cand_tdate[6:8]}"
+
+                    # 2. 若无原生 ISO 日期，尝试从截止日期解析 (兼容 YYYYMMDD、YYYY-MM-DD 或 文字标签如 '2026中报')
+                    raw_end = str(period_dict.get("截止日期") or "").strip()
+                    if not iso_date:
+                        if re.match(r"^\d{4}-\d{2}-\d{2}", raw_end):
+                            iso_date = raw_end[:10]
+                        elif re.match(r"^\d{8}$", raw_end):
+                            iso_date = f"{raw_end[:4]}-{raw_end[4:6]}-{raw_end[6:8]}"
+                        else:
+                            m_lbl = re.match(r"^(\d{4})\s*(一季报|中报|三季报|年报)", raw_end)
+                            if m_lbl:
+                                y_str, rpt_txt = m_lbl.group(1), m_lbl.group(2)
+                                md_map = {"一季报": "03-31", "中报": "06-30", "三季报": "09-30", "年报": "12-31"}
+                                iso_date = f"{y_str}-{md_map.get(rpt_txt, '12-31')}"
+
+                    if iso_date:
+                        period_dict["截止日期"] = iso_date
+                        period_dict["报告期日期"] = iso_date
+                        month = iso_date[5:7] if len(iso_date) >= 7 else ""
                         rpt_name = "一季报" if month == "03" else ("中报" if month == "06" else ("三季报" if month == "09" else ("年报" if month == "12" else "")))
                         if rpt_name:
                             period_dict["报表类型"] = rpt_name
-                            period_dict["报告期"] = f"{end_d[:4]}{rpt_name}"
+                            period_dict["报告期"] = f"{iso_date[:4]}{rpt_name}"
+                            period_dict["报告期标签"] = f"{iso_date[:4]}{rpt_name}"
+                    elif raw_end:
+                        period_dict["报告期"] = raw_end
+                        period_dict["报告期标签"] = raw_end
 
                     # 针对现金流量表：将补充资料独立收纳于二级字典，主表仅保留三大活动直接法科目与期初期末现金净增加额
                     if supp_dict:
