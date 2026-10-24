@@ -83,11 +83,63 @@ def get_market_context() -> dict[str, Any]:
 
     last_trading_day = (cst_time - datetime.timedelta(days=offset)).strftime("%Y-%m-%d")
 
+    # -------------------------------------------------------------------------
+    # 港股交易时钟与日历感知 (港交所持续交易 09:30-12:00, 13:00-16:00, CAS 16:00-16:10)
+    # -------------------------------------------------------------------------
+    if is_weekend:
+        hk_status = "weekend_closed"
+        hk_status_desc = "周末休市"
+    elif time_val < 900:
+        hk_status = "pre_market_closed"
+        hk_status_desc = "港股盘前未开盘 (等待9:00开市前时段)"
+    elif 900 <= time_val < 920:
+        hk_status = "opening_auction"
+        hk_status_desc = "港股开市前时段/开盘竞价 (9:00-9:20)"
+    elif 920 <= time_val < 930:
+        hk_status = "order_matching"
+        hk_status_desc = "港股对盘与暂缓时段 (9:20-9:30)"
+    elif 930 <= time_val <= 1200:
+        hk_status = "trading_morning"
+        hk_status_desc = "港股早盘连续交易进行中 (9:30-12:00)"
+    elif 1200 < time_val < 1300:
+        hk_status = "lunch_break"
+        hk_status_desc = "港股午盘休市中 (12:00-13:00)"
+    elif 1300 <= time_val < 1600:
+        hk_status = "trading_afternoon"
+        hk_status_desc = "港股午后连续交易进行中 (13:00-16:00)"
+    elif 1600 <= time_val <= 1610:
+        hk_status = "closing_auction"
+        hk_status_desc = "港股收市竞价时段 (CAS 16:00-16:10)"
+    else:
+        hk_status = "closed_today"
+        hk_status_desc = "港股今日已收盘 (16:10后结算状态)"
+
+    hk_offset = offset
+    if is_weekend:
+        hk_offset = 1 if weekday == 5 else 2
+    elif time_val < 900:
+        hk_offset = 3 if weekday == 0 else 1
+    else:
+        hk_offset = 0
+    last_hk_trading_day = (cst_time - datetime.timedelta(days=hk_offset)).strftime("%Y-%m-%d")
+
     return {
         "current_cst_time": f"{date_str} {current_time_str}",
+        # A 股时钟与状态 (完全保持向后兼容)
         "market_status": status,
         "market_status_desc": status_desc,
         "is_trading_time": status in ("trading_morning", "trading_afternoon", "opening_auction"),
         "reference_trading_date": last_trading_day,
+        # 港股时钟与状态 (解决 P3-4: 增加港股交易日历感知)
+        "hk_market_status": hk_status,
+        "hk_market_status_desc": hk_status_desc,
+        "hk_is_trading_time": hk_status in ("trading_morning", "trading_afternoon", "opening_auction", "closing_auction"),
+        "hk_reference_trading_date": last_hk_trading_day,
+        "market_hours_comparison": (
+            "【A股与港股交易时间差异说明】：\n"
+            "· A股：早盘 09:30-11:30，午盘 13:00-15:00（午休 1.5 小时，15:00 收盘）；\n"
+            "· 港股：早盘 09:30-12:00，午盘 13:00-16:00，收市竞价 CAS 16:00-16:10（午休 1 小时，16:10 收市）。"
+        ),
     }
+
 

@@ -2651,6 +2651,58 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertFalse(res_fc.get("是否包含未来预测记录"))
         self.assertEqual(res_fc.get("数据有效行数"), 0)
 
+    def test_v196_empirical_new_issues_convergence(self):
+        """测试 v1.9.6: 实测新发现的 22 项口径陷阱全面收敛回归验证"""
+        # 1. 验证 02026 小马智行法定原币 USD 逆向还原与 BPS 纠偏 (P1-1, P1-3)
+        ind_02026 = self.gw.stock_f10({"symbol": "02026", "category": "indicators"})
+        d_02026 = ind_02026.get("data", {})
+        self.assertEqual(d_02026.get("币种"), "USD")
+        self.assertAlmostEqual(float(d_02026.get("每股净资产_BPS_元", 0)), 3.62, places=1)
+        self.assertAlmostEqual(float(d_02026.get("营业收入_元", 0)), 70470000.0, delta=100000.0)
+        self.assertIn("法定申报原币校准", str(d_02026.get("币种口径校准说明", "")))
+
+        # 2. 验证 09988 阿里巴巴新财年首季不扣减上一财年年报与现金流报表类型 (P1-2, P2-4)
+        ali_inc = self.gw.stock_financials({"symbol": "09988", "report_type": "income", "period_type": "quarter", "limit_periods": 1})
+        s0 = ali_inc.get("statements", [])[0]
+        self.assertEqual(s0.get("单期标签"), "一季报(第一季度单期/Q1)")
+        self.assertIn("不扣减上一财年年报", str(s0.get("单季度计算说明", "")))
+
+        ali_cf = self.gw.stock_financials({"symbol": "09988", "report_type": "cashflow", "limit_periods": 1})
+        cf0 = ali_cf.get("statements", [])[0]
+        self.assertEqual(cf0.get("报表类型"), "一季报")
+
+        # 3. 验证 09988 stock_lookup 剥离架构后缀精准匹配 (P3-7)
+        lk_ali = self.gw.stock_lookup({"query": "阿里巴巴", "range": "HK"})
+        self.assertTrue(lk_ali.get("exact_match"))
+        self.assertEqual(lk_ali.get("matched_code"), "09988")
+
+        # 4. 验证 01088 神华持股比例分母口径说明与已发行股本口径说明 (P2-6, P3-5)
+        sh_th = self.gw.stock_f10({"symbol": "01088", "category": "top_holders", "limit": 2})
+        self.assertIn("持股比例分母口径提示", str(sh_th.get("持股比例分母口径说明", "")))
+        self.assertIn("期次与截断说明", sh_th)
+        self.assertEqual(len(sh_th.get("formatted_tables", {}).get("top_holders", [])), 2)
+
+        sh_basic = self.gw.stock_f10({"symbol": "01088", "category": "basic_info"})
+        self.assertIn("已发行股本口径说明", sh_basic)
+
+        # 5. 验证 00700 腾讯 1m K线超限提示与分钟线跨日限制说明 (P2-2, P2-3)
+        tx_kline = self.gw.stock_kline({"symbol": "00700", "period": "1m", "count": 500})
+        self.assertIn("超限提示", tx_kline)
+        self.assertIn("分钟线跨日限制说明", tx_kline)
+
+        # 6. 验证 A 股 300371 table6 市净率_PB 别名与昨收口径说明 (P3-3, P2-1)
+        a_f10 = self.gw.stock_f10({"symbol": "300371", "category": "summary"})
+        t6 = a_f10.get("formatted_tables", {}).get("table6", [])
+        self.assertTrue(len(t6) > 0)
+        self.assertIn("市净率_PB", t6[0])
+        self.assertIn("市净率_PB_昨收", t6[0])
+        self.assertIn("市净率_PB_说明", t6[0])
+
+        # 7. 验证 A 股 600519 count=500 时超限提示与截断说明并存 (P3-2)
+        k_a = self.gw.stock_kline({"symbol": "600519", "period": "day", "count": 500})
+        self.assertIn("截断说明", k_a)
+        self.assertIn("超限提示", k_a)
+
 
 if __name__ == "__main__":
     unittest.main()

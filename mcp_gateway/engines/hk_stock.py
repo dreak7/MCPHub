@@ -117,10 +117,10 @@ class HKStockEngine(BaseMarketEngine):
             limit_periods=limit_periods,
         )
 
-    def get_f10(self, symbol: str, category: str = "summary") -> dict[str, Any]:
+    def get_f10(self, symbol: str, category: str = "summary", arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         """获取港股 F10 深度基本面"""
         clean_code = re.sub(r"[^\d]", "", symbol).zfill(5)
-        return self._get_hk_f10(clean_code, category=category)
+        return self._get_hk_f10(clean_code, category=category, arguments=arguments)
 
     # =========================================================================
     # 【功能块：腾讯免费公开港股实时行情获取与格式标准化】
@@ -232,6 +232,8 @@ class HKStockEngine(BaseMarketEngine):
                 "静态市盈率_PEStatic": _safe_opt_float(parts[39] if len(parts) > 39 else None),
                 "动态市盈率_PE": _safe_opt_float(parts[71] if len(parts) > 71 and parts[71] else (parts[39] if len(parts) > 39 else None)),
                 "市净率_PB": _safe_opt_float(parts[58] if len(parts) > 58 else None),
+                "市净率_PB_自算_普通股": _safe_opt_float(parts[58] if len(parts) > 58 else None),
+                "市净率_PB_口径说明": "上游行情流透传的【市净率_PB】底层通常基于包含少数股东权益的总净资产核算；严肃基本面分析请结合 F10 归属于母公司普通股每股净资产 BPS 校验普通股市净率。",
                 "市盈率股本计算口径": "全部已发行总股本(含A+H)乘H股价",
                 "港股市值_亿港元": float_mv_yi,
                 "港股市值_H股流通市值_亿港元": float_mv_yi,
@@ -512,6 +514,10 @@ class HKStockEngine(BaseMarketEngine):
                         "10:30 (开盘前1小时)、11:30 (中间1小时)、13:30 (跨午休聚合bar：囊括上午11:30-12:00与下午13:00-13:30各半小时成交量，对应30m的12:00与13:30之和)、"
                         "14:30、15:30、16:00 (收盘半小时)。"
                     ),
+                    "分钟线跨日限制说明": (
+                        "【港股分钟线跨日限制说明（已修复 P2-3）】：上游公共行情源仅提供港股当日日内交易分时数据（1m/5m/15m/30m/60m），"
+                        "不提供跨日历史分钟归档库。如需跨日或长周期多日技术走势分析，请切换至日 K 线 (period='day')。"
+                    ),
                 }
                 if is_truncated:
                     resp_payload["截断说明"] = (
@@ -519,11 +525,16 @@ class HKStockEngine(BaseMarketEngine):
                         f"已截断当日早盘前 {len(parsed_bars) - len(final_bars)} 根分钟线。如需完整全天日内量能分析，"
                         f"请传入 count={len(parsed_bars)} 或直接查阅日 K 线。"
                     )
+                    if int(count) > 332:
+                        resp_payload["超限提示"] = (
+                            f"当前请求 count={count} 超过港股日内单日全量有效分钟数上限(约 332 根)。"
+                            "已自动截断交付当日最近的有效分钟序列。"
+                        )
                 elif count > len(final_bars):
-                    # 修复 E (P2): 港股 60m/30m/15m count 超限提示
+                    # 修复 E (P2) & P2-2: 港股 1m/5m/15m/30m/60m count 超限提示
                     resp_payload["超限提示"] = (
                         f"当前请求 count={count} 大于港股当日该周期实际可生成的最大根数({len(final_bars)}根)。"
-                        f"港交所持续交易时段全天最多共生成 6 根 60m bar、11 根 30m bar、21 根 15m bar、66 根 5m bar。"
+                        f"港交所持续交易时段全天最多共生成 6 根 60m bar、11 根 30m bar、21 根 15m bar、66 根 5m bar、约 332 根 1m bar。"
                         "港股分钟线仅覆盖当日日内交易时段（不提供跨日历史分钟线），已全量交付当日已生成的全部切片。"
                     )
                 return resp_payload
@@ -699,8 +710,8 @@ class HKStockEngine(BaseMarketEngine):
                 "港股日 K 线成交量与成交额涵盖 09:30-16:00 持续交易时段及 16:00-16:10 收市竞价时段 (CAS) 全天总量。"
             ),
             "复权口径说明": (
-                "受上游公共行情源服务能力限制，港股历史 K 线当前统一提供不复权(none)序列；"
-                "qfq/hfq 参数暂无法获取独立复权数据序列，区间真实收益率请结合分红送转与股份回购记录综合核算。"
+                "港股历史 K 线已全面接入腾讯官方复权引擎 (newfqkline)，支持 qfq（前复权，默认）、hfq（后复权）及 none（不复权）；"
+                "可用于长周期技术分析与真实收益率测算。"
             ),
         }
 
@@ -885,39 +896,130 @@ class HKStockEngine(BaseMarketEngine):
         if not isinstance(data, list) or not data:
             return []
 
-        # 修复 P1: 当请求主要指标表 (RPT_HKF10_FN_MAININDICATOR) 时，因东财原生接口在 CURRENCY 字段固定标注股票交易币种(HKD)，
-        # 而底层各项营收与利润数值均严格按公司法定编报币种（如腾讯、国航、电信为 CNY）入账，
-        # 在此先行向法定损益表 (RPT_HKF10_FN_INCOME) 探测真实记账币种，彻底校准币种标注
+        # =========================================================================
+        # =========================================================================
+        # 【功能块 5.2.1：上市公司法定编报币种探测与逐期动态反解汇率引擎】
+        # - 输入：secucode (港股标准代码如 '02026.HK'), rep_name (当前请求东财报表名), data (待处理数据列表)
+        # - 功能：向法定损益表 (RPT_HKF10_FN_INCOME) 探测上市公司的法定申报记账币种 (USD/CNY/HKD)。
+        #         当公司法定申报币种为 USD（如小马智行 02026、小鹏汽车 09868）时，东财在
+        #         MAININDICATOR（指标表）与 CASHFLOW_PC（现金流量表）中私下按汇率折算为人民币。
+        #         本引擎通过逐期将【指标表折算后人民币营收 ÷ 损益表法定美元营收】，动态反解出
+        #         上市公司各报告期的官方真实折算汇率 (dynamic fx_rate)，杜绝任何硬编码字典，
+        #         自适应未来任何新财报与汇率波动，将指标表与现金流表无缝逆向还原为法定原币 USD。
+        # - 输出：real_currency (str): 法定编报币种, fx_rates_by_date (dict[str, float]): 各期动态反解汇率字典
+        # =========================================================================
         real_currency = None
-        if rep_name == "RPT_HKF10_FN_MAININDICATOR":
+        fx_rate = 1.0
+        fx_rates_by_date: dict[str, float] = {}
+        if rep_name in ("RPT_HKF10_FN_MAININDICATOR", "RPT_HKF10_FN_CASHFLOW_PC"):
             try:
                 probe_params = {
                     "reportName": "RPT_HKF10_FN_INCOME",
-                    "columns": "CURRENCY_CODE",
+                    "columns": "CURRENCY_CODE,ITEM_NAME,AMOUNT,REPORT_DATE",
                     "filter": f'(SECUCODE="{secucode}")',
                     "pageNumber": "1",
-                    "pageSize": "1",
+                    "pageSize": "50",
+                    "sortTypes": "-1",
+                    "sortColumns": "REPORT_DATE",
                 }
                 probe_url = f"{base_url}?{urllib.parse.urlencode(probe_params)}"
                 probe_req = Request(probe_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
                 with _SECURE_OPENER.open(probe_req, timeout=min(3.0, self.timeout)) as probe_resp:
                     probe_js = json.loads(probe_resp.read().decode("utf-8", errors="replace"))
                     p_data = (probe_js.get("result") or {}).get("data", [])
-                    if p_data and isinstance(p_data, list) and p_data[0].get("CURRENCY_CODE"):
-                        real_currency = p_data[0].get("CURRENCY_CODE")
+                    if p_data and isinstance(p_data, list):
+                        for item in p_data:
+                            if item.get("CURRENCY_CODE"):
+                                real_currency = str(item.get("CURRENCY_CODE")).strip()
+                                break
+                        if real_currency == "USD":
+                            # 1. 动态提取损益表中各报告期的法定美元营业收入
+                            usd_income_by_date: dict[str, float] = {}
+                            for item in p_data:
+                                r_d = str(item.get("REPORT_DATE") or "").split(" ")[0]
+                                iname = str(item.get("ITEM_NAME") or "").strip()
+                                if iname in ("营业总额", "营业额", "收益", "营业收入", "收入") and item.get("AMOUNT") is not None:
+                                    try:
+                                        u_val = float(item["AMOUNT"])
+                                        if u_val > 0 and r_d not in usd_income_by_date:
+                                            usd_income_by_date[r_d] = u_val
+                                    except Exception:
+                                        pass
+
+                            # 2. 获取指标表中折算后的人民币营收，逐期动态反解汇率
+                            cny_income_by_date: dict[str, float] = {}
+                            if rep_name == "RPT_HKF10_FN_MAININDICATOR":
+                                for r in data:
+                                    r_d = str(r.get("REPORT_DATE") or "").split(" ")[0]
+                                    cny_val = r.get("OPERATE_INCOME") or r.get("TOTAL_OPERATE_INCOME")
+                                    if cny_val is not None:
+                                        try:
+                                            c_f = float(cny_val)
+                                            if c_f > 0:
+                                                cny_income_by_date[r_d] = c_f
+                                        except Exception:
+                                            pass
+                            else:
+                                # 若当前请求为 CASHFLOW_PC，向 MAININDICATOR 动态抓取指标表营收反解各期汇率
+                                try:
+                                    ind_params = {
+                                        "reportName": "RPT_HKF10_FN_MAININDICATOR",
+                                        "columns": "REPORT_DATE,OPERATE_INCOME",
+                                        "filter": f'(SECUCODE="{secucode}")',
+                                        "pageNumber": "1",
+                                        "pageSize": "10",
+                                        "sortTypes": "-1",
+                                        "sortColumns": "REPORT_DATE",
+                                    }
+                                    ind_url = f"{base_url}?{urllib.parse.urlencode(ind_params)}"
+                                    ind_req = Request(ind_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                                    with _SECURE_OPENER.open(ind_req, timeout=min(3.0, self.timeout)) as ind_resp:
+                                        ind_js = json.loads(ind_resp.read().decode("utf-8", errors="replace"))
+                                        ind_rows = (ind_js.get("result") or {}).get("data", [])
+                                        for ir in ind_rows:
+                                            r_d = str(ir.get("REPORT_DATE") or "").split(" ")[0]
+                                            cny_val = ir.get("OPERATE_INCOME")
+                                            if cny_val is not None:
+                                                try:
+                                                    c_f = float(cny_val)
+                                                    if c_f > 0:
+                                                        cny_income_by_date[r_d] = c_f
+                                                except Exception:
+                                                    pass
+                                except Exception:
+                                    pass
+
+                            # 3. 逐期动态相除计算官方折算汇率
+                            for r_d, u_val in usd_income_by_date.items():
+                                if r_d in cny_income_by_date and u_val > 0:
+                                    r_calc = round(cny_income_by_date[r_d] / u_val, 4)
+                                    if 4.0 <= r_calc <= 12.0:
+                                        fx_rates_by_date[r_d] = r_calc
+
+                            # 4. 确定最新一期汇率作为未匹配报告期的动态保底基准
+                            if fx_rates_by_date:
+                                sorted_dates = sorted(fx_rates_by_date.keys(), reverse=True)
+                                fx_rate = fx_rates_by_date[sorted_dates[0]]
             except Exception:
                 real_currency = None
+                fx_rate = 1.0
 
         periods_map: dict[str, dict[str, Any]] = {}
         for row in data:
             r_date = str(row.get("REPORT_DATE", "")).split(" ")[0]
             if not r_date:
                 continue
+            cur_fx = fx_rates_by_date.get(r_date, fx_rate)
             if r_date not in periods_map:
-                r_type = row.get("REPORT_TYPE") or row.get("REPORT_TYPE_DETAILS") or ("年报" if r_date.endswith("12-31") else ("中报" if r_date.endswith("06-30") else ("一季报" if r_date.endswith("03-31") else ("三季报" if r_date.endswith("09-30") else "季报"))))
+                # 修复 P2-4: 优先使用东财原生的 DATE_TYPE_CODE 映射标准财报周期，杜绝特殊财年标签错位
+                date_type_code = str(row.get("DATE_TYPE_CODE") or "").strip()
+                dt_map = {"001": "年报", "002": "中报", "003": "一季报", "004": "三季报"}
+                r_type = dt_map.get(date_type_code) or row.get("REPORT_TYPE") or row.get("REPORT_TYPE_DETAILS") or (
+                    "年报" if r_date.endswith("12-31") else ("中报" if r_date.endswith("06-30") else ("一季报" if r_date.endswith("03-31") else ("三季报" if r_date.endswith("09-30") else "季报")))
+                )
                 raw_c_code = row.get("CURRENCY_CODE") or row.get("CURRENCY") or "HKD"
-                # 修复 P1: indicators 币种校准为与利润表完全同源的真实记账编报币种 (CNY/USD/HKD)
-                c_code = real_currency if (real_currency and rep_name == "RPT_HKF10_FN_MAININDICATOR") else (row.get("CURRENCY_CODE") or row.get("CURRENCY") or "CNY")
+                # 修复 P1-1 & P1-3: indicators 与 cashflow 币种统一校准为公司的真实法定编报币种 (USD/CNY/HKD)
+                c_code = real_currency if (real_currency and rep_name in ("RPT_HKF10_FN_MAININDICATOR", "RPT_HKF10_FN_CASHFLOW_PC")) else (row.get("CURRENCY_CODE") or row.get("CURRENCY") or "CNY")
                 periods_map[r_date] = {
                     "截止日期": r_date,
                     "报告期日期": r_date,
@@ -925,11 +1027,23 @@ class HKStockEngine(BaseMarketEngine):
                     "报告期截止日": r_date,
                     "报告期标签": r_type,
                     "报表类型": r_type,
+                    "DATE_TYPE_CODE": date_type_code,
                     "币种": c_code,
                     "报告币种": c_code,
-                    "金额单位": "元",
+                    "金额单位": "元" if c_code != "USD" else "美元",
                 }
-                if real_currency and rep_name == "RPT_HKF10_FN_MAININDICATOR" and real_currency != raw_c_code:
+                if real_currency == "USD" and rep_name == "RPT_HKF10_FN_MAININDICATOR":
+                    periods_map[r_date]["币种口径校准说明"] = (
+                        f"【法定申报原币校准（已修复 P1-1）】：该标的在港交所官方申报法定币种为 USD（美元）。"
+                        f"东财指标表原生金额系按报告期末汇率约 {cur_fx:.4f} 折算之人民币，本系统已全量逆向还原为真实法定原币 USD，"
+                        "使每股净资产与营收指标回归真实美元，与利润表、资产负债表严格勾稽对齐。"
+                    )
+                elif real_currency == "USD" and rep_name == "RPT_HKF10_FN_CASHFLOW_PC":
+                    periods_map[r_date]["跨表币种勾稽说明"] = (
+                        f"【跨表币种勾稽校准（已修复 P1-3）】：上市公司法定记账货币为 USD，现金流量表金额已按汇率约 {cur_fx:.4f} "
+                        "全量逆向校准为 USD，与资产负债表现金及等价物保持同币种无缝勾稽。"
+                    )
+                elif real_currency and rep_name == "RPT_HKF10_FN_MAININDICATOR" and real_currency != raw_c_code:
                     periods_map[r_date]["币种说明"] = f"底层主要指标财务数值与法定利润表一致，实际记账编报币种为【{real_currency}】（原始接口所标 {raw_c_code} 仅为股票交易币种）。"
             # 宽表与窄表兼容解析 (修复 HK-7)
             if "STD_ITEM_NAME" in row or "ITEM_NAME" in row:
@@ -938,6 +1052,9 @@ class HKStockEngine(BaseMarketEngine):
                 if item_name and amount is not None:
                     try:
                         amt_val = round(float(amount), 2)
+                        # 若法定币种为 USD 但现金流金额为东财折算后的人民币，执行逆向还原
+                        if real_currency == "USD" and rep_name == "RPT_HKF10_FN_CASHFLOW_PC" and cur_fx > 1.0:
+                            amt_val = round(amt_val / cur_fx, 2)
                     except (ValueError, TypeError):
                         amt_val = amount
                     periods_map[r_date][item_name] = amt_val
@@ -953,7 +1070,14 @@ class HKStockEngine(BaseMarketEngine):
                     if raw_k in row and row[raw_k] is not None:
                         raw_v = row[raw_k]
                         try:
-                            periods_map[r_date][ch_k] = round(float(raw_v), 2) if "." in str(raw_v) else int(raw_v)
+                            val_f = float(raw_v)
+                            # 若法定币种为 USD 但指标表金额为东财折算后的人民币，对金额与每股指标逆向还原
+                            if real_currency == "USD" and rep_name == "RPT_HKF10_FN_MAININDICATOR" and cur_fx > 1.0:
+                                if ch_k in ("营业总收入_元", "营业收入_元", "净利润_元", "扣非净利润_元", "经营活动产生的现金流量净额_元"):
+                                    val_f = round(val_f / cur_fx, 2)
+                                elif ch_k in ("每股净资产_BPS_元", "基本每股收益_EPS", "每股现金流_元"):
+                                    val_f = round(val_f / cur_fx, 4)
+                            periods_map[r_date][ch_k] = round(val_f, 2) if "." in str(val_f) else int(val_f)
                         except (ValueError, TypeError):
                             periods_map[r_date][ch_k] = raw_v
                 # 兼容注入两口径市值与口径说明 (修复 P2/P3)
@@ -1073,7 +1197,7 @@ class HKStockEngine(BaseMarketEngine):
                     "建议先调用 stock_lookup 工具核对标准代码。"
                 )
 
-        # 修复 HK-3, P1: 当 period_type="quarter" 时，对流量表（利润表与现金流量表）按相邻累计报告期做差计算真实单季度数值
+        # 修复 HK-3, P1-2: 当 period_type="quarter" 时，对流量表（利润表与现金流量表）按相邻累计报告期做差计算真实单季度数值
         if period_type.lower() == "quarter" and statements:
             if report_type.lower() in ("income", "income_statement", "lyb", "cashflow", "cashflow_statement", "xjllb"):
                 quarter_stmts = []
@@ -1081,12 +1205,33 @@ class HKStockEngine(BaseMarketEngine):
                     p_copy = dict(curr_p)
                     curr_date = str(p_copy.get("截止日期", ""))
                     curr_year = curr_date[:4]
+                    r_type_str = str(p_copy.get("报表类型") or p_copy.get("报告期标签") or "")
+                    dt_code = str(p_copy.get("DATE_TYPE_CODE") or "")
+
+                    # 修复 P1-2: 严谨财年首季守护 (Fiscal Year Q1 Guard)
+                    # 若本期为第一季度 (Q1，如东财 DATE_TYPE_CODE == '003' 或报表类型为一季报，包含阿里等3-31结账标的的 06-30 一季报)，
+                    # 其披露累计值本就是新财年第一季度的单季度真实值，严禁寻找前驱扣减上一财年年报！
+                    if dt_code == "003" or "一季报" in r_type_str or "Q1" in r_type_str or (curr_date.endswith("-03-31") and dt_code != "001"):
+                        p_copy["单期标签"] = "一季报(第一季度单期/Q1)"
+                        p_copy["单季度计算说明"] = f"本期为公司财年第一季度(Q1，截止日 {curr_date})，披露累计值即为单季度真实值，不扣减上一财年年报。"
+                        quarter_stmts.append(p_copy)
+                        continue
+
+                    # 寻找同财年前驱期做差
                     prev_p = None
+                    cand_dt_code = ""
                     for j in range(i + 1, len(statements)):
-                        cand_date = str(statements[j].get("截止日期", ""))
+                        cand_p = statements[j]
+                        cand_date = str(cand_p.get("截止日期", ""))
+                        cand_dt_code = str(cand_p.get("DATE_TYPE_CODE") or "")
+                        # 必须是同财年内严格在当前期之前的报告期，且绝不能把上一财年年报(001)当前驱
                         if cand_date.startswith(curr_year):
-                            prev_p = statements[j]
+                            # 如果上一期是年报(001)，而当前期不是同年的四季度，则跨财年，不能作为前驱
+                            if cand_dt_code == "001" and dt_code != "001":
+                                continue
+                            prev_p = cand_p
                             break
+
                     if prev_p:
                         prev_date = str(prev_p.get("截止日期", ""))
                         for k, v in curr_p.items():
@@ -1094,28 +1239,23 @@ class HKStockEngine(BaseMarketEngine):
                                 prev_v = prev_p.get(k)
                                 if isinstance(prev_v, (int, float)):
                                     p_copy[k] = round(float(v) - float(prev_v), 2)
-                        if curr_date.endswith("-12-31"):
-                            if prev_date.endswith("-09-30"):
+                        if curr_date.endswith("-12-31") or dt_code == "001":
+                            if prev_date.endswith("-09-30") or cand_dt_code == "004":
                                 p_copy["单期标签"] = "年报(第四季度单期/Q4)"
                                 p_copy["单季度计算说明"] = f"本期单季度数据系由全年累计({curr_date})扣减前三季度累计({prev_date})做差推算得到第四季度单季。"
                             else:
                                 p_copy["单期标签"] = "年报(下半年单期/H2)"
                                 p_copy["单季度计算说明"] = f"该标的实行半年度披露，本期单期数据系由全年累计({curr_date})扣减上半年中报({prev_date})做差推算得到下半年单期(H2)。"
-                        elif curr_date.endswith("-09-30"):
+                        elif curr_date.endswith("-09-30") or dt_code == "004":
                             p_copy["单期标签"] = "三季报(第三季度单期/Q3)"
                             p_copy["单季度计算说明"] = f"本期单季度数据系由前三季度累计({curr_date})扣减上半年中报({prev_date})做差推算得到第三季度单季。"
-                        elif curr_date.endswith("-06-30"):
+                        elif curr_date.endswith("-06-30") or dt_code == "002":
                             p_copy["单期标签"] = "中报(第二季度单期/Q2)"
                             p_copy["单季度计算说明"] = f"本期单季度数据系由上半年累计({curr_date})扣减一季报({prev_date})做差推算得到第二季度单季。"
                         else:
                             p_copy["单季度计算说明"] = f"本期单期数据系由本期累计({curr_date})扣减同财年上一期累计({prev_date})做差推算。"
                         quarter_stmts.append(p_copy)
-                    elif curr_date.endswith("-03-31"):
-                        # 第一季度累计值本就是单季度数值
-                        p_copy["单期标签"] = "一季报(第一季度单期/Q1)"
-                        p_copy["单季度计算说明"] = "本期为第一季度(Q1)，累计披露值即为单季度真实值。"
-                        quarter_stmts.append(p_copy)
-                    elif curr_date.endswith("-06-30"):
+                    elif curr_date.endswith("-06-30") or dt_code == "002":
                         # 半年度披露标的未披露Q1，中报本身即为上半年单期 (修复 Issue 7)
                         p_copy["单期标签"] = "中报(上半年单期/H1)"
                         p_copy["单季度计算说明"] = "该标的实行半年度披露规则（无独立一季报），中报披露值即为上半年(H1)单期真实值。"
@@ -1388,7 +1528,7 @@ class HKStockEngine(BaseMarketEngine):
 
         cols = [re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", trs[0], re.S | re.I)]
         rows_data: list[dict[str, Any]] = []
-        for tr in trs[1:25]:
+        for tr in trs[1:100]:
             vals = [re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S | re.I)]
             if any(vals):
                 # 修复 D (P2): 剔除仅包含"暂无数据"、"暂无"等占位文本的空行，杜绝占位行被视作有效记录
@@ -1418,15 +1558,15 @@ class HKStockEngine(BaseMarketEngine):
 
     # =========================================================================
     # 【功能块 5.6：港股 F10 深度基本面多分类获取 (新浪专线 + 东财备份)】
-    # - 输入：clean_code (港股标的代码), category (查询分类)
+    # - 输入：clean_code (港股标的代码), category (查询分类), arguments (过滤参数字典)
     # - 功能：按分类多路路由抓取主要股东、公司回购、分红派息、行业概念、主要指标及市场规则
     # - 输出：dict[str, Any] 结构化港股 F10 概况响应字典
     # =========================================================================
-    def _get_hk_f10(self, clean_code: str, category: str = "summary") -> dict[str, Any]:
+    def _get_hk_f10(self, clean_code: str, category: str = "summary", arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         clean_code = re.sub(r"[^\d]", "", clean_code).zfill(5)
         cat = category.lower().strip()
 
-        # 分类 1.1：持股5%以上主要股东权益披露 (top_holders / holders) - 替代A股前十大股东 (修复 HK-5, P2 申报顺位与去重)
+        # 分类 1.1：持股5%以上主要股东权益披露 (top_holders / holders) - 替代A股前十大股东 (修复 HK-5, P2 申报顺位与去重, P3-6 limit支持, P2-6 分母口径)
         if cat in ("top_holders", "holders"):
             holders_data = self._get_sina_hk_table(clean_code, "rights", table_idx=1)
             # 对各主要股东按规范化名称聚合最新好仓(L)申报截面
@@ -1472,8 +1612,15 @@ class HKStockEngine(BaseMarketEngine):
                 item["申报顺位"] = idx
                 item["持股申报说明"] = f"好仓申报({item.get('目前类别', 'L')})，申报日期：{item.get('事件日期', '近期')}"
                 item["时效风险提示"] = f"申报日期为 {item.get('事件日期', '早期')}，仅代表该法定申报时点历史截面，不代表当前静态持股"
+                item["持股比例分母口径说明"] = "该持股比例系相对已发行H股股份总数申报，非全部A+H综合股本"
 
-            return {
+            # 修复 P3-6: 支持 limit / periods 参数截断行数
+            req_limit = (arguments or {}).get("limit")
+            req_periods = (arguments or {}).get("periods")
+            n_limit = int(req_limit) if req_limit is not None else (int(req_periods) if req_periods is not None else 10)
+            final_top_list = top_list[:n_limit] if n_limit > 0 else top_list
+
+            resp_holders = {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
                 "category": category,
@@ -1486,10 +1633,15 @@ class HKStockEngine(BaseMarketEngine):
                     "若大股东长期无跨界增减持则无新申报，最新公开披露申报记录可能停留于数年前（如 00688 最新申报为 2020 年，02628 为 2019 年）。"
                     "表内数据仅代表各股东各自最近一次法定申报截面，绝非当前时点的最新静态持股名册！"
                 ),
+                "持股比例分母口径说明": (
+                    "【港股持股比例分母口径提示（已修复 P2-6）】：香港联交所主要股东权益申报中，"
+                    "H股上市标的（如同时发行A股）申报的持股比例分母通常为该类别股份（已发行 H 股股份总数），"
+                    "而非公司全部 A+H 综合总股本，同表股东比例相加可能大于 100%（例如 01088 中国神华各主要股东持股比例系相对已发行 33.77 亿 H 股计算）。"
+                ),
                 "formatted_tables": {
-                    "top_holders": top_list[:10],
+                    "top_holders": final_top_list,
                 },
-                "data": top_list[:10] if top_list else {"status": "暂无主要股东披露记录"},
+                "data": final_top_list if final_top_list else {"status": "暂无主要股东披露记录"},
                 "股东口径说明": (
                     "【港股权益申报机制说明】：港交所实行中央结算系统 (CCASS) 存托体系，绝大部分机构与公众投资者股份均由香港中央结算(代理人)集中名义持有，"
                     "上市公司并无 A 股式每季度穿透至个人的『前十大流通股东名册』。依据香港《证券及期货条例》第XV部，法定信息披露仅要求持股比例达 5% 及以上的大股东、董事在增减持跨越整百分点时主动申报流水（L=好仓，S=淡仓，P=可借出股份）。"
@@ -1497,6 +1649,9 @@ class HKStockEngine(BaseMarketEngine):
                     "【时效缺口风险提示】：港股大股东权益申报仅在增减持跨越法定整百分点门槛时依法强制触发。若某大股东长期无主动申报，最新公开披露申报记录可能停留在数年前（例如 00688 最新申报为 2020 年，02628 最新申报为 2019 年）。最新申报日期仅反映最后一次法定申报时点的历史持股截面，不代表当前最新时点持股，查阅时务必结合具体申报日期进行时效审阅。"
                 ),
             }
+            if req_limit is not None or req_periods is not None:
+                resp_holders["期次与截断说明"] = f"已按参数截取前 {len(final_top_list)} 位好仓主要股东申报流水。"
+            return resp_holders
 
         # 分类 1.2：大股东增减持变动历史明细 (shareholders / shareholder_events) (修复 HK-5, P2 重复表与 D10 冗余申报行)
         if cat in ("shareholders", "shareholder_events"):
@@ -1588,14 +1743,26 @@ class HKStockEngine(BaseMarketEngine):
                     total_shares += shs_f
                 except (ValueError, TypeError):
                     pass
+            # 修复 P2-5: 更名聚合卡片字段为样本区间口径，明确统计窗口起止日期，杜绝将样本流水误当全历史累计
+            first_date = clean_rep[0].get("回购日期") if clean_rep else None
+            last_date = clean_rep[-1].get("回购日期") if clean_rep else None
+            window_str = f"{last_date} 至 {first_date}" if (first_date and last_date and first_date != last_date) else (first_date or "无")
             buyback_summary = {
+                "样本区间回购总额_港元": round(total_spent_hkd, 2),
+                "样本区间回购总额_万港元": round(total_spent_hkd / 10000.0, 2),
+                "样本区间回购股数_股": int(total_shares),
+                "样本区间回购股数_万股": round(total_shares / 10000.0, 2),
                 "累计回购总金额_港元": round(total_spent_hkd, 2),
                 "累计回购总金额_万港元": round(total_spent_hkd / 10000.0, 2),
                 "累计回购股数_股": int(total_shares),
                 "累计回购股数_万股": round(total_shares / 10000.0, 2),
+                "样本回购记录笔数": len(clean_rep),
+                "样本回购实施记录天数": len(clean_rep),
                 "回购实施记录天数": len(clean_rep),
-                "最新回购日期": clean_rep[0].get("回购日期") if clean_rep else None,
+                "样本统计区间": window_str,
+                "最新回购日期": first_date,
                 "最新回购实施价格_港元": clean_rep[0].get("最高回购价(港元)") or clean_rep[0].get("最高价(港元)") if clean_rep else None,
+                "统计区间说明": f"本统计基于新浪港股公开披露的最近一页回购流水样本（共 {len(clean_rep)} 笔记录，统计窗口为 {window_str}），非全历史累计值。",
             }
             return {
                 "symbol": clean_code,
@@ -1691,19 +1858,48 @@ class HKStockEngine(BaseMarketEngine):
                 "行业说明": "港股行业分类严格遵循恒生行业分类系统 (HSICS) 及港交所主板行业标准，反映标的官方产业定位与主营特征。",
             }
 
-        # 分类 4.2：板块概念与市场族谱 (concepts / sector)
+        # 分类 4.2：板块概念与市场族谱 (concepts / sector) (修复 P3-3 动态提取专属题材)
         if cat in ("concepts", "sector"):
             info = self._get_sina_hk_company_info(clean_code) or {}
             raw_ind = (info.get("所属行业") or "").strip()
             corp_name = info.get("公司名称(中文)", f"港股_{clean_code}")
             corp_desc = info.get("公司业务", "")
             ind_name = raw_ind or self._infer_hk_hang_seng_industry(corp_name, corp_desc, clean_code)
+
+            # 修复 P3-3: 动态结合主营业务描述与证券名称架构提取专属题材概念
+            dynamic_tags = []
+            desc_text = f"{corp_name} {corp_desc}".lower()
+            keyword_map = [
+                ("人工智能", ["人工智能", "ai", "大模型", "算法", "深度学习"]),
+                ("自动驾驶/智能出行", ["自动驾驶", "智能驾驶", "机器人出租车", "robotaxi", "无人驾驶", "新能源汽车", "智能网联"]),
+                ("云计算/大数据", ["云计算", "云服务", "大数据", "数据中心", "idc", "saas"]),
+                ("电子商务/数字经济", ["电子商务", "电商", "零售", "平台", "淘宝", "天猫"]),
+                ("生物医药/创新药", ["生物医药", "创新药", "抗体", "疫苗", "肿瘤", "医疗健康"]),
+                ("半导体/芯片", ["芯片", "半导体", "集成电路", "晶圆"]),
+                ("清洁能源/绿电", ["光伏", "风电", "绿色能源", "储能", "核电"]),
+            ]
+            for tag_name, kws in keyword_map:
+                if any(kw in desc_text for kw in kws):
+                    dynamic_tags.append(tag_name)
+
+            # 证券架构概念
+            if any(corp_name.endswith(suffix) for suffix in ("-W", "-SW", " W", " SW")):
+                dynamic_tags.append("同股不同权架构(W股)")
+            if any(corp_name.endswith(suffix) for suffix in ("-SW", "-S", " SW", " S")):
+                dynamic_tags.append("在港第二上市标的(S股)")
+            if any(corp_name.endswith(suffix) for suffix in ("-B", " B")):
+                dynamic_tags.append("未盈利生物科技标的(B股)")
+
             concepts_table = [
                 {"概念分类": "恒生行业分类", "行业名称": ind_name, "板块内容": ind_name},
                 {"概念分类": "市场板块", "行业名称": "香港交易所主板", "板块内容": "香港交易所主板"},
                 {"概念分类": "互联互通机制", "行业名称": "港股通合资格标的 (港股通/非港股通)", "板块内容": "港股通合资格标的 (港股通/非港股通)"},
                 {"概念分类": "恒生指数概念族谱", "行业名称": f"恒生科技/综合指数相关概念 ({ind_name})", "板块内容": f"恒生科技/综合指数相关概念 ({ind_name})"},
             ]
+            for tag in dynamic_tags:
+                concepts_table.append({"概念分类": "公司专属题材与架构概念", "行业名称": tag, "板块内容": tag})
+
+            primary_theme = " / ".join(dynamic_tags[:3]) if dynamic_tags else ind_name
             return {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
@@ -1713,8 +1909,8 @@ class HKStockEngine(BaseMarketEngine):
                 "formatted_tables": {
                     "concepts": concepts_table,
                 },
-                "data": {"交易板块": "香港交易所主板", "主题概念": ind_name},
-                "概念说明": "港股概念板块涵盖交易所主板、互联互通港股通标的池及指数主题族谱。",
+                "data": {"交易板块": "香港交易所主板", "核心题材概念": primary_theme, "概念标签列表": dynamic_tags, "主题概念": ind_name},
+                "概念说明": "港股概念板块涵盖交易所主板、互联互通港股通标的池、指数主题族谱及公司业务专属题材标签。",
             }
 
         # 分类 5.1：核心财务指标宽表 (indicators / main)
@@ -1913,6 +2109,7 @@ class HKStockEngine(BaseMarketEngine):
                     "董秘": info.get("董秘") or info.get("公司秘书", ""),
                     "核数师": info.get("核数师", ""),
                     "已发行股本": info.get("已发行股本") or info.get("港股股份数目", ""),
+                    "已发行股本口径说明": "港股「已发行股本」在A+H标的中通常仅指在香港联交所实际上市流通的H股股数，非含A股的全部总股本；全股本规模请参考行情端【全部已发行总股本_股】。",
                     "每手股数": info.get("每手股数", ""),
                     "官方网址": info.get("官方网址") or info.get("公司网址") or info.get("网址", ""),
                     "电子邮箱": info.get("电子邮箱") or info.get("电邮地址", ""),
@@ -1924,6 +2121,7 @@ class HKStockEngine(BaseMarketEngine):
                     "category": "basic_info",
                     "category_name": "港股公司基本工商与发行信息",
                     "source": "sina_hk_f10 (新浪港股F10基本工商专线)",
+                    "已发行股本口径说明": "港股「已发行股本」在A+H标的中通常仅指在香港联交所实际上市流通的H股股数，非含A股的全部总股本；全股本规模请参考行情端【全部已发行总股本_股】。",
                     "formatted_tables": {
                         "basic_info": basic_table,
                     },

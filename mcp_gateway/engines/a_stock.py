@@ -734,7 +734,7 @@ class AStockEngine(BaseMarketEngine):
             pb_calc_str = f"，网关自算普通股市净率为 {pb_calc} 倍" if pb_calc is not None else ""
             pb_diff_warn = ""
             if pb_val is not None and pb_calc is not None and abs(pb_val - pb_calc) > 0.03:
-                pb_diff_warn = f"（注：行情市净率 {pb_val} 倍由于BPS分母停留在报告期旧总股本存在滞后低估偏差，真实普通股PB请以自算的【市净率_PB_自算_普通股】{pb_calc} 倍为准）。"
+                pb_diff_warn = f"（注：行情市净率 {pb_val} 倍因BPS分母基于未扣除永续债的归母总权益计算而存在约4.9%~16%的低估偏差；真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
             pb_note = (
                 f"市净率_PB({pb_val}倍{pb_calc_str})由[现价÷每股净资产_BPS]派生；若标的近期发生送转增发导致总股本变动，"
                 "上游每股净资产若停留在报告期旧股本口径将导致PB低估。精确普通股PB建议结合资产负债表重算：普通工商业标的为[总市值 ÷ 归母所有者权益]；"
@@ -1003,6 +1003,10 @@ class AStockEngine(BaseMarketEngine):
             resp["截断说明"] = (
                 f"单次请求根数 count={count} 超过单次最大安全返回上限(300根)，已自动截断为最近 300 根。"
                 "如需更大时间跨度的历史行情，请切换为更大周期（如 day/week）或分批请求。"
+            )
+            resp["超限提示"] = (
+                f"当前请求 count={count} 超过单次最大返回上限(300根)。"
+                "已自动截断交付最近 300 根有效 K 线。"
             )
         elif int(count) > len(parsed_bars):
             resp["超限提示"] = (

@@ -259,7 +259,10 @@ class TdxClient:
         clean_code = re.sub(r"^(sh|sz|bj|hk)", "", raw_query, flags=re.I)
         clean_code = re.sub(r"\.(sh|sz|bj|hk|ss)$", "", clean_code, flags=re.I)
 
-        req_body = {"query": raw_query, "range": market_range}
+        # 规范化市场范围代码以适配 RAG 服务接口 (如 HK/HKEX -> HK-GP, A/CN -> AG)
+        r_upper = market_range.strip().upper()
+        rag_range = "HK-GP" if r_upper in ("HK", "HKEX", "HK-GP") else ("AG" if r_upper in ("A", "AG", "CN", "") else market_range)
+        req_body = {"query": raw_query, "range": rag_range}
         try:
             resp = self._post(self.rag_endpoint, req_body)
         except Exception:
@@ -418,8 +421,8 @@ class TdxClient:
     # =========================================================================
     # 【功能块：港股 F10 委托桩 (转发至 HKStockEngine)】
     # =========================================================================
-    def _get_hk_f10(self, clean_code: str, category: str = 'summary') -> dict[str, Any]:
-        return self.hk_engine.get_f10(clean_code, category=category)
+    def _get_hk_f10(self, clean_code: str, category: str = 'summary', arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.hk_engine.get_f10(clean_code, category=category, arguments=arguments)
 
     # =========================================================================
     # 【功能块：A股与港股双引擎统一路由派发】
@@ -922,7 +925,10 @@ class FinanceGateway:
             if market_range in ("HK", "HK-GP") and (e_market in ("SH", "SZ", "BJ") or e_setcode in ("0", "1", "2") or len(e_code) == 6):
                 continue
 
-            if (clean_q and e_code == clean_q) or query.strip() in ([e_name] + aliases):
+            # 修复 P3-7：名称带 -W/-SW/-S/-B/-R 等港股架构标识后缀时，自动剥离后缀比对证券简称基础名
+            clean_ename = re.sub(r"-(SW|W|S|B|R|SB)$", "", e_name.strip(), flags=re.I)
+            name_candidates = [e_name, clean_ename] + aliases
+            if (clean_q and e_code == clean_q) or query.strip() in name_candidates:
                 exact_match = True
                 matched_code = e_code
                 break
@@ -1019,10 +1025,10 @@ class FinanceGateway:
         }
         norm_cat = category_alias_map.get(cat_lower, cat_lower)
 
-        # 港股标的（5位代码）：启用新浪港股F10主力专线与东方财富高可用备份专线
+        # 港股标的（5位代码）：启用新浪港股F10主力专线与东方财富高可用备份专线 (透传 arguments 支持 periods/limit)
         if infer_market_setcode(symbol) == "31" or len(clean_code) == 5:
             norm_code = clean_code.zfill(5)
-            return self.tdx_client._get_hk_f10(norm_code, category=cat_lower)
+            return self.tdx_client._get_hk_f10(norm_code, category=cat_lower, arguments=arguments)
 
         # =========================================================================
         # 【功能块 8.1：A股全分类统一前置有效代码拦截守卫 (修复 P1-1 契约分裂)】
@@ -1452,30 +1458,44 @@ class FinanceGateway:
                         "如需获取上市公司最新分钟级法定披露公告与突发新闻，请调用 stock_news 工具。"
                     )
                 elif norm_cat == "top_holders":
-                    # 支持 periods 参数按需截取最近 N 期股东数据，大幅降低网络传输与 Token 体积 (修复 Q7)
+                    # 支持 periods 与 limit 参数按需截取最近 N 期或限制行数，大幅降低网络传输与 Token 体积 (修复 Q7, P3-1)
                     req_periods = arguments.get("periods")
-                    if req_periods is not None:
-                        try:
-                            n_p = int(req_periods)
-                            if n_p > 0:
-                                t0_rows = formatted_tables.get("table0", [])
-                                t1_rows = formatted_tables.get("table1", [])
-                                if t0_rows:
-                                    formatted_tables["table0"] = t0_rows[:n_p]
-                                if t1_rows:
-                                    # 提取前 n_p 个不同截止日期/报告期
-                                    seen_dates = []
-                                    for r in t1_rows:
-                                        d_val = str(r.get("截止日期") or r.get("报告期") or r.get("bgq") or "")
-                                        if d_val and d_val not in seen_dates:
-                                            seen_dates.append(d_val)
-                                        if len(seen_dates) >= n_p:
-                                            break
-                                    if seen_dates:
-                                        formatted_tables["table1"] = [r for r in t1_rows if str(r.get("截止日期") or r.get("报告期") or r.get("bgq") or "") in seen_dates]
-                                tdx_res["期次与截断说明"] = f"已按 periods={n_p} 截取最近 {n_p} 个报告期前十大流通股东数据（已由全量 18 期大幅精简至最新 {n_p} 期）。"
-                        except (ValueError, TypeError):
-                            pass
+                    req_limit = arguments.get("limit")
+                    n_p = int(req_periods) if req_periods is not None else None
+                    n_l = int(req_limit) if req_limit is not None else None
+
+                    t0_rows = formatted_tables.get("table0", [])
+                    t1_rows = formatted_tables.get("table1", [])
+
+                    if n_p is not None and n_p > 0:
+                        if t0_rows:
+                            formatted_tables["table0"] = t0_rows[:n_p]
+                        if t1_rows:
+                            # 提取前 n_p 个不同截止日期/报告期
+                            seen_dates = []
+                            for r in t1_rows:
+                                d_val = str(r.get("截止日期") or r.get("报告期") or r.get("bgq") or "")
+                                if d_val and d_val not in seen_dates:
+                                    seen_dates.append(d_val)
+                                if len(seen_dates) >= n_p:
+                                    break
+                            if seen_dates:
+                                t1_rows = [r for r in t1_rows if str(r.get("截止日期") or r.get("报告期") or r.get("bgq") or "") in seen_dates]
+                                formatted_tables["table1"] = t1_rows
+
+                    # 修复 P3-1: limit 参数生效，限制 table1 行数
+                    if n_l is not None and n_l > 0:
+                        t1_cur = formatted_tables.get("table1", [])
+                        formatted_tables["table1"] = t1_cur[:n_l]
+
+                    # 组装期次与截断说明
+                    trunc_parts = []
+                    if n_p is not None and n_p > 0:
+                        trunc_parts.append(f"periods={n_p} (截取最近 {n_p} 个报告期)")
+                    if n_l is not None and n_l > 0:
+                        trunc_parts.append(f"limit={n_l} (单表上限 {n_l} 行)")
+                    if trunc_parts:
+                        tdx_res["期次与截断说明"] = f"已按 {' 与 '.join(trunc_parts)} 精简十大流通股东明细。"
 
                     tdx_res["持股比例分母口径说明"] = (
                         "【持股比例口径校准（已修复 P1-1 与 P3-5）】："
@@ -1733,6 +1753,11 @@ class FinanceGateway:
                     else:
                         if not tdx_res.get("无记录说明"):
                             tdx_res["无记录说明"] = f"标的 {symbol} 当前分类({category})下暂无公开披露的明细数据。"
+                if isinstance(tdx_res.get("data"), dict):
+                    if tdx_res.get("无记录说明") and "无记录说明" not in tdx_res["data"]:
+                        tdx_res["data"]["无记录说明"] = tdx_res["无记录说明"]
+                    if tdx_res.get("业务构成说明") and "业务构成说明" not in tdx_res["data"]:
+                        tdx_res["data"]["业务构成说明"] = tdx_res["业务构成说明"]
                 return tdx_res
         except ValueError:
             raise
@@ -1780,6 +1805,9 @@ class FinanceGateway:
             fallback_res["无记录说明"] = "该标的近期无卖方机构发布盈利预测报告或未覆盖业绩一致预期数据。"
         elif category == "events":
             fallback_res["无记录说明"] = "该标的近期事件库无记录（近期无重大行业题材或宏观催化事件）。如需查询公司最新日常经营与法定公告，请调用 stock_news 工具。"
+        if isinstance(fallback_res.get("data"), dict):
+            if fallback_res.get("无记录说明") and "无记录说明" not in fallback_res["data"]:
+                fallback_res["data"]["无记录说明"] = fallback_res["无记录说明"]
         return fallback_res
 
     # =========================================================================
@@ -1983,6 +2011,12 @@ class FinanceGateway:
                 for ok, cn in F10_TABLE6_VALUATION_MAP.items():
                     if ok in row:
                         row[cn] = row.pop(ok)
+
+                # 修复 P3-3 & P2-1: 兼容旧键名【市净率_PB】，同时保留规范键【市净率_PB_昨收】
+                pb_yishou = row.get("市净率_PB_昨收")
+                if pb_yishou is not None:
+                    row["市净率_PB"] = pb_yishou
+                    row["市净率_PB_说明"] = "基准为上一交易日收盘清算口径；实时盘中现价市净率请调用 stock_quotes 取【市净率_PB】或【市净率_PB_自算_普通股】。"
 
                 # 修复问题 2: 消除动态 PE 同名不同义与自相矛盾别名歧义
                 # F10 table6 中的 sylttm 为真实的 TTM 滚动市盈率，与 stock_quotes 中的【滚动市盈率_PETTM】同值同源
