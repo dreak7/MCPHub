@@ -944,6 +944,13 @@ class FinanceGateway:
                     f"在指定市场范围 ({market_range}) 中未检索到代码为 '{query}' 的上市证券标的（亦无相关候选标的），"
                     "请核对代码有效性后再行查询。"
                 )
+        elif entities:
+            res["未命中说明"] = (
+                f"在指定市场范围 ({market_range}) 中未检索到名称为 '{query}' 的完全匹配上市标的；"
+                "下方返回列表为语义模型相关度最近的关联候选，请核对证券简称后再行查询。"
+            )
+        else:
+            res["候选为空说明"] = f"在指定市场范围 ({market_range}) 中未检索到与 '{query}' 相关的证券标的或候选实体，请核对代码或名称。"
         return res
 
     def stock_quotes(self, arguments: dict[str, Any]) -> dict[str, Any]:

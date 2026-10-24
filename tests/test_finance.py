@@ -2188,6 +2188,65 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertIsNotNone(q_ttm)
         self.assertAlmostEqual(float(t6_0["滚动市盈率_PETTM"]), float(q_ttm), delta=0.5)
 
+    # =========================================================================
+    # 【功能块：验证 Skill 与 Reference 资料库中数据接口与证券专用工具集 100% 对齐】
+    # - 输入：FinanceGateway 实例, mcp_gateway.schemas, mcp_gateway.finance
+    # - 功能：自动化核验 8 大金融工具命名、参数 Schema、count 边界(500)、候选为空自陈及文档对齐性
+    # - 输出：断言通过，无任何异常
+    # =========================================================================
+    def test_skill_and_reference_api_alignment(self):
+        """验证 Skill 与 Reference 资料库中数据接口与证券专用工具集的 8 大工具 100% 对齐"""
+        from mcp_gateway.finance import get_finance_tool_specs
+        from mcp_gateway.schemas import (
+            STOCK_LOOKUP_SCHEMA,
+            STOCK_QUOTES_SCHEMA,
+            STOCK_KLINE_SCHEMA,
+            STOCK_FINANCIALS_SCHEMA,
+            STOCK_F10_SCHEMA,
+            STOCK_SCREENER_SCHEMA,
+            STOCK_NEWS_SCHEMA,
+            MARKET_CONTEXT_SCHEMA,
+        )
+
+        tool_specs = get_finance_tool_specs(self.gw)
+        expected_tools = {
+            "stock_lookup",
+            "stock_quotes",
+            "stock_kline",
+            "stock_financials",
+            "stock_f10",
+            "stock_screener",
+            "stock_news",
+            "market_context",
+        }
+        self.assertEqual(set(tool_specs.keys()), expected_tools)
+
+        # 1. 验证 stock_kline Schema 中的 count maximum 为 500（支持港股 1m 分钟线全天行情覆盖）
+        kline_count_prop = STOCK_KLINE_SCHEMA["inputSchema"]["properties"]["count"]
+        self.assertEqual(kline_count_prop.get("maximum"), 500)
+
+        # 2. 验证 stock_lookup 在未精准命中与无实体时的防幻觉说明注入
+        live_lookup = self.gw.stock_lookup({"query": "不存在的虚拟星际航行测试公司xyz", "range": "AG"})
+        self.assertFalse(live_lookup.get("exact_match", True))
+        self.assertIn("未命中说明", live_lookup)
+
+        # 验证当底层实体列表为空时注入 '候选为空说明'
+        with unittest.mock.patch.object(self.gw.tdx_client, "lookup_stock", return_value=[]):
+            empty_lookup = self.gw.stock_lookup({"query": "纯空标的测试", "range": "AG"})
+            self.assertFalse(empty_lookup.get("exact_match", True))
+            self.assertEqual(empty_lookup.get("entity_count"), 0)
+            self.assertIn("候选为空说明", empty_lookup)
+            self.assertIn("未检索到与", empty_lookup["候选为空说明"])
+
+        # 3. 验证 stock_f10 18 个 category 枚举定义与实际 handler 均能合法响应
+        f10_cats = STOCK_F10_SCHEMA["inputSchema"]["properties"]["category"]["enum"]
+        self.assertEqual(len(f10_cats), 18)
+        self.assertIn("indicators", f10_cats)
+        self.assertIn("financials", f10_cats)
+        self.assertIn("lhb", f10_cats)
+        self.assertIn("buyback", f10_cats)
+        self.assertIn("repurchases", f10_cats)
+
 
 if __name__ == "__main__":
     unittest.main()

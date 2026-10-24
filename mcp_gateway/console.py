@@ -262,7 +262,7 @@ def main() -> None:
         print()
         print(f"{pad}  [3] 快捷配置/编辑 API 密钥 (.env)")
         print()
-        print(f"{pad}  [4] 运行服务健康检查与全部测试套件 (132 项)")
+        print(f"{pad}  [4] 运行服务健康检查与全部测试套件 (133 项)")
         print()
         print(f"{pad}  [5] 查看服务运行日志 (logs/gateway.log)")
         print()
