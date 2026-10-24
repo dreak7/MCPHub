@@ -1,10 +1,10 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v1.9.4)
+# Local MCP Search, Coding & Finance Fallback Gateway (v1.9.5)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 150 Passed](https://img.shields.io/badge/Tests-150%20Passed-success.svg)](tests/)
+[![Tests: 153 Passed](https://img.shields.io/badge/Tests-153%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 </div>
@@ -76,7 +76,7 @@ MCPHub/
 - **`[1] 一键生成挂载配置`**：自动识别本机实际 Python 绝对路径与配置文件绝对路径；
 - **`[2] 启动可视化配置向导 (GUI)`**：原生 Windows 窗口，免改 JSON 即可添加引擎或自定义能力；
 - **`[3] 快捷配置/编辑 API 密钥`**：系统记事本安全编辑 `config/.env`；
-- **`[4] 运行服务健康检查与全部测试套件`**：一键运行全量 150 项自动化单元测试；
+- **`[4] 运行服务健康检查与全部测试套件`**：一键运行全量 153 项自动化单元测试；
 - **`[5] 查看服务运行日志`**：实时跟踪 `logs/gateway.log`；
 - **`[6] 运行 Hermes MCP 连通性测试`**：一键执行 `hermes mcp test MCPHub`。
 
@@ -260,6 +260,20 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### v1.9.5 — 换期重算覆盖PB分母(P1)、业务构成空表防误判说明(P2)、BPS股本滞后说明修正(P2)与淘汰旧键迁移映射表(P3) (153项全绿)
+
+- **核心接口与新一轮实测口径陷阱精准治理 (P1 ~ P3 缺陷 100% 修复)**：
+  - **P1 换期重算全面覆盖 PB 分母与最新财报净资产对齐**：针对标的财报期切换至新季度（如 300371 由中报切换至三季报 2026-09-30，BPS 由 5.75 元增至 5.8093 元）时，上游 F10 table6 中的 `sjl` 依然停留在上一期旧净资产基数（1.6462），导致派生层自算普通股 PB 与最新财报产生 +0.98% 偏差的问题。网关换期重算引擎已全面覆盖 PB 分母，在换期重算时自动基于最新 BPS 重算【`市净率_PB_自算_普通股`】（1.6301），与盘口现价/最新BPS（1.63）和最新三季报 100% 闭环；
+  - **P2 basic_info.table1 业务构成空表防误判自陈**：针对上游数据源对中信证券（600030）等标的未单独披露分产品/行业细项（`Count=0` 属实为空）导致的下游误判为“已核实无业务”的问题，网关在 `table1: []` 时主动注入【`无记录说明`】与【`业务构成说明`】，严禁大模型与下游程序将“未采集”误判为“无主营业务”；
+  - **P2 派生指标换期说明措辞优化（BPS 股本滞后与永续债偏差）**：针对 600030 等发生股本增发（现总股本 156.24 亿股大于报告期旧股本 148.20 亿股）且含有 555.6 亿其他权益工具的标的，纠正此前直接声称“完全同步对齐，无需换期重算”导致的下游误用风险，显式修正说明，明确警示 BPS 分母仍基于报告期旧股本，推算真实市净率必须使用【`市净率_PB_自算_普通股`】（1.3458 倍）；
+  - **P3 盘口 4 组旧镜像别名与现金流 5 组旧核对键收敛升级对照表落地**：针对此前切除盘口 4 组镜像别名（`最高`、`最低`、`涨跌额`、`振幅_pct`）与现金流 5 组间接法核对别名后下游读取为 `None` 的问题，在技术手册中正式新增【六、 已淘汰旧键与唯一规范键映射对照表】，指导下游安全迁移至唯一规范键，在零双计的前提下彻底保障契约透明；
+  - **T1 ~ T12 关键口径陷阱深度排查确认**：全面核验 601658 动态 PE 算法机制（T1）、A+H 股东流通A股占比超 100% 业务定义（T2）、金融票资产明细不可加总与三净额铁律（T3）、工商业专项储备残差（T4）、库存股正数扣减（T5）、资产负债表聚合项双计防范（T6）、季报补充资料 null 法定规则（T7）、亏损股负 PE 标记（T8）、解禁实施公告时滞（T9）、涨停成交额历史缺失自陈（T10）、股本三处舍入与报告期微差（T11）、毛利率标准分母（T12），确认均符合会计与业务准则；
+- **Skill 行动规范与 References 静态技术资料库 100% 对齐**：
+  - `mcphub-finance/SKILL.md` 正式升级为 **78 大口径陷阱防范律**，增补换期重算覆盖 PB 分母（陷阱 75）、业务构成空表防误判说明（陷阱 76）、BPS 股本滞后说明修正（陷阱 77）、淘汰旧键迁移映射对照律（陷阱 78）；
+  - `mcphub-finance/references/tool_api_reference.md` 底层技术手册正式新增第六章【已淘汰旧键与唯一规范键映射对照表】；
+- **全量测试套件扩充与自动化工程验证**：
+  - 新增 `test_p1_recalculate_pb_denominator_on_period_switch`、`test_p2_basic_info_table1_empty_note`、`test_p2_change_period_note_bps_dilution_warning` 3 项专属单元测试，全套件测试扩充至 **153 项测试用例**，全部 100% 绿灯通过。
 
 ### v1.9.4 — 普通股真实PB自算挂载(Q1)、现金流补充资料隔离去双计(Q2)、涨停板空表彻底清除(Q3)、业绩披露日期ISO规范化(Q4)、选股器抖动重试(Q6)与股东数据分期截取(Q7) (150项全绿)
 

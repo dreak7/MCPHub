@@ -1632,6 +1632,13 @@ class FinanceGateway:
                         "【参考股价口径说明】表内【参考股价_元】严格对齐各报告期最后一个交易日（如季末/月末最后一个交易日）的收盘价"
                         "（若该日无交易 bar 则取前一交易日收盘价），与 stock_kline 日线历史收盘价逐位一致。"
                     )
+                elif norm_cat == "basic_info":
+                    t1_rows = formatted_tables.get("table1", [])
+                    if not t1_rows:
+                        tdx_res["无记录说明"] = "table1 业务构成表暂无明细数据（上游数据源未采集或金融企业未单独披露分产品营收细项，不可等同于已核实无业务构成）。"
+                        tdx_res["业务构成说明"] = "上游数据源 table1 业务构成明细暂缺或未采集，属实为空，请参考 table0 主营业务简述。"
+                    else:
+                        tdx_res["业务构成说明"] = f"table1 包含上市公司主营产品/行业构成明细（共 {len(t1_rows)} 行）。"
 
                 # 增强 F10 摘要表：汉化关键财务与估值指标、依据“利润变动方向”精确校准亏损标的同比含义、注入隔日风格标签与破净动态复核指引
                 if norm_cat == "summary" or ("table3" in formatted_tables and "table4" in formatted_tables):

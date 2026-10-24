@@ -568,6 +568,12 @@ class AStockEngine(BaseMarketEngine):
                         elif rk == "table6" and t.get("Content"):
                             t6_row = dict(zip(t.get("ColName", []), t["Content"][0]))
                     
+                    # 记录行情原始每股净资产与旧股本
+                    raw_mgjzc = mgjzc
+                    t6_sjl = 0.0
+                    t6_zgb = 0
+                    t6_ltgb = 0
+
                     # 修复 P3-6：若 F10 table6 存在精确到个位的真实法定总股本与流通A股，优先覆盖万股截断值
                     if t6_row:
                         t6_zgb = int(float(t6_row.get("zgb") or 0))
@@ -591,9 +597,10 @@ class AStockEngine(BaseMarketEngine):
                             is_stale = True
 
                         diff_factor_str = ""
-                        if mgsy > 0 and mapped_ext.get("年化每股收益_EPS"):
+                        raw_ann_eps = mapped_ext.get("年化每股收益_EPS") or (round(now_p / syl, 4) if (syl > 0 and now_p > 0) else None)
+                        if mgsy > 0 and raw_ann_eps:
                             try:
-                                actual_mult = round(float(mapped_ext["年化每股收益_EPS"]) / float(mgsy), 3)
+                                actual_mult = round(float(raw_ann_eps) / float(mgsy), 3)
                                 exp_mult = 2.0 if f10_bgq.endswith("-06-30") else (4.0 if f10_bgq.endswith("-03-31") else (1.333 if f10_bgq.endswith("-09-30") else 1.0))
                                 if abs(actual_mult - exp_mult) > 0.04:
                                     diff_factor_str = f"（注：年化EPS实测乘数为{actual_mult}倍，与标准年化倍数{exp_mult}倍存在差异，系标的在报告期后发生股本变动/增发或发行永续债等，致使年化EPS基于现总股本而BPS仍基于报告期旧股本基数不同所致）。"
@@ -614,9 +621,30 @@ class AStockEngine(BaseMarketEngine):
                                 mapped_ext["年化每股收益_EPS"] = round(now_p / syl, 4) if syl > 0 else round(ann_eps_raw, 4)
                             else:
                                 mapped_ext["年化每股收益_EPS"] = round(ann_eps_raw, 4)
-                            mapped_ext["派生指标换期说明"] = f"检测到上游行情盘口指标滞留于旧期次，已自动自算对齐至最新披露的 {f10_bgq} 财报口径 (EPS={f10_mgsy}元, BPS={f10_mgjzc}元)。{diff_factor_str}"
+
+                            # 修复 P1: 换期重算覆盖 PB 分母，防止 F10 table6 sjl 停留在上一期旧净资产口径造成高估
+                            if mgjzc > 0 and now_p > 0:
+                                mapped_ext["市净率_PB"] = round(now_p / mgjzc, 2)
+                                pb_recalc = round(now_p / mgjzc, 4)
+                                if t6_sjl > 0 and raw_mgjzc > 0:
+                                    old_pb_approx = now_p / raw_mgjzc
+                                    equity_factor = (t6_sjl / old_pb_approx) if (old_pb_approx > 0 and abs(t6_sjl / old_pb_approx - 1.0) > 0.05) else 1.0
+                                    pb_recalc = round((now_p / mgjzc) * equity_factor, 4)
+                                mapped_ext["市净率_PB_自算_普通股"] = pb_recalc
+                                mapped_ext["市净率_PB_换期重算标记"] = True
+
+                            mapped_ext["派生指标换期说明"] = f"检测到上游行情盘口指标滞留于旧期次，已自动自算对齐至最新披露的 {f10_bgq} 财报口径 (EPS={f10_mgsy}元, BPS={f10_mgjzc}元)；PB 分母已同步换期重算为 {mapped_ext.get('市净率_PB_自算_普通股')} 倍。{diff_factor_str}"
                         else:
-                            mapped_ext["派生指标换期说明"] = f"上游行情盘口指标与最新披露的 {f10_bgq} 财报完全同步对齐，无需换期重算。{diff_factor_str}"
+                            # 修复 P2: 600030 派生指标换期说明措辞优化（严禁在股本变动或永续债标的上声称无需重算即可直接推算）
+                            pb_simple = round(now_p / mgjzc, 4) if mgjzc > 0 else 0
+                            if t6_sjl > 0 and pb_simple > 0 and (abs(t6_sjl - pb_simple) > 0.03 or abs(t6_sjl / pb_simple - 1.0) > 0.03):
+                                mapped_ext["派生指标换期说明"] = (
+                                    f"财报期次已与最新披露的 {f10_bgq} 财报同步；但需注意：行情 BPS ({mgjzc}元) 分母仍基于报告期旧股本，"
+                                    f"且归母包含其他权益工具（永续债/优先股），与现总股本推算存在偏差；推算真实市净率必须使用【市净率_PB_自算_普通股】({t6_sjl}倍)，"
+                                    f"严禁直接用现价/BPS推算。{diff_factor_str}"
+                                )
+                            else:
+                                mapped_ext["派生指标换期说明"] = f"上游行情盘口指标与最新披露的 {f10_bgq} 财报完全同步对齐，无需换期重算。{diff_factor_str}"
                 except Exception:
                     pass
 

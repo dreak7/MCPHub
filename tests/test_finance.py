@@ -2545,6 +2545,34 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertEqual(len(t1), 10)
         self.assertIn("期次与截断说明", res_th)
 
+    def test_p1_recalculate_pb_denominator_on_period_switch(self):
+        """验证 P1: 300371 换期重算覆盖 PB 分母，普通股自算 PB 对齐最新三季报净资产 (1.6301 vs 1.63)"""
+        res_q = self.gw.stock_quotes({"symbol": "300371"})
+        ext = res_q.get("估值与基本盘面", {})
+        self.assertEqual(ext.get("最新财报报告期"), "2026-09-30")
+        self.assertEqual(ext.get("市净率_PB"), 1.63)
+        self.assertAlmostEqual(ext.get("市净率_PB_自算_普通股"), 1.6301, places=2)
+        note = ext.get("派生指标换期说明", "")
+        self.assertIn("PB 分母已同步换期重算", note)
+
+    def test_p2_basic_info_table1_empty_note(self):
+        """验证 P2: 600030 basic_info table1 为空时包含明确的 无记录说明 与 业务构成说明"""
+        res_b = self.gw.stock_f10({"symbol": "600030", "category": "basic_info"})
+        tables = res_b.get("formatted_tables", {})
+        self.assertEqual(len(tables.get("table1", [])), 0)
+        self.assertIn("无记录说明", res_b)
+        self.assertIn("table1 业务构成表暂无明细数据", res_b["无记录说明"])
+        self.assertIn("业务构成说明", res_b)
+
+    def test_p2_change_period_note_bps_dilution_warning(self):
+        """验证 P2: 600030 派生指标换期说明提示 BPS 分母旧股本与永续债偏差"""
+        res_q = self.gw.stock_quotes({"symbol": "600030"})
+        ext = res_q.get("估值与基本盘面", {})
+        note = ext.get("派生指标换期说明", "")
+        self.assertIn("行情 BPS", note)
+        self.assertIn("分母仍基于报告期旧股本", note)
+        self.assertIn("市净率_PB_自算_普通股", note)
+
 
 if __name__ == "__main__":
     unittest.main()
