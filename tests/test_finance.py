@@ -2112,10 +2112,44 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertEqual(stmt_bank["归母净利润"], stmt_bank["归属于母公司股东的净利润"])
 
     def test_issue_i_screener_buffer_and_filter_notes(self):
-        """验证问题 I (P3): screener 的 limit 缓冲补齐与 ST 过滤自陈说明"""
+        """验证问题 I (P3): screener 的分页与 ST 过滤自陈说明"""
         res = self.gw.stock_screener({"message": "主板 绩优 储能", "limit": 3, "filter_st": True})
-        self.assertEqual(len(res.get("stocks", [])), 3)
         self.assertIn("分页与过滤说明", res)
+        # 验证该切片内 returned + filtered_st == limit
+        self.assertEqual(len(res.get("stocks", [])) + res.get("filtered_st_count", 0), 3)
+
+    def test_p1_screener_pagination_no_doubling(self):
+        """验证最新 P1: stock_screener 分页步长严格为 limit，杜绝偏移量翻倍与漏标的"""
+        # 测试 '破净 银行'，两页各自返回 10 只，无交集，并集满 20 只
+        p1 = self.gw.stock_screener({"message": "破净 银行", "limit": 10, "page": 1, "filter_st": True})
+        p2 = self.gw.stock_screener({"message": "破净 银行", "limit": 10, "page": 2, "filter_st": True})
+        c1 = [s["code"] for s in p1.get("stocks", [])]
+        c2 = [s["code"] for s in p2.get("stocks", [])]
+        self.assertEqual(len(c1), 10)
+        self.assertEqual(len(c2), 10)
+        self.assertEqual(len(set(c1) & set(c2)), 0)  # 两页严格无交集
+        self.assertEqual(len(set(c1) | set(c2)), 20)  # 并集严格为 20 只
+
+    def test_p2_equity_special_reserve_diff_and_treasury_stock(self):
+        """验证最新 P2: 权益分区专项储备不可加总差额自陈与库存股抵减项规范标注"""
+        # 1. 验证 600875 (东方电气) 4期报表自陈专项储备差额 (约为 135.57M)
+        res_600875 = self.gw.stock_financials({"symbol": "600875", "report_type": "balance", "limit_periods": 1})
+        st_600875 = res_600875.get("statements", [])[0]
+        self.assertIn("归母所有者权益不可加总差额_专项储备及其他权益项等", st_600875)
+        diff_val = st_600875["归母所有者权益不可加总差额_专项储备及其他权益项等"]
+        self.assertGreater(diff_val, 130000000.0)  # 约 1.35 亿元
+        self.assertLess(diff_val, 140000000.0)
+
+        # 2. 验证 002293 (罗莱生活) 库存股抵减项别名挂载与权益闭合
+        res_002293 = self.gw.stock_financials({"symbol": "002293", "report_type": "balance", "limit_periods": 1})
+        st_002293 = res_002293.get("statements", [])[0]
+        self.assertEqual(st_002293.get("库存股"), 6060960.0)
+        self.assertIn("库存股_抵减项", st_002293)
+        self.assertIn("减_库存股", st_002293)
+        self.assertEqual(st_002293["库存股_抵减项"], 6060960.0)
+        self.assertEqual(st_002293["减_库存股"], 6060960.0)
+        # 扣除库存股后，所有者权益明细与归母总额完全闭合，无不可加总差额
+        self.assertNotIn("归母所有者权益不可加总差额_专项储备及其他权益项等", st_002293)
 
     def test_issue_j_indicators_report_date_alignment(self):
         """验证问题 J (P3): indicators 报告期与截止日期两市对齐"""
