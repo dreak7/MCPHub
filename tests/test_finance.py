@@ -3145,11 +3145,6 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
 
 
-# 向后兼容别名：支持 28 标的全量测试套件
-TestTwentyEightEliteStocksSuite = TestTwelveEliteStocksSuite
-TestEliteBenchmarkStocksSuite = TestTwelveEliteStocksSuite
-
-
 if __name__ == "__main__":
     unittest.main()
 
