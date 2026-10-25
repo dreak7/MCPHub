@@ -4177,6 +4177,98 @@ class TestHKLookupAndF10CleaningOffline(unittest.TestCase):
         self.assertIn("无股东名称", res["股东行清洗说明"])
 
 
+class TestHKFinancialTemplateAndDividendsOffline(unittest.TestCase):
+    """批次2：权益残差归因、季报模板缺口自陈、美元派息与 EPS 计量币种（全部离线）"""
+
+    def test_equity_residual_includes_fx_translation(self) -> None:
+        from mcp_gateway.core.normalizer import calculate_hk_parent_equity_residual
+
+        row = {
+            "归属于母公司股东权益": 1042379000000.0,
+            "股本": 1000000.0,
+            "其他储备": 16286000000.0,
+            "保留溢利(累计亏损)": 666784000000.0,
+            "公积金": 387147000000.0,
+            "其他综合收益": 109000000.0,
+            "股东权益其他项目": 9884000000.0,
+            "库存股": -36162000000.0,
+            "外币报表折算差额": -1670000000.0,
+        }
+        diff, note = calculate_hk_parent_equity_residual(row)
+        self.assertIsNone(diff, "外币报表折算差额未纳入明细，残差仍被误报")
+        self.assertIsNone(note)
+
+    def test_equity_residual_names_matching_item(self) -> None:
+        from mcp_gateway.core.normalizer import calculate_hk_parent_equity_residual
+
+        row = {
+            "归属于母公司股东权益": 1000.0,
+            "股本": 100.0,
+            "其他储备": 200.0,
+            "其他权益工具": 700.0,
+        }
+        diff, note = calculate_hk_parent_equity_residual(row)
+        self.assertIsNotNone(diff)
+        self.assertIn("其他权益工具", note)
+        self.assertIn("并非优先股或永续债", note)
+
+    def test_balance_template_gap_annotated(self) -> None:
+        from mcp_gateway.engines.hk_stock import _annotate_balance_template_gaps
+
+        full = {"截止日期": "2026-06-30", "股本": 1.0, "储备": 2.0, "保留溢利": 3.0, "其他综合收益": 4.0}
+        short = {"截止日期": "2026-03-31"}
+        note = _annotate_balance_template_gaps([short, full])
+        self.assertIsNotNone(note)
+        self.assertIn("2026-03-31", note)
+        self.assertIn("权益明细模板完整性自陈", short)
+        self.assertNotIn("权益明细模板完整性自陈", full)
+        self.assertIn("股本", short["权益明细模板完整性自陈"])
+        self.assertIn("不得按缺失补零", short["权益明细模板完整性自陈"])
+
+    def test_balance_template_gap_in_financials_response(self) -> None:
+        from mcp_gateway.engines import hk_stock as hk_module
+
+        engine = hk_module.HKStockEngine(timeout=1)
+        full = {"截止日期": "2026-06-30", "币种": "USD", "股本": 1.0, "储备": 2.0, "保留溢利": 3.0, "归属于母公司股东权益": 10.0}
+        short = {"截止日期": "2026-03-31", "币种": "USD", "归属于母公司股东权益": 10.0}
+        with unittest.mock.patch.object(engine, "_get_eastmoney_hk_financials", return_value=[dict(short), dict(full)]):
+            with unittest.mock.patch.object(engine, "_resolve_exact_security_entity", return_value=None):
+                res = engine.get_financials("02026", report_type="balance", limit_periods=2)
+        self.assertIn("报表模板完整性说明", res)
+        self.assertIn("权益明细模板完整性自陈", res["statements"][0])
+
+    def test_dividends_usd_and_multi_tranche(self) -> None:
+        from mcp_gateway.engines import hk_stock as hk_module
+
+        engine = hk_module.HKStockEngine(timeout=1)
+        rows = [
+            {"公布日期": "2026-05-20", "派息内容": "末期息0.13125美元(或每股美国存托股1.05美元);"},
+            {"公布日期": "2025-11-20", "派息内容": "末期息0.13125美元(或每股美国存托股1.05美元);末期特别息0.11875美元(或每股美国存托股0.95美元)"},
+            {"公布日期": "2025-05-20", "派息内容": "不派息"},
+            {"公布日期": "2024-11-20", "派息内容": "每股派息0.3元人民币(相当于0.33港元)"},
+        ]
+        with unittest.mock.patch.object(engine, "_get_sina_hk_table", return_value=[dict(r) for r in rows]):
+            res = engine._get_hk_f10("09988", category="dividends")
+        divs = res["formatted_tables"]["dividends"]
+
+        self.assertEqual(divs[0]["每股派息_美元"], 0.13125)
+        self.assertEqual(divs[0]["派息_计量币种"], "USD")
+        self.assertIsNone(divs[0]["每股派息_港元"])
+        self.assertNotIn("派息明细_多笔", divs[0])
+
+        self.assertEqual(len(divs[1]["派息明细_多笔"]), 2)
+        amounts = [t["每股派息"] for t in divs[1]["派息明细_多笔"]]
+        self.assertEqual(amounts, [0.13125, 0.11875])
+
+        self.assertFalse(divs[2]["是否派息"])
+        self.assertIsNone(divs[2]["派息_计量币种"])
+
+        # 人民币宣派 + 港元等值：原有港元/人民币双列行为不变
+        self.assertEqual(divs[3]["每股派息_人民币"], 0.3)
+        self.assertEqual(divs[3]["每股派息_港元"], 0.33)
+        self.assertEqual(divs[3]["派息_计量币种"], "CNY")
+
+
 if __name__ == "__main__":
     unittest.main()
 

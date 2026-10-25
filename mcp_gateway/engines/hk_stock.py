@@ -32,6 +32,44 @@ from ..core.normalizer import (
 from .base import BaseMarketEngine
 
 
+# =========================================================================
+# 【功能块 0：港股资产负债表跨期模板完整性比对】
+# - 输入：statements (多期资产负债表行)
+# - 功能：上游季报简表常整组不列示股本/储备/保留溢利等权益明细，键集与中报/年报不一致；
+#         逐期挂载缺失科目自陈，绝不补零或反推
+# - 输出：整体说明文案 (无需披露时返回 None)
+# =========================================================================
+def _annotate_balance_template_gaps(statements: list[dict[str, Any]]) -> str | None:
+    if len(statements) < 2:
+        return None
+    equity_tokens = ("股本", "储备", "保留溢利", "公积金", "综合收益", "其他综合性收益", "库存股", "股东权益其他项目")
+    note_tokens = ("说明", "口径", "标签", "报告期", "报表类型", "币种", "金额单位", "差额")
+    union: set[str] = set()
+    for p in statements:
+        union.update(p.keys())
+    equity_keys = {
+        k for k in union
+        if any(t in k for t in equity_tokens) and not any(n in k for n in note_tokens)
+    }
+    gap_periods: list[str] = []
+    for p in statements:
+        missing = sorted(k for k in equity_keys if k not in p)
+        if not missing:
+            continue
+        p["权益明细模板完整性自陈"] = (
+            f"本期上游报表模板未列示 {len(missing)} 个权益明细科目（{'、'.join(missing)}），"
+            "属季报简表与中报/年报全表的结构差异，不代表数值为 0；权益明细严禁跨期对比，也不得按缺失补零参与加总，"
+            "归属母公司股东权益总额请直接引用【归属于母公司股东权益】或【股东权益】。"
+        )
+        gap_periods.append(str(p.get("截止日期") or p.get("报告期") or "未知期"))
+    if not gap_periods:
+        return None
+    return (
+        f"【港股资产负债表模板完整性说明】：期次 {'、'.join(gap_periods)} 的权益明细键集与全表期次不一致，"
+        "已在对应期次挂载【权益明细模板完整性自陈】；缺口源于上游季报简表未列示科目，网关不做补数。"
+    )
+
+
 class HKStockEngine(BaseMarketEngine):
     """港股领域独立处理引擎"""
 
@@ -1271,6 +1309,15 @@ class HKStockEngine(BaseMarketEngine):
                     "【港股每股收益_TTM适用性说明】：上游东财数据中心宽表中【每股收益_TTM_元】(EPS_TTM) "
                     "在绝大多数自然财年标的（如 00700 腾讯、00883 中海油、01088 神华、00939 建行、03800 晶科等）与自算 TTM/总股本 偏差 ≤1.35%，可直接引用；但在非自然财年（如 09988 阿里巴巴，财年截至 3 月 31 日）或发生复杂 ADS/普通股折算时可能存在因跨期财报口径错位带来的偏差，建议结合最新财报净利润做交叉核验。"
                 )
+                # 每股收益键名带「_元」后缀，但美元本位币标的（如 02026）数值是原币 USD，必须显式标注计量币种
+                cur_code = str(periods_map[r_date].get("币种") or "")
+                if cur_code and ("基本每股收益_元" in periods_map[r_date] or "摊薄每股收益_元" in periods_map[r_date]):
+                    periods_map[r_date]["每股收益_计量币种"] = cur_code
+                    if cur_code != "CNY":
+                        periods_map[r_date]["每股收益_计量说明"] = (
+                            f"【每股收益计量币种】：键名沿用的 `_元` 后缀不代表人民币，本表每股收益以【{cur_code}】原币列示；"
+                            "与同表归母净利润、总股本同币种，做 PE/PB 横比时切勿再按人民币二次折算。"
+                        )
 
         # 现金流量表现金桥闭合与口径校准 (修复 HK-1, HK-2, P2-2)
         for p in periods_map.values():
@@ -1639,6 +1686,11 @@ class HKStockEngine(BaseMarketEngine):
                         )
 
 
+        # 跨期模板键集比对：季报简表整组缺权益明细时逐期自陈，绝不补零 (修复 02026 类问题)
+        template_gap_note = None
+        if statements and rtype_lower in ("balance", "balance_sheet", "zcfzb"):
+            template_gap_note = _annotate_balance_template_gaps(statements)
+
         type_names = {
             "income": "综合损益表 (利润表)",
             "balance": "资产负债表",
@@ -1662,7 +1714,7 @@ class HKStockEngine(BaseMarketEngine):
         rep_cur = (stat_list[0].get("币种") or stat_list[0].get("CURRENCY") or "HKD/CNY") if stat_list else "HKD/CNY"
         rep_unit = "美元" if rep_cur == "USD" else ("港元" if rep_cur == "HKD" else "元")
 
-        return {
+        return_dict: dict[str, Any] = {
             "symbol": clean_code,
             "market": "香港交易所 (HKEX)",
             "statement_type": f"{stmt_name} ({period_suffix})",
@@ -1684,6 +1736,9 @@ class HKStockEngine(BaseMarketEngine):
                 "5.【成本科目双向别名】：为消除港股功能法（销售成本）与性质法（营运支出）列报分裂，接口已自动映射【销售成本】与【营运支出】为互通别名。"
             ),
         }
+        if template_gap_note:
+            return_dict["报表模板完整性说明"] = template_gap_note
+        return return_dict
 
     # =========================================================================
     # 【功能块 5.4：港股公司资料概况页面解析器 (新浪港股 F10 主力)】
@@ -2222,6 +2277,8 @@ class HKStockEngine(BaseMarketEngine):
                 plan = str(d_copy.get("派息内容") or d_copy.get("方案内容") or "").strip()
                 hkd_amt = None
                 cny_amt = None
+                usd_amt = None
+                tranches: list[dict[str, Any]] = []
                 is_div = True
                 if "不派息" in plan or plan == "--" or not plan:
                     is_div = False
@@ -2238,11 +2295,43 @@ class HKStockEngine(BaseMarketEngine):
                             cny_amt = round(float(m_cny.group(1)), 4)
                         except Exception:
                             pass
+                    # 美元派息（如 09988 以 USD 宣派）：只补数值列，不改原有港元/人民币口径
+                    m_usd = re.search(r'相当于\s*([0-9.]+)\s*(?:美元|USD)', plan, re.I) or re.search(r'([0-9.]+)\s*(?:美元|USD)', plan, re.I)
+                    if m_usd:
+                        try:
+                            usd_amt = round(float(m_usd.group(1)), 6)
+                        except Exception:
+                            pass
+                    # 多笔派息（末期息 + 特别息）逐笔留档；存托股折算价剔除，避免把 ADS 价当每股派息
+                    # shortcut: 仅按 ; / ； 切分，若公告用「及」连接两笔则只留首笔明细（汇总列仍取第一笔），遇此类公告再扩分隔符
+                    for seg in re.split(r"[;；]", plan):
+                        seg_clean = re.sub(r"[（(][^）)]*存托股[^）)]*[）)]", "", seg)
+                        m_seg = re.search(r"([0-9.]+)\s*元?\s*(港元|人民币|美元|HKD|CNY|USD)", seg_clean, re.I)
+                        if not m_seg:
+                            continue
+                        unit = m_seg.group(2).upper()
+                        tranches.append({
+                            "派息事项": seg.strip()[:40],
+                            "每股派息": round(float(m_seg.group(1)), 6),
+                            "币种": {"港元": "HKD", "HKD": "HKD", "人民币": "CNY", "CNY": "CNY", "美元": "USD", "USD": "USD"}[unit],
+                        })
                 d_copy["每股派息_港元"] = hkd_amt
                 d_copy["派息_每10股_港元"] = round(hkd_amt * 10.0, 4) if hkd_amt is not None else None
                 d_copy["每股派息_人民币"] = cny_amt
                 d_copy["派息_每10股_人民币"] = round(cny_amt * 10.0, 4) if cny_amt is not None else None
-                d_copy["派息_每10股_含税"] = d_copy["派息_每10股_港元"] if d_copy["派息_每10股_港元"] is not None else d_copy["派息_每10股_人民币"]
+                d_copy["每股派息_美元"] = usd_amt
+                d_copy["派息_每10股_美元"] = round(usd_amt * 10.0, 4) if usd_amt is not None else None
+                paid_currencies = list(dict.fromkeys(t["币种"] for t in tranches))
+                if not paid_currencies:
+                    paid_currencies = [c for c, v in (("HKD", hkd_amt), ("CNY", cny_amt), ("USD", usd_amt)) if v is not None]
+                d_copy["派息_计量币种"] = "多币种" if len(paid_currencies) > 1 else (paid_currencies[0] if paid_currencies else None)
+                if len(tranches) > 1:
+                    d_copy["派息明细_多笔"] = tranches
+                d_copy["派息_每10股_含税"] = (
+                    d_copy["派息_每10股_港元"]
+                    if d_copy["派息_每10股_港元"] is not None
+                    else (d_copy["派息_每10股_人民币"] if d_copy["派息_每10股_人民币"] is not None else d_copy["派息_每10股_美元"])
+                )
                 d_copy["是否派息"] = is_div
                 clean_div.append(d_copy)
 
@@ -2266,7 +2355,9 @@ class HKStockEngine(BaseMarketEngine):
                 "分红说明": "港股分红派息历史记录，包含公布日期、会计年度、派息事项、派息方案内容、除净日与实际派发日。",
                 "分红数据提取说明": (
                     "【港股分红数值提取与自由文本自陈（已收敛 P2-3）】：港股上市公司公告以自由文本格式披露派息方案（常含'相当于X.XXX港元'或多币种描述），"
-                    "网关层已尽可能正则提取【每股派息_港元】与【每股派息_人民币】数值字段供程序化建模；若当期为'不派息'或格式不规则，则数值置为 None 并保留原文文本。"
+                    "网关层已按币种分别提取【每股派息_港元】【每股派息_人民币】【每股派息_美元】数值字段，并以【派息_计量币种】标明宣派币种；"
+                    "同一期存在末期息+特别息等多笔时，另给【派息明细_多笔】逐笔留档（ADS/存托股折算价不计入）；"
+                    "若当期为'不派息'或格式不规则，则数值置为 None 并保留原文文本。"
                 ),
             }
             if no_div_desc:

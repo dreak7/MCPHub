@@ -193,7 +193,12 @@ def calculate_hk_parent_equity_residual(
         if oth_val is not None:
             detail_items.append(("股东权益其他项目", float(oth_val)))
 
-        # 7. 库存股 (已含负号直接累加，或若为正值在下文借方抵减)
+        # 7. 外币报表折算差额 (独立储备科目，漏加会把差额误归因为优先股/永续债)
+        wb_val = row.get("外币报表折算差额")
+        if wb_val is not None:
+            detail_items.append(("外币报表折算差额", float(wb_val)))
+
+        # 8. 库存股 (已含负号直接累加，或若为正值在下文借方抵减)
         kcg_val = row.get("库存股")
         if kcg_val is not None:
             # 港股财报若库存股为正数，则在权益明细求和中扣除借方抵减
@@ -207,11 +212,33 @@ def calculate_hk_parent_equity_residual(
 
         if abs(diff_eq) > 1.0:
             details_formula = " + ".join([f"{name} {val}" for name, val in detail_items])
-            explanation = (
-                f"【港股权益科目可拆解性自陈（已收敛 P1-1）】：上游港股数据源未单独拆分优先股、永续债等其他权益工具明细科目；"
-                f"已披露明细（{details_formula} = {sum_detail}）与归属于母公司股东权益({eq_parent})存在差额 {diff_eq}，"
-                "已自陈至【归母所有者权益不可加总差额_优先股永续债及其他权益工具等】。总权益恒等式完全闭合，建模取数请以归属于母公司股东权益总额为准。"
-            )
+
+            # 差额若与同表某个已下发科目逐分相等，点名该科目，不再一律扣「优先股/永续债」帽子
+            matched_item = None
+            for item_name, item_val in row.items():
+                if not isinstance(item_val, (int, float)):
+                    continue
+                if item_name in ("归属于母公司股东权益", "归属于母公司所有者权益", "股东权益"):
+                    continue
+                if "差额" in item_name or "说明" in item_name:
+                    continue
+                if abs(float(item_val) - diff_eq) <= 0.01:
+                    matched_item = item_name
+                    break
+
+            if matched_item:
+                explanation = (
+                    f"【港股权益科目可拆解性自陈】：已披露明细（{details_formula} = {sum_detail}）与归属于母公司股东权益({eq_parent})"
+                    f"存在差额 {diff_eq}，该差额逐分等于同表已下发的【{matched_item}】科目；"
+                    "该科目未纳入明细加总（避免与储备/其他综合收益重复计），并非优先股或永续债，"
+                    "建模取数请以归属于母公司股东权益总额为准。"
+                )
+            else:
+                explanation = (
+                    f"【港股权益科目可拆解性自陈（已收敛 P1-1）】：上游港股数据源未单独拆分优先股、永续债等其他权益工具明细科目；"
+                    f"已披露明细（{details_formula} = {sum_detail}）与归属于母公司股东权益({eq_parent})存在差额 {diff_eq}，"
+                    "已自陈至【归母所有者权益不可加总差额_优先股永续债及其他权益工具等】。总权益恒等式完全闭合，建模取数请以归属于母公司股东权益总额为准。"
+                )
             return diff_eq, explanation
 
         return None, None
