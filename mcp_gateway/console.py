@@ -222,8 +222,27 @@ def run_hermes_test() -> None:
 
 
 # =========================================================================
+# 【功能块：运行 28 核心行业标杆股票金丝雀巡检】
+# - 输入：paths (dict[str, Path]): 项目关键路径字典
+# - 功能：调用 scripts/canary_probe.py 执行 A 股与港股双向隔离金丝雀全流程质检
+# - 输出：控制台展示金丝雀巡检报告
+# =========================================================================
+def run_canary_probe(paths: dict[str, Path]) -> None:
+    clear_screen()
+    print("正在启动 28 核心行业标杆股票双向隔离金丝雀巡检...")
+    print("=" * 70)
+    try:
+        canary_script = paths["root"] / "scripts" / "canary_probe.py"
+        subprocess.run([sys.executable, str(canary_script)], cwd=str(paths["root"]), check=False)
+    except Exception as exc:
+        print(f"执行金丝雀巡检失败: {exc}")
+    print("=" * 70)
+    press_enter_to_continue()
+
+
+# =========================================================================
 # 【功能块：控制台主菜单循环交互与居中排版渲染】
-# - 输入：用户在键盘上输入的数字选项 [0-6]
+# - 输入：用户在键盘上输入的数字选项 [0-7]
 # - 功能：动态探测终端窗口尺寸并计算居中边距，呈现美观舒展的卡片式居中菜单，
 #         拉开各行间距提升易读性，并根据用户输入路由分发至对应功能模块
 # - 输出：无
@@ -262,11 +281,13 @@ def main() -> None:
         print()
         print(f"{pad}  [3] 快捷配置/编辑 API 密钥 (.env)")
         print()
-        print(f"{pad}  [4] 运行服务健康检查与全部测试套件 (192 项)")
+        print(f"{pad}  [4] 运行服务健康检查与全部测试套件 (200 项)")
         print()
         print(f"{pad}  [5] 查看服务运行日志 (logs/gateway.log)")
         print()
         print(f"{pad}  [6] 运行 Hermes MCP 连通性测试 (hermes mcp test MCPHub)")
+        print()
+        print(f"{pad}  [7] 运行 28 核心行业标杆股票双向隔离金丝雀巡检 (Canary Probe)")
         print()
         print(f"{pad}  [0] 退出控制台")
         print()
@@ -274,7 +295,7 @@ def main() -> None:
         print()
 
         try:
-            choice = input(f"{pad}👉 请输入选项编号 [0-6] 并按回车: ").strip()
+            choice = input(f"{pad}👉 请输入选项编号 [0-7] 并按回车: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n退出控制台。")
             break
@@ -291,6 +312,8 @@ def main() -> None:
             view_service_logs(paths)
         elif choice == "6":
             run_hermes_test()
+        elif choice == "7":
+            run_canary_probe(paths)
         elif choice == "0":
             clear_screen()
             print()

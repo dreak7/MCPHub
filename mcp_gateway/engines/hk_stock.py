@@ -23,6 +23,12 @@ from urllib.request import Request
 from ..core.constants import HK_MAININDICATOR_MAP
 from ..core.indicators import calculate_indicators
 from ..core.network import _SECURE_OPENER
+from ..core.normalizer import (
+    strip_internal_codes,
+    normalize_iso_date,
+    harmonize_accounting_aliases,
+    calculate_hk_parent_equity_residual,
+)
 from .base import BaseMarketEngine
 
 
@@ -1215,9 +1221,7 @@ class HKStockEngine(BaseMarketEngine):
         sorted_dates = sorted(periods_map.keys(), reverse=True)
         res_list = [periods_map[d] for d in sorted_dates[:limit_periods]]
         if rep_name == "RPT_HKF10_FN_MAININDICATOR":
-            for row in res_list:
-                row.pop("DATE_TYPE_CODE", None)
-                row.pop("_DATE_TYPE_CODE", None)
+            strip_internal_codes(res_list)
         return res_list
 
     # =========================================================================
@@ -1445,93 +1449,20 @@ class HKStockEngine(BaseMarketEngine):
             for p in statements:
                 # 修复 P3-3: 港股成本键名双向映射（销售成本 vs 营运支出）
                 if rtype_lower in ("income", "income_statement", "lyb"):
-                    if "销售成本" in p and "营运支出" not in p:
-                        p["营运支出"] = p["销售成本"]
-                    elif "营运支出" in p and "销售成本" not in p:
-                        p["销售成本"] = p["营运支出"]
+                    harmonize_accounting_aliases(p)
 
                 # 修复 P1-1, P3-1, P3-2, P3-3: 港股权益科目全口径闭合与跨期科目别名互通
                 if rtype_lower in ("balance", "balance_sheet", "zcfzb"):
-                    # P3-1: 证券投资 ↔ 其他证券投资 双向平滑别名（收敛建行 00939 隔季跳变）
-                    if "证券投资" in p and "其他证券投资" not in p:
-                        p["其他证券投资"] = p["证券投资"]
-                    elif "其他证券投资" in p and "证券投资" not in p:
-                        p["证券投资"] = p["其他证券投资"]
+                    harmonize_accounting_aliases(p)
 
-                    # P1-1: 保留溢利 ↔ 保留溢利(累计亏损) 双向别名
-                    if "保留溢利(累计亏损)" in p and "保留溢利" not in p:
-                        p["保留溢利"] = p["保留溢利(累计亏损)"]
-                    elif "保留溢利" in p and "保留溢利(累计亏损)" not in p:
-                        p["保留溢利(累计亏损)"] = p["保留溢利"]
-
-                    # P3-2: 其他综合收益 ↔ 其他综合性收益 双向别名（收敛阿里 09988）
-                    if "其他综合性收益" in p and "其他综合收益" not in p:
-                        p["其他综合收益"] = p["其他综合性收益"]
-                    elif "其他综合收益" in p and "其他综合性收益" not in p:
-                        p["其他综合性收益"] = p["其他综合收益"]
-
-                    # P3-3: 储备 ↔ 其他储备 双向别名（收敛中国人寿 02628）
-                    if "储备" in p and "其他储备" not in p:
-                        p["其他储备"] = p["储备"]
-                    elif "其他储备" in p and "储备" not in p:
-                        p["储备"] = p["其他储备"]
-
-                    # 权益明细汇总核算
-                    eq_parent = p.get("归属于母公司股东权益") if p.get("归属于母公司股东权益") is not None else (
-                        p.get("归属于母公司所有者权益") if p.get("归属于母公司所有者权益") is not None else p.get("股东权益")
-                    )
-                    if eq_parent is not None:
-                        try:
-                            detail_items = []
-                            # 1. 股本 / 股本溢价
-                            sc_val = p.get("股本") if p.get("股本") is not None else p.get("实收资本(或股本)")
-                            if sc_val is not None:
-                                detail_items.append(("股本", float(sc_val)))
-                            prem_val = p.get("股本溢价")
-                            if prem_val is not None:
-                                detail_items.append(("股本溢价", float(prem_val)))
-                            # 2. 其他储备 / 资本公积
-                            res_val = p.get("其他储备") if p.get("其他储备") is not None else p.get("资本公积")
-                            if res_val is not None:
-                                detail_items.append(("其他储备", float(res_val)))
-                            # 3. 保留溢利(累计亏损)
-                            re_val = p.get("保留溢利(累计亏损)") if p.get("保留溢利(累计亏损)") is not None else p.get("未分配利润")
-                            if re_val is not None:
-                                detail_items.append(("保留溢利(累计亏损)", float(re_val)))
-                            # 4. 公积金
-                            gjj_val = p.get("公积金") if p.get("公积金") is not None else p.get("法定公积金")
-                            if gjj_val is not None:
-                                detail_items.append(("公积金", float(gjj_val)))
-                            # 5. 其他综合收益
-                            oci_val = p.get("其他综合收益")
-                            if oci_val is not None:
-                                detail_items.append(("其他综合收益", float(oci_val)))
-                            # 6. 股东权益其他项目
-                            oth_val = p.get("股东权益其他项目")
-                            if oth_val is not None:
-                                detail_items.append(("股东权益其他项目", float(oth_val)))
-                            # 7. 库存股 (已含负号直接累加)
-                            kcg_val = p.get("库存股")
-                            if kcg_val is not None:
-                                detail_items.append(("库存股", float(kcg_val)))
-
-                            if detail_items:
-                                sum_detail = round(sum(v for _, v in detail_items), 2)
-                                diff_eq = round(float(eq_parent) - sum_detail, 2)
-                                if abs(diff_eq) > 1.0:
-                                    p["归母所有者权益不可加总差额_优先股永续债及其他权益工具等"] = diff_eq
-                                    details_formula = " + ".join([f"{name} {val}" for name, val in detail_items])
-                                    p["权益不可加总差额自陈说明"] = (
-                                        f"【港股权益科目可拆解性自陈（已收敛 P1-1）】：上游港股数据源未单独拆分优先股、永续债等其他权益工具明细科目；"
-                                        f"已披露明细（{details_formula} = {sum_detail}）与归属于母公司股东权益({eq_parent})存在差额 {diff_eq}，"
-                                        "已自陈至【归母所有者权益不可加总差额_优先股永续债及其他权益工具等】。总权益恒等式完全闭合，建模取数请以归属于母公司股东权益总额为准。"
-                                    )
-                                else:
-                                    # 差额已完全闭合，清除残留差额键
-                                    p.pop("归母所有者权益不可加总差额_优先股永续债及其他权益工具等", None)
-                                    p.pop("权益不可加总差额自陈说明", None)
-                        except (ValueError, TypeError):
-                            pass
+                    # 权益明细汇总核算与优先股/永续债残差自陈 (P1-1 彻底收敛)
+                    diff_eq, eq_note = calculate_hk_parent_equity_residual(p)
+                    if diff_eq is not None and eq_note is not None:
+                        p["归母所有者权益不可加总差额_优先股永续债及其他权益工具等"] = diff_eq
+                        p["权益不可加总差额自陈说明"] = eq_note
+                    else:
+                        p.pop("归母所有者权益不可加总差额_优先股永续债及其他权益工具等", None)
+                        p.pop("权益不可加总差额自陈说明", None)
 
                 # 修复 P2-4: 现金流量表季度结构降级与细项科目未披露说明
                 if rtype_lower in ("cashflow", "cashflow_statement", "xjllb"):
@@ -1609,8 +1540,7 @@ class HKStockEngine(BaseMarketEngine):
         period_suffix = "单期(半年度单期/单季)" if period_type.lower() == "quarter" else "累计报告期"
         
         stat_list = statements or []
-        for p in stat_list:
-            p.pop("DATE_TYPE_CODE", None)
+        strip_internal_codes(stat_list)
 
         rep_cur = (stat_list[0].get("币种") or stat_list[0].get("CURRENCY") or "HKD/CNY") if stat_list else "HKD/CNY"
         rep_unit = "美元" if rep_cur == "USD" else ("港元" if rep_cur == "HKD" else "元")
@@ -2255,9 +2185,7 @@ class HKStockEngine(BaseMarketEngine):
         # 分类 5.1：核心财务指标宽表 (indicators / main)
         if cat in ("indicators", "main"):
             em_data = self._get_eastmoney_hk_financials(clean_code, report_type="summary", limit_periods=4)
-            for row in (em_data or []):
-                row.pop("DATE_TYPE_CODE", None)
-                row.pop("_DATE_TYPE_CODE", None)
+            strip_internal_codes(em_data)
             no_ind_desc = "暂无该标的官方核心财务指标数据覆盖。" if not em_data else None
             resp_ind = {
                 "symbol": clean_code,

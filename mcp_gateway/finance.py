@@ -920,6 +920,16 @@ class FinanceGateway:
         self.fallback_client = PublicFallbackClient(timeout=timeout)
         self.logger = logger or logging.getLogger("mcp_gateway.finance")
 
+    @property
+    def a_engine(self) -> AStockEngine:
+        """A 股通达信专线处理引擎"""
+        return self.tdx_client.a_engine
+
+    @property
+    def hk_engine(self) -> HKStockEngine:
+        """港股多源高可用处理引擎"""
+        return self.tdx_client.hk_engine
+
     def stock_lookup(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """工具 1：实体代码/名称 AI RAG 语义检索"""
         query = arguments.get("query", "").strip()
