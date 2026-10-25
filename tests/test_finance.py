@@ -1113,13 +1113,18 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertIn("最低价", hq_hk)
             self.assertNotIn("最低", hq_hk)
             self.assertIn("涨跌额_元", hq_hk)
+            self.assertIn("涨跌额_港元", hq_hk)
             self.assertNotIn("涨跌额", hq_hk)
+            self.assertIn("成交额_港元", hq_hk)
             self.assertIn("日内振幅_pct", hq_hk)
             self.assertNotIn("振幅_pct", hq_hk)
             self.assertIn("更新时间", hq_hk)
             self.assertIn("滚动市盈率_PETTM", ext_hk)
             self.assertIn("动态市盈率_PE", ext_hk)
-            self.assertIn("总市值_元", ext_hk)
+            self.assertIn("总市值_港元", ext_hk)
+            self.assertIn("港股市值_港元", ext_hk)
+            self.assertIn("流通市值_港元", ext_hk)
+            self.assertNotIn("总市值_元", ext_hk)
             self.assertIn("总股本_万股", ext_hk)
 
         # 4. stock_kline: 验证 indicators_included 与 datetime / macd_hist / boll_upper / rsi
@@ -3390,12 +3395,14 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         self.assertIn("外币报表折算差额", bal_row)
         self.assertIn("所有者权益双计剔除说明", bal_row)
 
-        # 4. 验证 D4: 港股行情挂载【总市值_港元】、【流通市值_港元】
+        # 4. 验证 D4 & P2-1: 港股行情挂载【总市值_港元】、【流通市值_港元】，彻底规范去除易误解的【_元】
         q_00700 = self.gw.stock_quotes({"symbol": "00700"})
         ext_00700 = q_00700.get("估值与基本盘面", {})
         self.assertIn("总市值_港元", ext_00700)
         self.assertIn("流通市值_港元", ext_00700)
-        self.assertEqual(ext_00700["总市值_港元"], ext_00700["总市值_元"])
+        self.assertNotIn("总市值_元", ext_00700)
+        self.assertNotIn("流通市值_元", ext_00700)
+        self.assertEqual(ext_00700.get("市值货币单位"), "HKD (港元)")
         self.assertIn("港股市值计价货币特别提示", ext_00700.get("市值口径说明", ""))
 
         # 5. 验证 D5: 港股财报清洗 DATE_TYPE_CODE 裸码
@@ -3434,6 +3441,90 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         self.assertNotIn("无记录说明", bb_hk)
         rep_hk = self.gw.stock_f10({"symbol": "00700", "category": "repurchases"})
         self.assertNotIn("无记录说明", rep_hk)
+
+    def test_hk_p1_to_p3_fixes(self):
+        """验证港股实测 P1-1 至 P3-8 深度回归套件"""
+        # 1. P1-1 优先回归：00939 建行、03988 中行 权益自陈与真残差严格闭合（判据：自陈 − 真残差 = 0）
+        # 00939: 归母权益 38,101.82 亿，已披露明细和 35,802.05 亿，真残差 = 2,299.77 亿（优先股 599.77 + 永续债 1700）
+        fin_00939 = self.gw.stock_financials({"symbol": "00939", "report_type": "balance", "limit_periods": 1})
+        b_00939 = fin_00939["statements"][0]
+        self.assertIn("保留溢利(累计亏损)", b_00939)
+        self.assertIn("保留溢利", b_00939)  # 双向别名
+        self.assertIn("公积金", b_00939)
+        self.assertIn("其他综合收益", b_00939)
+        diff_00939 = b_00939.get("归母所有者权益不可加总差额_优先股永续债及其他权益工具等")
+        true_residual_00939 = 229977000000.0  # 2299.77 亿
+        self.assertEqual(diff_00939, true_residual_00939)
+        self.assertEqual(diff_00939 - true_residual_00939, 0.0)
+
+        # 03988: 归母权益 31,006.55 亿，已披露明细和 27,506.91 亿，真残差 = 3,499.64 亿（优先股 999.69 + 永续债 2499.95）
+        fin_03988 = self.gw.stock_financials({"symbol": "03988", "report_type": "balance", "limit_periods": 1})
+        b_03988 = fin_03988["statements"][0]
+        diff_03988 = b_03988.get("归母所有者权益不可加总差额_优先股永续债及其他权益工具等")
+        true_residual_03988 = 349964000000.0  # 3499.64 亿
+        self.assertEqual(diff_03988, true_residual_03988)
+        self.assertEqual(diff_03988 - true_residual_03988, 0.0)
+
+        # 2. P3-2 & P3-3: 09988 阿里巴巴（识别其他综合性收益）与 02628 中国人寿（识别储备）权益 100% 闭合无残差
+        fin_09988 = self.gw.stock_financials({"symbol": "09988", "report_type": "balance", "limit_periods": 1})
+        b_09988 = fin_09988["statements"][0]
+        self.assertIn("其他综合性收益", b_09988)
+        self.assertIn("其他综合收益", b_09988)
+        self.assertIsNone(b_09988.get("归母所有者权益不可加总差额_优先股永续债及其他权益工具等"))
+
+        fin_02628 = self.gw.stock_financials({"symbol": "02628", "report_type": "balance", "limit_periods": 1})
+        b_02628 = fin_02628["statements"][0]
+        self.assertIn("储备", b_02628)
+        self.assertIn("其他储备", b_02628)
+        self.assertIsNone(b_02628.get("归母所有者权益不可加总差额_优先股永续债及其他权益工具等"))
+
+        # 3. P3-1: 00939 跨期科目证券投资 ↔ 其他证券投资双向平滑互通
+        fin_00939_4p = self.gw.stock_financials({"symbol": "00939", "report_type": "balance", "limit_periods": 4})
+        for s in fin_00939_4p["statements"]:
+            self.assertIn("证券投资", s)
+            self.assertIn("其他证券投资", s)
+            self.assertEqual(s["证券投资"], s["其他证券投资"])
+
+        # 4. P2-1 & P3-7 & P3-8: 行情端统一 _港元，涨跌额_港元，买卖一档委托量说明
+        q_00700 = self.gw.stock_quotes({"symbol": "00700"})
+        core_00700 = q_00700.get("盘口核心行情", {})
+        self.assertIn("涨跌额_港元", core_00700)
+        self.assertIn("成交额_港元", core_00700)
+        depth_note = q_00700.get("盘口深度说明", "")
+        self.assertIn("恒置为 0", depth_note)
+        self.assertIn("说明", q_00700["五档深度盘口"]["买一"])
+
+        # 5. P2-2: F10 indicators 彻底清洗 DATE_TYPE_CODE
+        f10_ind = self.gw.stock_f10({"symbol": "00700", "category": "indicators"})
+        for row in f10_ind.get("formatted_tables", {}).get("indicators", []):
+            self.assertNotIn("DATE_TYPE_CODE", row)
+            self.assertNotIn("_DATE_TYPE_CODE", row)
+
+        # 6. P2-4: 财报说明动态感知记账币种与金额单位
+        fin_02026 = self.gw.stock_financials({"symbol": "02026", "report_type": "income", "limit_periods": 1})
+        acc_note = fin_02026.get("会计口径与说明", "")
+        self.assertIn("法定记账货币为【USD】", acc_note)
+        self.assertIn("金额单位为【美元】", acc_note)
+
+        # 7. P2-6: 02026 top_holders 区分未在港流通普通股说明
+        holders_02026 = self.gw.stock_f10({"symbol": "02026", "category": "top_holders"})
+        holders_note = holders_02026.get("持股比例分母口径说明", "")
+        self.assertIn("02026", holders_note)
+        self.assertIn("0.81 亿", holders_note)
+
+        # 8. P3-4: 港股 dividends 结构化每10股派息字段
+        div_00700 = self.gw.stock_f10({"symbol": "00700", "category": "dividends"})
+        div_rows = div_00700.get("formatted_tables", {}).get("dividends", [])
+        if div_rows:
+            d0 = div_rows[0]
+            self.assertIn("每股派息_港元", d0)
+            self.assertIn("派息_每10股_港元", d0)
+            self.assertIn("派息_每10股_含税", d0)
+
+        # 9. P3-6: 股本时滞区间扩充至 -6%~+5%
+        info_03800 = self.gw.stock_f10({"symbol": "03800", "category": "basic_info"})
+        cap_note = info_03800.get("已发行股本口径说明", "")
+        self.assertIn("-6%~+5%", cap_note)
 
 
 if __name__ == "__main__":

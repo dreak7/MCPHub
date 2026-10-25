@@ -1,6 +1,6 @@
 # MCPHub 证券与金融专属工具集技术参考手册 (Securities & Finance Tools API Reference & Data Dictionary)
 
-> **版本**：v1.9.8  
+> **版本**：v1.9.9  
 > **受众**：人类软件工程师、量化策略分析师、或需要精确核对底层字段/Schema的大模型（按需渐进式调阅）。  
 > **定位**：静态技术基准参考库（API Reference）、参数约束边界矩阵与 80+ 财务科目官方数据字典（Data Dictionary）。  
 > **使用规程**：日常 Agent 推理行动请直接遵循 [mcphub-finance/SKILL.md](../SKILL.md)；本白皮书提供底层最详尽的技术规格、参数边界与数据字典映射。

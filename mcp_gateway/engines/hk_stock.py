@@ -236,8 +236,8 @@ class HKStockEngine(BaseMarketEngine):
             "market": "香港交易所 (HKEX)",
             "source": "tencent_free_hk_quote (腾讯免费港股专线)",
             "盘口深度说明": (
-                "【港股盘口深度与五档委托说明（已收敛 P3-1）】：港交所公开免费行情专线仅提供即时买一/卖一撮合成交档位，"
-                "买二至买五档位上游不提供公开委托量与价格（显示为 None 或 0），严禁将委零或空档当成真实买卖盘口深度或多空博弈力量分析；"
+                "【港股盘口深度与五档委托说明（已收敛 P3-1 与 P3-8）】：港交所公开免费行情专线仅提供即时买一/卖一撮合成交档位，"
+                "且上游免费数据流对委托股数恒置为 0（仅显示撮合价）；买二至买五档位上游不提供公开委托量与价格（显示为 None），严禁将委托量为 0 或空档当成真实无买单/无卖单的盘口深度或多空博弈力量分析；"
                 "盘中持续交易时段请重点关注买一/卖一即时撮合成交价与全天累计成交额。"
             ),
             "盘口核心行情": {
@@ -248,6 +248,7 @@ class HKStockEngine(BaseMarketEngine):
                 "最高价": _safe_float(parts[33] if len(parts) > 33 else 0),
                 "最低价": _safe_float(parts[34] if len(parts) > 34 else 0),
                 "涨跌额_元": _safe_float(parts[31] if len(parts) > 31 else 0),
+                "涨跌额_港元": _safe_float(parts[31] if len(parts) > 31 else 0),
                 "涨跌幅_pct": _safe_float(parts[32] if len(parts) > 32 else 0),
                 "成交量_股": vol_shares,
                 "成交额_港元": amount_hkd,
@@ -284,12 +285,10 @@ class HKStockEngine(BaseMarketEngine):
                 "流通市值_亿港元": float_mv_yi,
                 "总市值_全部股本乘H股价_亿港元": total_mv_yi,
                 "总市值_亿港元": total_mv_yi,
-                "港股市值_元": int(round(float_mv_yi * 100000000)) if float_mv_yi else None,
                 "港股市值_港元": int(round(float_mv_yi * 100000000)) if float_mv_yi else None,
-                "流通市值_元": int(round(float_mv_yi * 100000000)) if float_mv_yi else None,
                 "流通市值_港元": int(round(float_mv_yi * 100000000)) if float_mv_yi else None,
-                "总市值_元": int(round(total_mv_yi * 100000000)) if total_mv_yi else None,
                 "总市值_港元": int(round(total_mv_yi * 100000000)) if total_mv_yi else None,
+                "市值货币单位": "HKD (港元)",
                 "已发行H股股数_股": ltgb_val,
                 "流通股本_股": ltgb_val,
                 "全部已发行总股本_股": zgb_val,
@@ -305,7 +304,7 @@ class HKStockEngine(BaseMarketEngine):
                     "【港股与AH股市值口径说明】：\n"
                     "1.【港股市值_H股流通市值_亿港元】(纯港股口径)：已发行H股股数 × H股现价，真实反映标的在港交所实际上市流通规模（如中国国航 00753 约 169 亿港元，青岛啤酒 00168 约 310 亿港元，中国电信 00728 约 800 亿港元）；\n"
                     "2.【总市值_全部股本乘H股价_亿港元】(全股本混合参考口径)：境内A股+境外H股全部总股本 × H股现价（如中国国航约 699 亿港元）。因两地市场存在AH折溢价，此混合口径仅供全股本估值参考，严禁误认为港股单一市场可流通规模！\n"
-                    "3.【港股市值计价货币特别提示（已收敛 D4）】：表中【总市值_元】、【流通市值_元】与【港股市值_元】等字段之【元】均为港交所法定交易计价货币【港元 (HKD)】（非人民币 CNY）。若误当人民币使用会高估约 13%（按汇率约 0.87 折算）。网关已同步挂载【总市值_港元】、【流通市值_港元】等明确标注币种字段；如需人民币市值请按实时动态汇率折算。"
+                    "3.【港股市值计价货币特别提示（已收敛 P2-1）】：表中【总市值_港元】、【流通市值_港元】与【港股市值_港元】等字段之计价货币均为港交所法定交易货币【港元 (HKD)】（非人民币 CNY）。为杜绝用户误当人民币使用造成约 13% 的高估，网关已彻底规范去除容易混淆的【_元】后缀并统一更名为【_港元】，且标注【市值货币单位】为 HKD (港元)；如需人民币市值请按实时动态汇率折算。"
                 ),
                 "估值口径说明": (
                     "【港股市盈率口径与汇率折算披露（已收敛 P2-2 与口径陷阱 1、2）】：\n"
@@ -322,12 +321,12 @@ class HKStockEngine(BaseMarketEngine):
                 ),
             },
             "五档深度盘口": {
-                "买一": {"价格": _safe_float(parts[9] if len(parts) > 9 else 0), "委托量": int(_safe_float(parts[10] if len(parts) > 10 else 0))},
+                "买一": {"价格": _safe_float(parts[9] if len(parts) > 9 else 0), "委托量": int(_safe_float(parts[10] if len(parts) > 10 else 0)), "说明": "港交所公开免费源买一委托量恒置为0，仅反映即时撮合参考价"},
                 "买二": {"价格": None, "委托量": None, "说明": "港交所公开免费源仅提供即时买一/卖一撮合盘口"},
                 "买三": {"价格": None, "委托量": None},
                 "买四": {"价格": None, "委托量": None},
                 "买五": {"价格": None, "委托量": None},
-                "卖一": {"价格": _safe_float(parts[19] if len(parts) > 19 else 0), "委托量": int(_safe_float(parts[20] if len(parts) > 20 else 0))},
+                "卖一": {"价格": _safe_float(parts[19] if len(parts) > 19 else 0), "委托量": int(_safe_float(parts[20] if len(parts) > 20 else 0)), "说明": "港交所公开免费源卖一委托量恒置为0，仅反映即时撮合参考价"},
                 "卖二": {"价格": None, "委托量": None, "说明": "港交所公开免费源仅提供即时买一/卖一撮合盘口"},
                 "卖三": {"价格": None, "委托量": None},
                 "卖四": {"价格": None, "委托量": None},
@@ -1090,8 +1089,8 @@ class HKStockEngine(BaseMarketEngine):
                     )
                 elif real_currency == "USD" and rep_name == "RPT_HKF10_FN_CASHFLOW_PC":
                     periods_map[r_date]["跨表币种勾稽说明"] = (
-                        f"【跨表币种勾稽校准（已修复 P1-3，收敛 D7）】：上市公司法定记账货币为 USD，现金流量表金额已按汇率约 {cur_fx:.4f} "
-                        "全量逆向校准为 USD，与资产负债表现金及等价物保持同币种可比口径；受受限制现金/定期存款在两表中会计分类准则差异影响，两者期末现金存在 0.5%~1.7% 的微小准则残差，主表三大活动净额与净增加额代数闭合。"
+                        f"【跨表币种勾稽校准（已修复 P1-3，收敛 D7 与 P2-3）】：上市公司法定记账货币为 USD，现金流量表金额已按汇率约 {cur_fx:.4f} "
+                        "全量逆向校准为 USD，与资产负债表现金及等价物保持同币种可比口径；受受限制现金/定期存款在两表中会计分类准则差异影响，两者期末现金存在 0.6%~1.7% 的微小准则残差，主表三大活动净额与净增加额代数闭合。"
                     )
                 elif real_currency and rep_name == "RPT_HKF10_FN_MAININDICATOR" and real_currency != raw_c_code:
                     periods_map[r_date]["币种说明"] = f"底层主要指标财务数值与法定利润表一致，实际记账编报币种为【{real_currency}】（原始接口所标 {raw_c_code} 仅为股票交易币种）。"
@@ -1214,7 +1213,12 @@ class HKStockEngine(BaseMarketEngine):
                         pass
 
         sorted_dates = sorted(periods_map.keys(), reverse=True)
-        return [periods_map[d] for d in sorted_dates[:limit_periods]]
+        res_list = [periods_map[d] for d in sorted_dates[:limit_periods]]
+        if rep_name == "RPT_HKF10_FN_MAININDICATOR":
+            for row in res_list:
+                row.pop("DATE_TYPE_CODE", None)
+                row.pop("_DATE_TYPE_CODE", None)
+        return res_list
 
     # =========================================================================
     # 【功能块 5.3：港股基本面双源高可用调度器 (东方财富主力 + 新浪备份)】
@@ -1446,23 +1450,86 @@ class HKStockEngine(BaseMarketEngine):
                     elif "营运支出" in p and "销售成本" not in p:
                         p["销售成本"] = p["营运支出"]
 
-                # 修复 P1-2: 港股权益侧明细与归母不可加总差额自陈（收敛建行 00939 优先股/永续债等专有权益工具未单独分列问题）
+                # 修复 P1-1, P3-1, P3-2, P3-3: 港股权益科目全口径闭合与跨期科目别名互通
                 if rtype_lower in ("balance", "balance_sheet", "zcfzb"):
-                    eq_parent = p.get("归属于母公司股东权益") or p.get("归属于母公司所有者权益")
-                    sc = p.get("股本") or p.get("实收资本(或股本)")
-                    res = p.get("其他储备") or p.get("资本公积")
-                    re_p = p.get("保留溢利") or p.get("未分配利润")
-                    if eq_parent is not None and sc is not None and (res is not None or re_p is not None):
+                    # P3-1: 证券投资 ↔ 其他证券投资 双向平滑别名（收敛建行 00939 隔季跳变）
+                    if "证券投资" in p and "其他证券投资" not in p:
+                        p["其他证券投资"] = p["证券投资"]
+                    elif "其他证券投资" in p and "证券投资" not in p:
+                        p["证券投资"] = p["其他证券投资"]
+
+                    # P1-1: 保留溢利 ↔ 保留溢利(累计亏损) 双向别名
+                    if "保留溢利(累计亏损)" in p and "保留溢利" not in p:
+                        p["保留溢利"] = p["保留溢利(累计亏损)"]
+                    elif "保留溢利" in p and "保留溢利(累计亏损)" not in p:
+                        p["保留溢利(累计亏损)"] = p["保留溢利"]
+
+                    # P3-2: 其他综合收益 ↔ 其他综合性收益 双向别名（收敛阿里 09988）
+                    if "其他综合性收益" in p and "其他综合收益" not in p:
+                        p["其他综合收益"] = p["其他综合性收益"]
+                    elif "其他综合收益" in p and "其他综合性收益" not in p:
+                        p["其他综合性收益"] = p["其他综合收益"]
+
+                    # P3-3: 储备 ↔ 其他储备 双向别名（收敛中国人寿 02628）
+                    if "储备" in p and "其他储备" not in p:
+                        p["其他储备"] = p["储备"]
+                    elif "其他储备" in p and "储备" not in p:
+                        p["储备"] = p["其他储备"]
+
+                    # 权益明细汇总核算
+                    eq_parent = p.get("归属于母公司股东权益") if p.get("归属于母公司股东权益") is not None else (
+                        p.get("归属于母公司所有者权益") if p.get("归属于母公司所有者权益") is not None else p.get("股东权益")
+                    )
+                    if eq_parent is not None:
                         try:
-                            sum_detail = round(float(sc or 0.0) + float(res or 0.0) + float(re_p or 0.0), 2)
-                            diff_eq = round(float(eq_parent) - sum_detail, 2)
-                            if abs(diff_eq) > 1.0:
-                                p["归母所有者权益不可加总差额_优先股永续债及其他权益工具等"] = diff_eq
-                                p["权益不可加总差额自陈说明"] = (
-                                    f"【港股权益科目可拆解性自陈（已收敛 P1-2）】：上游港股数据源未单独拆分优先股、永续债等其他权益工具明细科目；"
-                                    f"已披露明细（股本 {sc} + 其他储备 {res or 0} + 保留溢利 {re_p or 0} = {sum_detail}）与归属于母公司股东权益({eq_parent})存在差额 {diff_eq}，"
-                                    "已自陈至【归母所有者权益不可加总差额_优先股永续债及其他权益工具等】。总权益恒等式完全闭合，建模取数请以归属于母公司股东权益总额为准。"
-                                )
+                            detail_items = []
+                            # 1. 股本 / 股本溢价
+                            sc_val = p.get("股本") if p.get("股本") is not None else p.get("实收资本(或股本)")
+                            if sc_val is not None:
+                                detail_items.append(("股本", float(sc_val)))
+                            prem_val = p.get("股本溢价")
+                            if prem_val is not None:
+                                detail_items.append(("股本溢价", float(prem_val)))
+                            # 2. 其他储备 / 资本公积
+                            res_val = p.get("其他储备") if p.get("其他储备") is not None else p.get("资本公积")
+                            if res_val is not None:
+                                detail_items.append(("其他储备", float(res_val)))
+                            # 3. 保留溢利(累计亏损)
+                            re_val = p.get("保留溢利(累计亏损)") if p.get("保留溢利(累计亏损)") is not None else p.get("未分配利润")
+                            if re_val is not None:
+                                detail_items.append(("保留溢利(累计亏损)", float(re_val)))
+                            # 4. 公积金
+                            gjj_val = p.get("公积金") if p.get("公积金") is not None else p.get("法定公积金")
+                            if gjj_val is not None:
+                                detail_items.append(("公积金", float(gjj_val)))
+                            # 5. 其他综合收益
+                            oci_val = p.get("其他综合收益")
+                            if oci_val is not None:
+                                detail_items.append(("其他综合收益", float(oci_val)))
+                            # 6. 股东权益其他项目
+                            oth_val = p.get("股东权益其他项目")
+                            if oth_val is not None:
+                                detail_items.append(("股东权益其他项目", float(oth_val)))
+                            # 7. 库存股 (已含负号直接累加)
+                            kcg_val = p.get("库存股")
+                            if kcg_val is not None:
+                                detail_items.append(("库存股", float(kcg_val)))
+
+                            if detail_items:
+                                sum_detail = round(sum(v for _, v in detail_items), 2)
+                                diff_eq = round(float(eq_parent) - sum_detail, 2)
+                                if abs(diff_eq) > 1.0:
+                                    p["归母所有者权益不可加总差额_优先股永续债及其他权益工具等"] = diff_eq
+                                    details_formula = " + ".join([f"{name} {val}" for name, val in detail_items])
+                                    p["权益不可加总差额自陈说明"] = (
+                                        f"【港股权益科目可拆解性自陈（已收敛 P1-1）】：上游港股数据源未单独拆分优先股、永续债等其他权益工具明细科目；"
+                                        f"已披露明细（{details_formula} = {sum_detail}）与归属于母公司股东权益({eq_parent})存在差额 {diff_eq}，"
+                                        "已自陈至【归母所有者权益不可加总差额_优先股永续债及其他权益工具等】。总权益恒等式完全闭合，建模取数请以归属于母公司股东权益总额为准。"
+                                    )
+                                else:
+                                    # 差额已完全闭合，清除残留差额键
+                                    p.pop("归母所有者权益不可加总差额_优先股永续债及其他权益工具等", None)
+                                    p.pop("权益不可加总差额自陈说明", None)
                         except (ValueError, TypeError):
                             pass
 
@@ -1546,6 +1613,7 @@ class HKStockEngine(BaseMarketEngine):
             p.pop("DATE_TYPE_CODE", None)
 
         rep_cur = (stat_list[0].get("币种") or stat_list[0].get("CURRENCY") or "HKD/CNY") if stat_list else "HKD/CNY"
+        rep_unit = "美元" if rep_cur == "USD" else ("港元" if rep_cur == "HKD" else "元")
 
         return {
             "symbol": clean_code,
@@ -1560,7 +1628,7 @@ class HKStockEngine(BaseMarketEngine):
             "会计口径与说明": (
                 f"港股会计报表按国际财务报告准则 (IFRS) 或香港财务报告准则 (HKFRS) 编制。当前口径：【{period_suffix}】。\n"
                 f"准则类别：【{standard_name}】。\n"
-                f"1.【数据源与金额单位说明】：本接口采用双源高可用容灾架构：以东方财富港股数据中心专线为主力数据源（统一金额单位为【元/对应法定币种】，各期次法定记账货币以行内【币种】为准，如当前标的为【{rep_cur}】），"
+                f"1.【数据源与金额单位说明】：本接口采用双源高可用容灾架构：以东方财富港股数据中心专线为主力数据源（当前标的法定记账货币为【{rep_cur}】，金额单位为【{rep_unit}】），"
                 "当 period_type=quarter 时针对利润表与现金流量表按同财年相邻累计报告期自动做差生成单期数据（资产负债表为时点存量不作差）。\n"
                 "2.【单期与单季度口径区别】：港交所主板强制规则仅要求披露半年度(中报)与全年度(年报)；除 A+H 两地上市标的（因中国证监会要求必须按季披露 Q1/Q3）及腾讯控股等少数自愿披露标的外，多数纯 H 股无一季报/三季报。"
                 "因此对于实行半年度披露的标的，做差推算的单期其本质是半年度单期（如年报扣除中报得到下半年单期 H2，中报累计值即为上半年单期 H1），非真正三月单季；仅按季披露标的才对应真正三月单季(Q1-Q4)。具体每期单期属性已在【单期标签】与【单季度计算说明】中明确标注。\n"
@@ -1783,7 +1851,10 @@ class HKStockEngine(BaseMarketEngine):
                 elif "A股" in raw_cat or re.search(r'\bA\s*SHARES?\b|^A$', cat_upper):
                     item["持股比例分母口径说明"] = "该持股比例系相对已发行A股股份总数申报（非H股亦非A+H综合股本）"
                 elif "普通股" in raw_cat or "ORDINARY" in cat_upper:
-                    item["持股比例分母口径说明"] = "该持股比例系相对已发行普通股股份总数申报"
+                    item["持股比例分母口径说明"] = (
+                        "该持股比例系相对已发行特定类别普通股（如未在港上市流通普通股）总股数申报，"
+                        "非上市公司全部总股本（例如 02026 创始人持股比例 73.99%/26.01% 系以未上市普通股 0.81 亿股为分母，折合全公司总股本比例约为 13.79%/4.85%）"
+                    )
                 elif "其他" in raw_cat or "OTHER" in cat_upper:
                     item["持股比例分母口径说明"] = "该持股比例系相对该特定类别股份（非H股/其他类别股份总数）申报"
                 elif cat_upper:
@@ -1812,9 +1883,9 @@ class HKStockEngine(BaseMarketEngine):
                     "表内数据仅代表各股东各自最近一次法定申报截面，绝非当前时点的最新静态持股名册！"
                 ),
                 "持股比例分母口径说明": (
-                    "【港股持股比例分母口径提示（已修复 D8, 收敛 P1-1）】：香港联交所主要股东权益申报中，"
-                    "申报的持股比例分母为股东所持对应股份类别（如持 A 股相对已发行 A 股总数计算，持 H 股相对已发行 H 股总数计算，持普通股相对普通股总数计算），"
-                    "而非公司全部 A+H 综合总股本。同表跨类别股东比例相加无数学意义（例如 00939 财政部持 A 股结余率 54.71% 系相对 211.8 亿 A 股计算）。"
+                    "【港股持股比例分母口径提示（已收敛 P2-6 与 P1-1）】：香港联交所主要股东权益申报中，"
+                    "申报的持股比例分母为股东所持对应股份类别（如持 A 股相对已发行 A 股总数计算，持 H 股相对已发行 H 股总数计算，持特定普通股相对该特定类别未上市普通股总数计算），"
+                    "而非公司全部综合总股本（例如 00939 财政部持 A 股结余率 54.71% 系相对 211.8 亿 A 股计算；02026 创始人持股比例 73.99% 系以 0.81 亿未在港流通普通股为分母，折合总股本约 13.79%）。同表跨类别股东比例相加无数学意义。"
                 ),
                 "formatted_tables": {
                     "top_holders": final_top_list,
@@ -2001,7 +2072,10 @@ class HKStockEngine(BaseMarketEngine):
                         except Exception:
                             pass
                 d_copy["每股派息_港元"] = hkd_amt
+                d_copy["派息_每10股_港元"] = round(hkd_amt * 10.0, 4) if hkd_amt is not None else None
                 d_copy["每股派息_人民币"] = cny_amt
+                d_copy["派息_每10股_人民币"] = round(cny_amt * 10.0, 4) if cny_amt is not None else None
+                d_copy["派息_每10股_含税"] = d_copy["派息_每10股_港元"] if d_copy["派息_每10股_港元"] is not None else d_copy["派息_每10股_人民币"]
                 d_copy["是否派息"] = is_div
                 clean_div.append(d_copy)
 
@@ -2181,6 +2255,9 @@ class HKStockEngine(BaseMarketEngine):
         # 分类 5.1：核心财务指标宽表 (indicators / main)
         if cat in ("indicators", "main"):
             em_data = self._get_eastmoney_hk_financials(clean_code, report_type="summary", limit_periods=4)
+            for row in (em_data or []):
+                row.pop("DATE_TYPE_CODE", None)
+                row.pop("_DATE_TYPE_CODE", None)
             no_ind_desc = "暂无该标的官方核心财务指标数据覆盖。" if not em_data else None
             resp_ind = {
                 "symbol": clean_code,
@@ -2394,10 +2471,10 @@ class HKStockEngine(BaseMarketEngine):
                     "核数师": info.get("核数师", ""),
                     "已发行股本": info.get("已发行股本") or info.get("港股股份数目", ""),
                     "已发行股本口径说明": (
-                        "【港股已发行股本统计与时滞说明（已修复 D6）】：1. A+H两地上市标的（如00939、01088等）本字段指在香港联交所实际上市流通的H股股数，"
+                        "【港股已发行股本统计与时滞说明（已修复 D6 与 P3-6）】：1. A+H两地上市标的（如00939、01088等）本字段指在香港联交所实际上市流通的H股股数，"
                         "非含A股的全部总股本，全股本请参考行情端【全部已发行总股本_股】；"
                         "2. 非A+H标的（如00700、09988、03800、02026等）本字段源自上市公司定期财报静态工商登记截面，"
-                        "而行情端总股本由交易所与结算所每日根据公司期权行权、股份回购注销、可转债转股等动态更新，回购注销或员工行权期间存在常规的 -5%~+4% 统计时滞差异。"
+                        "而行情端总股本由交易所与结算所每日根据公司期权行权、股份回购注销、可转债转股等动态更新，回购注销或员工行权期间存在常规的 -6%~+5% 统计时滞差异。"
                         "最新即时股本与市值请以 quotes 行情端为准。"
                     ),
                     "每手股数": info.get("每手股数", ""),
@@ -2412,10 +2489,10 @@ class HKStockEngine(BaseMarketEngine):
                     "category_name": "港股公司基本工商与发行信息",
                     "source": "sina_hk_f10 (新浪港股F10基本工商专线)",
                     "已发行股本口径说明": (
-                        "【港股已发行股本统计与时滞说明（已修复 D6）】：1. A+H两地上市标的（如00939、01088等）本字段指在香港联交所实际上市流通的H股股数，"
+                        "【港股已发行股本统计与时滞说明（已修复 D6 与 P3-6）】：1. A+H两地上市标的（如00939、01088等）本字段指在香港联交所实际上市流通的H股股数，"
                         "非含A股的全部总股本，全股本请参考行情端【全部已发行总股本_股】；"
                         "2. 非A+H标的（如00700、09988、03800、02026等）本字段源自上市公司定期财报静态工商登记截面，"
-                        "而行情端总股本由交易所与结算所每日根据公司期权行权、股份回购注销、可转债转股等动态更新，回购注销或员工行权期间存在常规的 -5%~+4% 统计时滞差异。"
+                        "而行情端总股本由交易所与结算所每日根据公司期权行权、股份回购注销、可转债转股等动态更新，回购注销或员工行权期间存在常规的 -6%~+5% 统计时滞差异。"
                         "最新即时股本与市值请以 quotes 行情端为准。"
                     ),
                     "formatted_tables": {
@@ -2437,8 +2514,8 @@ class HKStockEngine(BaseMarketEngine):
         if info:
             if "港股股份数目" in info or "已发行股本" in info:
                 info["已发行股本口径说明"] = (
-                    "【港股已发行股本统计与时滞说明（已修复 D6）】：1. A+H两地上市标的本字段指在香港联交所实际流通的H股股数；"
-                    "2. 非A+H标的本字段源自定期报告静态工商截面，与行情端每日根据期权行权/回购注销更新的实时股本存在 -5%~+4% 统计时滞。最新即时股本与市值请以 quotes 行情端为准。"
+                    "【港股已发行股本统计与时滞说明（已修复 D6 与 P3-6）】：1. A+H两地上市标的本字段指在香港联交所实际流通的H股股数；"
+                    "2. 非A+H标的本字段源自定期报告静态工商截面，与行情端每日根据期权行权/回购注销更新的实时股本存在 -6%~+5% 统计时滞。最新即时股本与市值请以 quotes 行情端为准。"
                 )
             return {
                 "symbol": clean_code,
@@ -2447,8 +2524,8 @@ class HKStockEngine(BaseMarketEngine):
                 "category_name": "港股公司概要与业务简介",
                 "source": source,
                 "已发行股本口径说明": (
-                    "【港股已发行股本统计与时滞说明（已修复 D6）】：1. A+H两地上市标的本字段指在香港联交所实际流通的H股股数；"
-                    "2. 非A+H标的本字段源自定期报告静态工商截面，与行情端每日根据期权行权/回购注销更新的实时股本存在 -5%~+4% 统计时滞。最新即时股本与市值请以 quotes 行情端为准。"
+                    "【港股已发行股本统计与时滞说明（已修复 D6 与 P3-6）】：1. A+H两地上市标的本字段指在香港联交所实际流通的H股股数；"
+                    "2. 非A+H标的本字段源自定期报告静态工商截面，与行情端每日根据期权行权/回购注销更新的实时股本存在 -6%~+5% 统计时滞。最新即时股本与市值请以 quotes 行情端为准。"
                 ),
                 "formatted_tables": {
                     "summary": [info],
