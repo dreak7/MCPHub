@@ -39,6 +39,7 @@ class HKStockEngine(BaseMarketEngine):
         self.timeout = timeout
         self.logger = logger or logging.getLogger("mcp_gateway.finance.hk_engine")
         self._entity_cache: dict[str, dict[str, Any] | None] = {}
+        self._hk_exists_cache: dict[str, bool] = {}
 
     def resolve_entity(self, clean_code: str) -> dict[str, Any] | None:
         """解析5位港股纯数字代码正主实体 (腾讯开放专线)"""
@@ -78,6 +79,31 @@ class HKStockEngine(BaseMarketEngine):
 
     def _resolve_exact_security_entity(self, clean_code: str) -> dict[str, Any] | None:
         return self.resolve_entity(clean_code)
+
+    def _hk_code_exists(self, clean_code: str) -> bool | None:
+        """港股代码存在性判定：True=存在，False=上游明确应答 none_match，None=无法判定。
+
+        只把上游「明确不存在」当否证，请求失败或响应异常返回 None，由调用方 fail-open，
+        避免限流/网络抖动把有效标的误判为无效码。仅缓存确定结果，None 不缓存（下次重试）。
+        """
+        cached = self._hk_exists_cache.get(clean_code)
+        if cached is not None:
+            return cached
+        url = f"https://qt.gtimg.cn/q=r_hk{clean_code}"
+        try:
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
+                raw = resp.read().decode("gb18030", errors="replace")
+        except Exception:
+            return None
+        if "none_match" in raw:
+            self._hk_exists_cache[clean_code] = False
+            return False
+        parts = raw.split("~")
+        if len(parts) > 2 and parts[1].strip():
+            self._hk_exists_cache[clean_code] = True
+            return True
+        return None
 
     def get_quotes(self, symbol: str, setcode: str | None = None) -> dict[str, Any]:
         """获取港股实时盘口与估值"""
@@ -158,6 +184,16 @@ class HKStockEngine(BaseMarketEngine):
     def get_f10(self, symbol: str, category: str = "summary", arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         """获取港股 F10 深度基本面"""
         clean_code = re.sub(r"[^\d]", "", symbol).zfill(5)
+
+        # 无效码闸门 (修复 P1)：上游 F10 多个分类对不存在的代码会返回「港股_88888」等伪数据，
+        # 而 A 股侧 888888 已正确报错。只认腾讯行情明确应答的 none_match 才拒绝；
+        # 请求失败/响应异常一律放行（fail-open），避免限流或网络抖动误杀有效标的。
+        if self._hk_code_exists(clean_code) is False:
+            raise ValueError(
+                f"未查询到港股代码 '{clean_code}' 的真实实体（代码不存在或非有效港股上市标的），"
+                "F10 基本面数据不可用；建议先调用 stock_lookup 工具核对标准代码。"
+            )
+
         res = self._get_hk_f10(clean_code, category=category, arguments=arguments)
 
         # 统一全局拦截：当传入 limit 且返回中包含 formatted_tables 时，严格按单表返回行数限制截断各子表 (修复 P2-1)

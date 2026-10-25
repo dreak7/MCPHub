@@ -3978,6 +3978,101 @@ class TestHKStockNewEmpiricalConvergence(unittest.TestCase):
         self.assertIn("申报时点股本漂移说明", ref_text)
 
 
+class _FakeHKResponse:
+    """腾讯行情专线的最小响应桩：只需 read / 上下文管理协议。"""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def __enter__(self) -> "_FakeHKResponse":
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        return False
+
+
+class TestHKInvalidCodeGateOffline(unittest.TestCase):
+    """批次0：港股无效码闸门（离线三态 + 结果缓存 + 网关路由覆盖）"""
+
+    def setUp(self) -> None:
+        from mcp_gateway.engines.hk_stock import HKStockEngine
+
+        self.engine = HKStockEngine(timeout=1)
+
+    @staticmethod
+    def _quote_stub(payload: bytes | None = None, error: Exception | None = None):
+        from mcp_gateway.engines import hk_stock as hk_module
+
+        if error is not None:
+            return unittest.mock.patch.object(hk_module._SECURE_OPENER, "open", side_effect=error)
+        return unittest.mock.patch.object(
+            hk_module._SECURE_OPENER,
+            "open",
+            side_effect=lambda *args, **kwargs: _FakeHKResponse(payload or b""),
+        )
+
+    def test_none_match_blocks_before_dispatch(self) -> None:
+        """上游明确 none_match 时必须在分发前拦截，绝不能落进 F10 伪数据分支"""
+        with self._quote_stub(b'v_pv_none_match="1";'):
+            with unittest.mock.patch.object(
+                self.engine, "_get_hk_f10", side_effect=AssertionError("闸门未生效，已进入 F10 分发")
+            ):
+                with self.assertRaises(ValueError) as ctx:
+                    self.engine.get_f10("88888", category="industry")
+        self.assertIn("88888", str(ctx.exception))
+
+    def test_valid_code_passes_and_caches(self) -> None:
+        """有效码护栏：放行到 F10 分发，且存在性结果只请求一次"""
+        raw = 'v_r_hk00700="100~腾讯控股~00700~386.000";'.encode("gb18030")
+        calls = {"n": 0}
+
+        def counting_open(*args, **kwargs):
+            calls["n"] += 1
+            return _FakeHKResponse(raw)
+
+        from mcp_gateway.engines import hk_stock as hk_module
+
+        with unittest.mock.patch.object(hk_module._SECURE_OPENER, "open", side_effect=counting_open):
+            with unittest.mock.patch.object(self.engine, "_get_hk_f10", return_value={"ok": True}) as dispatch:
+                self.assertEqual(self.engine.get_f10("00700", category="summary"), {"ok": True})
+                self.assertEqual(self.engine.get_f10("00700", category="summary"), {"ok": True})
+        self.assertEqual(dispatch.call_count, 2)
+        self.assertEqual(calls["n"], 1, "确定结果未命中缓存，重复请求了腾讯行情")
+
+    def test_network_error_fails_open_and_does_not_cache(self) -> None:
+        """网络异常必须 fail-open 放行，且异常结果不入缓存（下次仍重试）"""
+        from urllib.error import URLError
+
+        calls = {"n": 0}
+
+        def failing_open(*args, **kwargs):
+            calls["n"] += 1
+            raise URLError("simulated timeout")
+
+        from mcp_gateway.engines import hk_stock as hk_module
+
+        with unittest.mock.patch.object(hk_module._SECURE_OPENER, "open", side_effect=failing_open):
+            with unittest.mock.patch.object(self.engine, "_get_hk_f10", return_value={"ok": True}) as dispatch:
+                self.assertEqual(self.engine.get_f10("00700", category="summary"), {"ok": True})
+                self.assertEqual(self.engine.get_f10("00700", category="summary"), {"ok": True})
+        self.assertEqual(dispatch.call_count, 2)
+        self.assertEqual(calls["n"], 2, "不确定结果被缓存，后续调用不会再重试")
+
+    def test_gateway_routing_reaches_engine_gate(self) -> None:
+        """网关层 stock_f10 的港股分支必须落到引擎闸门（不是绕过它直接取 F10）"""
+        gw = FinanceGateway()
+        with self._quote_stub(b'v_pv_none_match="1";'):
+            with unittest.mock.patch.object(
+                gw.hk_engine, "_get_hk_f10", side_effect=AssertionError("网关绕过了引擎闸门")
+            ):
+                with self.assertRaises(ValueError) as ctx:
+                    gw.stock_f10({"symbol": "88888", "category": "summary"})
+        self.assertIn("88888", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
 
