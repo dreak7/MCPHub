@@ -3,6 +3,7 @@
 """
 
 import json
+import re
 import unittest
 import unittest.mock
 from mcp_gateway.finance import (
@@ -2827,7 +2828,7 @@ class TestFinanceGateway(unittest.TestCase):
         res_ins = self.gw.stock_financials({"symbol": "601336", "report_type": "balance", "limit_periods": 1})
         st_ins = res_ins.get("statements", [])[0]
         self.assertIn("负债合计不可加总差额_保险合同负债及金融专有科目缺项", st_ins)
-        self.assertIn("负债总计不可加总差额", st_ins)
+        self.assertNotIn("负债总计不可加总差额", st_ins)  # 修复 P3-1: 剔除重复同值别名以防遍历双计
         self.assertGreater(st_ins["负债合计不可加总差额_保险合同负债及金融专有科目缺项"], 1500000000000.0)  # > 1.5 万亿
         self.assertIn("金融负债结构限制说明", st_ins)
 
@@ -2890,6 +2891,72 @@ class TestFinanceGateway(unittest.TestCase):
         # --- D10 验证 (basic_info 字段完整性说明) ---
         bi_res = self.gw.stock_f10({"symbol": "600875", "category": "basic_info"})
         self.assertIn("字段完整性说明", bi_res)
+
+    # =========================================================================
+    # 【功能块：最新实测口径与缺陷回归验证用例集 (P1-1, P1-2, P1-3, P2-1, P2-3, P2-5, P3-1, P3-2)】
+    # - 输入：self.gw (FinanceGateway 实例)，以及各典型测试标的代码
+    # - 功能：全量闭环验证本轮 8 项核心缺陷修复与口径校准：
+    #         1. P1-1: 600030 中信证券普通股真实 PB 对齐与防反向滞后误校准
+    #         2. P1-2: 002594 比亚迪专项储备与外币报表折算差额同值双计排重与自陈
+    #         3. P1-3: 002223 鱼跃医疗 PETTM 比对阈值收紧至 0.05 实现紧密对齐
+    #         4. P2-1: 002698 博实股份 BelongHasKQZ 规范映射为是否含权证或转债
+    #         5. P2-3: 业绩披露日期统一 ISO 标准化并自陈排期状态
+    #         6. P2-5: 600519 贵州茅台经营活动现金流出负抵减结构说明挂载
+    #         7. P3-1: 601336/601658 剔除负债总计不可加总差额重复别名
+    #         8. P3-2: 002223 concepts 概念表日期统一 ISO 标准化
+    # - 输出：各断言校验通过 (无抛出 AssertionError)
+    # =========================================================================
+    def test_v197_p1_p2_p3_fixes(self) -> None:
+        """测试 v1.9.7: P1-1/P1-2/P1-3/P2-1/P2-3/P2-5/P3-1/P3-2 全量闭环验证"""
+        # 1. 验证 P1-1: 600030 中信证券 F10 table6 普通股 PB 对齐 quotes，不被反向误冲
+        f10_600030 = self.gw.stock_f10({"symbol": "600030", "category": "indicators"})
+        t6_600030 = f10_600030.get("formatted_tables", {}).get("table6", [{}])[0]
+        q_600030 = self.gw.stock_quotes({"symbol": "600030"}).get("估值与基本盘面", {})
+        self.assertAlmostEqual(float(t6_600030.get("市净率_PB")), float(q_600030.get("市净率_PB_自算_普通股")), places=2)
+
+        # 2. 验证 P1-2: 002594 比亚迪专项储备与外币折算差额同值双计排重与剔除自陈说明
+        bs_byd = self.gw.stock_financials({"symbol": "002594", "report_type": "balance", "limit_periods": 4})
+        st_byd = bs_byd.get("statements", [])[0]
+        self.assertIn("所有者权益双计剔除说明", st_byd)
+        diff_byd = float(st_byd.get("归母所有者权益不可加总差额_专项储备及其他权益项等") or 0.0)
+        self.assertGreater(diff_byd, 0.0)
+        self.assertLess(abs(diff_byd), 100000000.0)
+
+        # 3. 验证 P1-3: 002223 鱼跃医疗 PETTM 阈值收紧至 0.05 完美对齐
+        f10_2223 = self.gw.stock_f10({"symbol": "002223", "category": "indicators"})
+        t6_2223 = f10_2223.get("formatted_tables", {}).get("table6", [{}])[0]
+        q_2223 = self.gw.stock_quotes({"symbol": "002223"}).get("估值与基本盘面", {})
+        self.assertAlmostEqual(float(t6_2223.get("滚动市盈率_PETTM")), float(q_2223.get("滚动市盈率_PETTM")), places=2)
+
+        # 4. 验证 P2-1: 002698 博实股份 BelongHasKQZ 规范映射为【是否含权证或转债】
+        q_2698 = self.gw.stock_quotes({"symbol": "002698"}).get("估值与基本盘面", {})
+        self.assertNotIn("BelongHasKQZ", q_2698)
+        self.assertIn("是否含权证或转债", q_2698)
+
+        # 5. 验证 P2-3: 业绩披露日期规范化 ISO 格式并自陈排期状态
+        f10_sum = self.gw.stock_f10({"symbol": "600030", "category": "summary"})
+        t0_sum = f10_sum.get("formatted_tables", {}).get("table0", [{}])[0]
+        self.assertIn("业绩披露日期说明", t0_sum)
+        jjrq_val = t0_sum.get("业绩披露日期")
+        if jjrq_val is not None:
+            self.assertTrue(re.match(r"^\d{4}-\d{2}-\d{2}$", str(jjrq_val)))
+
+        # 6. 验证 P2-5: 600519 贵州茅台经营活动现金流出负抵减挂载结构说明
+        cf_moutai = self.gw.stock_financials({"symbol": "600519", "report_type": "cashflow", "limit_periods": 4})
+        has_cf_note = any("经营活动现金流出差额结构说明" in s for s in cf_moutai.get("statements", []))
+        self.assertTrue(has_cf_note)
+
+        # 7. 验证 P3-1: 601336 / 601658 剔除【负债总计不可加总差额】重复别名以防双计
+        for sym in ("601336", "601658"):
+            st_fin = self.gw.stock_financials({"symbol": sym, "report_type": "balance", "limit_periods": 1}).get("statements", [])[0]
+            self.assertNotIn("负债总计不可加总差额", st_fin)
+
+        # 8. 验证 P3-2: 002223 概念表日期统一 ISO 标准化
+        c_2223 = self.gw.stock_f10({"symbol": "002223", "category": "concepts"})
+        r0_c = c_2223.get("formatted_tables", {}).get("table0", [{}])[0]
+        for dk in ("催化日期", "最新入选日期", "题材纳入日期"):
+            if dk in r0_c and r0_c[dk]:
+                self.assertTrue(re.match(r"^\d{4}-\d{2}-\d{2}$", str(r0_c[dk])))
 
 
 # =========================================================================
@@ -3145,8 +3212,135 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
 
 
+    # =========================================================================
+    # 【功能块 8.8：港股 P1、P2、P3 级新缺陷与口径自陈综合验证回归测试】
+    # - 输入：self.gw (FinanceGateway 实例), 涉及标的 01088, 02026, 00700, 00939, 00883 等
+    # - 功能：
+    #   1. P1-1: 验证 top_holders 股份类别判定逻辑，01088 (H Shares 判定为 H 股分母)、
+    #      00700 (Ordinary Shares 判定为普通股分母)、02026 (判定为对应类别/其他非H股分母)；
+    #   2. P1-2: 验证 00939 建设银行资产负债表挂载【归母所有者权益不可加总差额_优先股永续债及其他权益工具等】自陈；
+    #   3. P2-1: 验证港股 1m K 线在 count=340 越界时同时下发【超限提示】与【截断说明】；
+    #   4. P2-2: 验证 quotes 与 indicators 中关于汇率快照源独立性与隐含汇率差异自陈说明；
+    #   5. P2-3: 验证 dividends 成功正则提取【每股派息_港元】数值并下发【分红数据提取说明】；
+    #   6. P2-4: 验证 cashflow 挂载【现金流量表细项披露自陈说明】自陈季度结构降级；
+    #   7. P2-5: 验证 quarter 单季度模式下【报告期】严格保持标准日期格式，中文季度移至【报告期标签】；
+    #   8. P2-6: 验证 00939 银行利润表兼容映射【营业收入】并挂载【金融/银行收入与支出语义说明】；
+    #   9. P3-1: 验证 quotes 顶层挂载【盘口深度说明】；
+    #   10. P3-2: 验证 00883 空 top_holders 包含【无记录说明】；
+    #   11. P3-3: 验证 00939 repurchases data 层双向镜像【无记录说明】；
+    #   12. P3-4: 验证 buyback_summary 挂载【累计字段口径自陈】；
+    #   13. P3-5: 验证 indicators 挂载【每股摊薄盈利披露说明】；
+    #   14. P3-6: 验证 02026 现金口径说明覆盖极微小残差自陈。
+    # - 输出：各断言验证全部通过
+    # =========================================================================
+    def test_hk_p1_p2_p3_comprehensive_fixes(self) -> None:
+        """验证港股 P1-1 至 P3-6 全部缺陷修复与口径自陈"""
+        # 1. 验证 P1-1: top_holders 股份类别分母判定 (01088, 00700, 02026)
+        th_01088 = self.gw.stock_f10({"symbol": "01088", "category": "top_holders"})
+        rows_01088 = th_01088.get("formatted_tables", {}).get("top_holders", [])
+        for r in rows_01088:
+            cat = str(r.get("股份类别") or r.get("类别") or "").upper()
+            if "H" in cat and "SHARES" in cat:
+                self.assertIn("H股股份总数", r.get("持股比例分母口径说明", ""))
+                self.assertNotIn("A股股份总数", r.get("持股比例分母口径说明", ""))
+
+        th_00700 = self.gw.stock_f10({"symbol": "00700", "category": "top_holders"})
+        rows_00700 = th_00700.get("formatted_tables", {}).get("top_holders", [])
+        for r in rows_00700:
+            cat = str(r.get("股份类别") or r.get("类别") or "").upper()
+            if "ORDINARY" in cat:
+                self.assertIn("普通股", r.get("持股比例分母口径说明", ""))
+                self.assertNotIn("已发行A股", r.get("持股比例分母口径说明", ""))
+
+        th_02026 = self.gw.stock_f10({"symbol": "02026", "category": "top_holders"})
+        rows_02026 = th_02026.get("formatted_tables", {}).get("top_holders", [])
+        if rows_02026:
+            for r in rows_02026:
+                cat = str(r.get("股份类别") or r.get("类别") or "")
+                if "其他" in cat or "Other" in cat:
+                    self.assertIn("特定类别股份", r.get("持股比例分母口径说明", ""))
+
+        # 2. 验证 P1-2: 00939 建设银行资产负债表归母权益不可加总差额自陈
+        bal_00939 = self.gw.stock_financials({"symbol": "00939", "report_type": "balance", "limit_periods": 1})
+        stmts_00939 = bal_00939.get("statements", [])
+        if stmts_00939:
+            s0 = stmts_00939[0]
+            if "归属于母公司股东权益" in s0 and "股本" in s0:
+                self.assertIn("归母所有者权益不可加总差额_优先股永续债及其他权益工具等", s0)
+                self.assertIn("权益不可加总差额自陈说明", s0)
+
+        # 3. 验证 P2-1: 港股 1m K 线 count=340 越界时同时包含【超限提示】与【截断说明】
+        kline_340 = self.gw.stock_kline({"symbol": "00700", "period": "1m", "count": 340})
+        self.assertIn("超限提示", kline_340)
+        self.assertIn("截断说明", kline_340)
+
+        # 4. 验证 P2-2 与 P3-1: quotes 包含盘口深度说明与汇率自陈说明
+        q_00700 = self.gw.stock_quotes({"symbol": "00700"})
+        self.assertIn("盘口深度说明", q_00700)
+        val_desc = q_00700.get("估值与基本盘面", {}).get("估值口径说明", "")
+        self.assertIn("quotes 与 f10 indicators 汇率快照源独立性自陈", val_desc)
+
+        # 5. 验证 P2-3: 港股 dividends 包含每股派息 float 数值与分红数据提取说明
+        div_00700 = self.gw.stock_f10({"symbol": "00700", "category": "dividends"})
+        self.assertIn("分红数据提取说明", div_00700)
+        div_rows = div_00700.get("formatted_tables", {}).get("dividends", [])
+        if div_rows:
+            self.assertIn("每股派息_港元", div_rows[0])
+            self.assertIn("是否派息", div_rows[0])
+
+        # 6. 验证 P2-4: 现金流量表细项披露自陈说明
+        cf_00700 = self.gw.stock_financials({"symbol": "00700", "report_type": "cashflow", "limit_periods": 1})
+        cf_stmts = cf_00700.get("statements", [])
+        if cf_stmts:
+            self.assertIn("现金流量表细项披露自陈说明", cf_stmts[0])
+
+        # 7. 验证 P2-5: quarter 单季度模式下报告期字段严格保持标准日期
+        q_stmts = self.gw.stock_financials({"symbol": "00700", "report_type": "income", "period_type": "quarter", "limit_periods": 2})
+        for qs in q_stmts.get("statements", []):
+            rep_date = str(qs.get("报告期", ""))
+            self.assertTrue(re.match(r"^\d{4}-\d{2}-\d{2}$", rep_date), f"报告期字段必须为标准日期格式: {rep_date}")
+            self.assertIn("报告期标签", qs)
+
+        # 8. 验证 P2-6: 银行利润表营业收入别名与语义说明
+        inc_00939 = self.gw.stock_financials({"symbol": "00939", "report_type": "income", "limit_periods": 1})
+        inc_stmts = inc_00939.get("statements", [])
+        if inc_stmts:
+            self.assertIn("营业收入", inc_stmts[0])
+            self.assertIn("金融/银行收入与支出语义说明", inc_stmts[0])
+
+        # 9. 验证 P3-2: 00883 空 top_holders 包含无记录说明
+        th_00883 = self.gw.stock_f10({"symbol": "00883", "category": "top_holders"})
+        if not th_00883.get("formatted_tables", {}).get("top_holders"):
+            self.assertIn("无记录说明", th_00883)
+            self.assertIn("无记录说明", th_00883.get("data", {}))
+
+        # 10. 验证 P3-3: 00939 repurchases data 层双向镜像无记录说明
+        rep_00939 = self.gw.stock_f10({"symbol": "00939", "category": "repurchases"})
+        if not rep_00939.get("formatted_tables", {}).get("repurchases"):
+            self.assertIn("无记录说明", rep_00939)
+            self.assertIn("无记录说明", rep_00939.get("data", {}))
+
+        # 11. 验证 P3-4: buyback_summary 累计字段口径自陈与天数去重
+        bb_00700 = self.gw.stock_f10({"symbol": "00700", "category": "buyback"})
+        bb_data = bb_00700.get("data", {})
+        self.assertIn("累计字段口径自陈", bb_data)
+        self.assertIn("样本回购实施记录天数", bb_data)
+
+        # 12. 验证 P3-5: indicators 包含每股摊薄盈利披露说明
+        ind_01088 = self.gw.stock_f10({"symbol": "01088", "category": "indicators"})
+        self.assertIn("每股摊薄盈利披露说明", ind_01088)
+
+        # 13. 验证 P3-6: 02026 现金口径说明覆盖极微小残差自陈
+        cf_02026 = self.gw.stock_financials({"symbol": "02026", "report_type": "cashflow", "limit_periods": 1})
+        cf_02026_stmts = cf_02026.get("statements", [])
+        if cf_02026_stmts:
+            cash_desc = str(cf_02026_stmts[0].get("现金口径说明", ""))
+            self.assertIn("极微小残差", cash_desc)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

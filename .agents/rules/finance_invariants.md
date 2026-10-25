@@ -100,7 +100,7 @@
    ```powershell
    python -m unittest discover -s tests
    ```
-   - 必须看到 `Ran 188 tests ... OK`，所有测试项 100% 绿灯。
+   - 必须看到 `Ran 189 tests ... OK`，所有测试项 100% 绿灯。
 2. **28 核心标的专项碰撞测试**：
    ```powershell
    python -m unittest tests.test_finance.TestTwelveEliteStocksSuite

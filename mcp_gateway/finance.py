@@ -1114,7 +1114,7 @@ class FinanceGateway:
                 "symbol": clean_code,
                 "category": "industry",
                 "category_name": "官方行业分类 (证监会行业与申万行业)",
-                "source": "tdx_official_vip (通达信官方专线)",
+                "source": "tdx_official_vip (通达信官方授权专线)",
                 "formatted_tables": {
                     "industry": [ind_record],
                 },
@@ -1462,6 +1462,9 @@ class FinanceGateway:
                                     row_dict["持股比例_pct"] = row_dict["持股占总股本比例_pct"]
                                 elif "持股占流通A股比例_pct" in row_dict:
                                     row_dict["持股比例_pct"] = row_dict["持股占流通A股比例_pct"]
+                                # 修复 P2-4: 确保持股占总股本比例_pct永不为空，杜绝下游依赖该键时静默为 None
+                                if "持股占总股本比例_pct" not in row_dict and "持股比例_pct" in row_dict:
+                                    row_dict["持股占总股本比例_pct"] = row_dict["持股比例_pct"]
 
                         # 修复 P1-1：针对 unlocks table0，以真实法定总股本严格自算 [占总股本比例_pct] 消除上游申报批次语义冲突
                         if norm_cat == "unlocks" and t_key == "table0":
@@ -1472,13 +1475,13 @@ class FinanceGateway:
 
                         table_rows.append(row_dict)
                     # 修复 P3-3 与 P3-9：标准化 events, margin_trading, unlocks 及 forecast 等表格中的 8 位数字日期为 YYYY-MM-DD
-                    if norm_cat in ("events", "margin_trading", "unlocks", "forecast") and table_rows:
+                    if norm_cat in ("events", "margin_trading", "unlocks", "forecast", "concepts") and table_rows:
                         if norm_cat == "events":
                             table_rows = list(reversed(table_rows))
                         for r in table_rows:
                             # 修复 P3-1：forecast 表 报告期类日期字段均统一 ISO 化（defdate/mxdef/T003/T030 均可能为 8 位数字）
                             date_keys_to_iso = ("催化日期", "cjrq", "交易日期", "变动日期", "rq", "T002", "基准日期", "cur", "截止日期", "解禁日期", "限售起始日", "公告日期",
-                                               "预测报告期", "基准报告期", "预测发布日期", "评级更新日期", "defdate", "mxdef", "T003", "T030")
+                                               "预测报告期", "基准报告期", "预测发布日期", "评级更新日期", "defdate", "mxdef", "T003", "T030", "题材纳入日期", "最新入选日期")
                             for dk in date_keys_to_iso:
                                 if dk in r and re.match(r"^\d{8}$", str(r[dk])):
                                     ds = str(r[dk])
@@ -1901,14 +1904,14 @@ class FinanceGateway:
                 for ok, cn in F10_TABLE0_SUMMARY_MAP.items():
                     if ok in row:
                         row[cn] = row.pop(ok)
-                # 规范化 业绩披露日期 为 ISO 格式 YYYY-MM-DD (修复 Q4)
+                # 规范化 业绩披露日期 为 ISO 格式 YYYY-MM-DD，并自陈排期状态 (修复 Q4 与 P2-3)
                 raw_jjrq = str(row.get("业绩披露日期") or "").strip()
                 if re.match(r"^\d{8}$", raw_jjrq):
                     row["业绩披露日期"] = f"{raw_jjrq[:4]}-{raw_jjrq[4:6]}-{raw_jjrq[6:8]}"
-                elif not raw_jjrq or raw_jjrq.lower() in ("none", "null", ""):
-                    row["业绩披露日期"] = None
-                if row.get("业绩披露日期"):
                     row["业绩披露日期说明"] = "该日期为上游通达信收录的预约或实际财报披露日；若存在超出当前年度的远期占位，以交易所官方最新披露预约日历为准。"
+                else:
+                    row["业绩披露日期"] = None
+                    row["业绩披露日期说明"] = "交易所与上游通道暂未收录下一期财报预约披露日（尚未排期或上一披露窗口已过等待新排期）。"
 
         # 0.1 汉化 table1 (主营业务简述与申万行业，彻底清除 T017/hy1/hy2 裸码)
         if "table1" in formatted_tables:
@@ -2111,7 +2114,7 @@ class FinanceGateway:
                                 real_ttm = q_info["ProInfo"].get("PETTM")
                             if real_ttm is not None and str(real_ttm).strip() != "":
                                 real_ttm_val = round(float(real_ttm), 2)
-                                if abs(real_ttm_val - float(curr_pe_ttm)) > 1.0:
+                                if abs(real_ttm_val - float(curr_pe_ttm)) > 0.05:
                                     row["滚动市盈率_PETTM"] = real_ttm_val
                                     row["滚动市盈率_PE_TTM"] = real_ttm_val
                                     row.pop("动态市盈率_PE_TTM", None)
@@ -2126,36 +2129,27 @@ class FinanceGateway:
                     except Exception:
                         pass
 
-                # 检验 PB 是否由于快照批处理入库滞后而落后于最新报告期 BPS (修复 D4)
+                # 检验 PB 是否由于快照批处理入库滞后而落后于最新报告期 (修复 D4 与 P1-1)
                 curr_pb = row.get("市净率_PB_昨收") or row.get("市净率_PB")
-                table4_mgjzc = 0.0
-                if "table4" in formatted_tables and formatted_tables["table4"]:
-                    try:
-                        table4_mgjzc = float(formatted_tables["table4"][0].get("每股净资产_BPS") or formatted_tables["table4"][0].get("mgjzc") or 0.0)
-                    except (ValueError, TypeError):
-                        table4_mgjzc = 0.0
-
-                if curr_pb is not None and table4_mgjzc > 0:
+                if curr_pb is not None:
                     try:
                         clean_code = tdx_res.get("symbol", "")
                         if clean_code:
                             q_info = self.tdx_client.get_quotes(clean_code) if 'q_info' not in locals() else q_info
-                            core_q = q_info.get("盘口核心行情", {}) if isinstance(q_info, dict) else {}
-                            close_p = float(core_q.get("昨收") or 0.0)
-                            now_p = float(core_q.get("现价") or 0.0)
-                            ref_p = now_p if now_p > 0 else close_p
-                            if ref_p > 0:
-                                pb_recalc_now = round(ref_p / table4_mgjzc, 4)
-                                pb_recalc_close = round(close_p / table4_mgjzc, 4) if close_p > 0 else pb_recalc_now
+                            gz_info = q_info.get("估值与基本盘面", {}) if isinstance(q_info, dict) else {}
+                            calib_note = gz_info.get("市净率_PB_昨收_校准说明")
+                            real_pb_now = gz_info.get("市净率_PB_F10") or gz_info.get("市净率_PB_自算_普通股")
+                            # 若 quotes 中已由 AStockEngine 完成权威普通股换期校准（如 002293/300371），同步对齐
+                            if calib_note and real_pb_now is not None:
                                 curr_pb_val = float(curr_pb)
-                                if curr_pb_val > 0 and abs(curr_pb_val - pb_recalc_now) / curr_pb_val > 0.005:
-                                    row["市净率_PB"] = pb_recalc_now
-                                    row["市净率_PB_昨收"] = pb_recalc_close
-                                    row["市净率_PB_昨收_换期重算"] = pb_recalc_close
-                                    row["PB校准说明"] = (
-                                        f"上游F10估值快照中市净率(原值{curr_pb_val})仍滞留于旧报告期净资产；"
-                                        f"已自动以最新披露的{table4_bgq}每股净资产({table4_mgjzc}元)与实时现价({ref_p}元)校准为真实市净率({pb_recalc_now}倍，昨收清算口径为{pb_recalc_close}倍)。"
-                                    )
+                                real_pb_val = float(real_pb_now)
+                                if abs(curr_pb_val - real_pb_val) > 0.005:
+                                    row["市净率_PB"] = real_pb_val
+                                    pb_yishou = gz_info.get("市净率_PB_昨收_换期重算")
+                                    if pb_yishou:
+                                        row["市净率_PB_昨收"] = pb_yishou
+                                        row["市净率_PB_昨收_换期重算"] = pb_yishou
+                                    row["PB校准说明"] = calib_note
                     except Exception:
                         pass
 

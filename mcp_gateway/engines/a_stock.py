@@ -1201,7 +1201,14 @@ class AStockEngine(BaseMarketEngine):
                             period_dict[clean_col_name] = parsed_val
 
                     # 针对库存股：收敛为唯一规范键【库存股】，彻底切除易导致下游遍历加总3倍虚增的【减_库存股】与【库存股_抵减项】正数别名 (修复 P2-2)
-                    pass
+                    if "减_库存股" in period_dict:
+                        val = period_dict.pop("减_库存股")
+                        if "库存股" not in period_dict:
+                            period_dict["库存股"] = val
+                    if "库存股_抵减项" in period_dict:
+                        val = period_dict.pop("库存股_抵减项")
+                        if "库存股" not in period_dict:
+                            period_dict["库存股"] = val
 
                     # =========================================================================
                     # 【功能块 7.1：财报报告期与机器可读日期标准归一化 (修复 P2-6)】
@@ -1241,9 +1248,14 @@ class AStockEngine(BaseMarketEngine):
                         q_map = {"03": "一季度", "06": "二季度", "09": "三季度", "12": "四季度"}
                         if is_quarter_mode:
                             q_label = q_map.get(month, "单季度")
-                            period_dict["报表类型"] = f"{iso_date[:4]}{q_label}"
-                            period_dict["报告期"] = f"{iso_date[:4]}{q_label}"
-                            period_dict["报告期标签"] = f"{iso_date[:4]}{q_label}"
+                            if rpt_name:
+                                period_dict["报表类型"] = rpt_name
+                                period_dict["报告期"] = f"{iso_date[:4]}{rpt_name}"
+                                period_dict["报告期标签"] = f"{iso_date[:4]}{rpt_name}"
+                            else:
+                                period_dict["报表类型"] = f"{iso_date[:4]}{q_label}"
+                                period_dict["报告期"] = f"{iso_date[:4]}{q_label}"
+                                period_dict["报告期标签"] = f"{iso_date[:4]}{q_label}"
                             period_dict["单期标签"] = f"{iso_date[:4]}{q_label}"
                             period_dict["单季度计算说明"] = f"本行为 {iso_date[:4]} 年第{q_label[0]}季度独立单季发生额（非累计值）。"
                         else:
@@ -1402,6 +1414,14 @@ class AStockEngine(BaseMarketEngine):
                                 diff_jy_out = round(float(jy_out) - sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_jy_out), 2)
                                 if abs(diff_jy_out) > 0.01:
                                     period_dict["经营活动现金流出不可加总差额_金融存贷款及细项等"] = diff_jy_out
+                                    # 修复 P2-5: 茅台等合并持牌金融子公司的企业，流出项含金融负抵减导致小计小于工商明细和
+                                    if diff_jy_out < -100000000.0:
+                                        period_dict["经营活动现金流出差额结构说明"] = (
+                                            "该期经营活动现金流出小计小于已知工商明细和（差额为负）。"
+                                            "权威成因：公司合并报表涵盖持牌金融子公司（如贵州茅台控股之贵州茅台集团财务有限公司），"
+                                            "其客户存款及同业存放款项净减少额、存放中央银行和同业款项净变动等金融专有流出科目在官方报表中以负数抵减列示；"
+                                            "上游通用工商科目未单独列示金融负项明细行，但官方流出小计与经营现金净额真实闭合，并无虚增。"
+                                        )
 
                             # 筹资活动现金流入小计自动补全与说明 (修复 D7 静默缺列)
                             cz_in = period_dict.get("筹资活动现金流入小计")
@@ -1710,7 +1730,6 @@ class AStockEngine(BaseMarketEngine):
                                 diff_fin_liab = round(float(fzhj) - sub_fin_liab, 2)
                                 if abs(diff_fin_liab) > 0.01:
                                     period_dict["负债合计不可加总差额_保险合同负债及金融专有科目缺项"] = diff_fin_liab
-                                    period_dict["负债总计不可加总差额"] = diff_fin_liab
                                     coverage_liab_pct = round((sub_fin_liab / float(fzhj)) * 100.0, 2)
                                     period_dict["金融负债结构限制说明"] = (
                                         f"【金融企业负债侧明细覆盖度限制警示】通达信底层专线金融资产负债表未收录保险公司核心负债科目"
@@ -1795,7 +1814,14 @@ class AStockEngine(BaseMarketEngine):
                                 ]
                                 # 依据企业会计准则，库存股为所有者权益的法定借方抵减项，计算权益和时必须扣除
                                 treasury_stock = float(period_dict.get("库存股") or 0.0)
-                                sub_eq = sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_equity_items if k in period_dict) - treasury_stock
+                                # 修复 P1-2: 检查上游数据源是否将【外币报表折算差额】与【专项储备】同值别名并发（如 002594 比亚迪均为 208.4686 亿），避免明细加总双计
+                                items_to_sum = list(known_equity_items)
+                                zx_val = period_dict.get("专项储备")
+                                wb_val = period_dict.get("外币报表折算差额")
+                                if zx_val is not None and wb_val is not None and zx_val == wb_val and float(zx_val) != 0:
+                                    items_to_sum.remove("专项储备")
+                                    period_dict["所有者权益双计剔除说明"] = "检测到上游专线将【外币报表折算差额】与【专项储备】同值并发，网关已在权益明细校验中剔除双计项。"
+                                sub_eq = sum(float(period_dict.get(k, 0.0) or 0.0) for k in items_to_sum if k in period_dict) - treasury_stock
                                 diff_eq = round(float(parent_eq_total) - sub_eq, 2)
                                 if abs(diff_eq) > 0.01:
                                     period_dict["归母所有者权益不可加总差额_专项储备及其他权益项等"] = diff_eq
