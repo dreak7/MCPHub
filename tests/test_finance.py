@@ -1112,7 +1112,7 @@ class TestFinanceGateway(unittest.TestCase):
             self.assertNotIn("最高", hq_hk)
             self.assertIn("最低价", hq_hk)
             self.assertNotIn("最低", hq_hk)
-            self.assertIn("涨跌额_元", hq_hk)
+            self.assertNotIn("涨跌额_元", hq_hk)
             self.assertIn("涨跌额_港元", hq_hk)
             self.assertNotIn("涨跌额", hq_hk)
             self.assertIn("成交额_港元", hq_hk)
@@ -2750,7 +2750,8 @@ class TestFinanceGateway(unittest.TestCase):
         t_988 = ind_988.get("formatted_tables", {}).get("indicators", [])
         if t_988:
             self.assertIn("每股收益_TTM_说明", t_988[0])
-            self.assertIn("口径不可信", t_988[0]["每股收益_TTM_说明"])
+            self.assertIn("09988", t_988[0]["每股收益_TTM_说明"])
+            self.assertIn("偏差", t_988[0]["每股收益_TTM_说明"])
 
         # =========================================================================
         # 4. D4, D5, D12, D13 验证: 港股 quotes 估值面板对齐 A 股键、普通股 PB 校准、02628 过期断言清理
@@ -3335,12 +3336,13 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         ind_01088 = self.gw.stock_f10({"symbol": "01088", "category": "indicators"})
         self.assertIn("每股摊薄盈利披露说明", ind_01088)
 
-        # 13. 验证 P3-6: 02026 现金口径说明覆盖极微小残差自陈
+        # 13. 验证 P3-6 & P3-1: 02026 现金口径说明覆盖受限存款还原机制自陈，剔除过期残差文案
         cf_02026 = self.gw.stock_financials({"symbol": "02026", "report_type": "cashflow", "limit_periods": 1})
         cf_02026_stmts = cf_02026.get("statements", [])
         if cf_02026_stmts:
             cash_desc = str(cf_02026_stmts[0].get("现金口径说明", ""))
-            self.assertIn("极微小残差", cash_desc)
+            self.assertIn("受限存款列报口径", cash_desc)
+            self.assertNotIn("0.035%", cash_desc)
 
     # =========================================================================
     # 【功能块 8.5：A股与港股实测 D1~D14 专项问题修复全量回归测试】
@@ -3432,10 +3434,12 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         f10_ind = self.gw.stock_f10({"symbol": "600519", "category": "indicators"})
         self.assertIn("质押状态说明", f10_ind)
 
-        # 10. 验证 D13: 回购卡片跨市场统一挂载【样本区间回购总额_万元】
+        # 10. 验证 D13 & P2-2: 港股回购卡片统一挂载规范的【_万港元】并杜绝误导的【_万元】人民币标签别名
         bb_hk = self.gw.stock_f10({"symbol": "00700", "category": "buyback"})
-        self.assertIn("累计已实施回购总额_万元", bb_hk.get("data", {}))
-        self.assertIn("样本区间回购总额_万元", bb_hk.get("data", {}))
+        self.assertIn("累计已实施回购总额_万港元", bb_hk.get("data", {}))
+        self.assertIn("样本区间回购总额_万港元", bb_hk.get("data", {}))
+        self.assertNotIn("累计已实施回购总额_万元", bb_hk.get("data", {}))
+        self.assertNotIn("样本区间回购总额_万元", bb_hk.get("data", {}))
 
         # 11. 验证 D14: 00700 等有回购记录时不保留为 null 的无记录说明键
         self.assertNotIn("无记录说明", bb_hk)
@@ -3525,6 +3529,104 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         info_03800 = self.gw.stock_f10({"symbol": "03800", "category": "basic_info"})
         cap_note = info_03800.get("已发行股本口径说明", "")
         self.assertIn("-6%~+5%", cap_note)
+
+    def test_hk_framework_upgrade_fixes(self):
+        """
+        ========================================================================
+        功能块：港股框架升级实测缺陷深度回归测试套件 (P1-1 至 P4-1)
+        ------------------------------------------------------------------------
+        输入：
+            - 非法枚举参数（如 period='year', report_type='invalid_type', category='not_a_category'）
+            - 港股标的代码（如 '00700', '01088', '00883', '02026' 等）
+            - 带截断参数 limit 的 F10 请求
+        实现了什么功能：
+            1. P1-1: 验证非法枚举值在网关层被严格拦截并抛出 ValueError，杜绝静默回退邻接分支；
+            2. P2-1: 验证港股 F10 分支下 repurchases, buyback_details, dividends, events 均严格生效 limit 参数；
+            3. P2-2: 验证港股 buyback 回购数据彻底剔除【_万元】人民币标签别名，仅保留规范的【_万港元】；
+            4. P2-3 & P3-1: 验证现金口径说明完整阐述三种机理并剔除 0.035% 跨票泄漏；
+            5. P3-2: 验证每股收益_TTM_说明区分自然财年（偏差 ≤1.35% 可信）与非自然财年；
+            6. P3-3: 验证 60 分钟 K 线切分说明与全天 330 分钟交易机制自洽；
+            7. P3-4: 验证盘口仅保留【涨跌额_港元】，彻底移除【涨跌额_元】；
+            8. P3-5 & P3-7: 验证日 K 线附加说明包含【成交量口径说明】与【复权口径说明】；
+            9. P3-6: 验证 F10 indicators 挂载【PE_TTM校准说明】与【估值时效提示】；
+            10. P4-1: 验证日 K 与分钟 K 线成交量字段规范化为整数类型 (int)。
+        输出：
+            - 所有断言全部通过，确保无回归缺陷。
+        ========================================================================
+        """
+        # 1. 验证 P1-1: 非法枚举值严格报错拦截，不发生静默映射
+        with self.assertRaises(ValueError):
+            self.gw.stock_kline({"symbol": "00700", "period": "year"})
+
+        with self.assertRaises(ValueError):
+            self.gw.stock_financials({"symbol": "00700", "report_type": "invalid_type"})
+
+        with self.assertRaises(ValueError):
+            self.gw.stock_f10({"symbol": "00700", "category": "not_a_category"})
+
+        # 2. 验证 P2-1: F10 各分类严格生效 limit 参数
+        f10_rep = self.gw.stock_f10({"symbol": "00700", "category": "repurchases", "limit": 5})
+        self.assertLessEqual(len(f10_rep.get("formatted_tables", {}).get("repurchases", [])), 5)
+        self.assertTrue("期次与截断说明" in f10_rep or "截断说明" in f10_rep)
+
+        f10_bb = self.gw.stock_f10({"symbol": "00700", "category": "buyback", "limit": 3})
+        self.assertLessEqual(len(f10_bb.get("formatted_tables", {}).get("buyback_details", [])), 3)
+
+        f10_div = self.gw.stock_f10({"symbol": "00700", "category": "dividends", "limit": 3})
+        self.assertLessEqual(len(f10_div.get("formatted_tables", {}).get("dividends", [])), 3)
+
+        # 3. 验证 P2-2: 彻底清除 _万元 人民币标签，保留 _万港元
+        bb_data = f10_bb.get("data", {})
+        self.assertNotIn("样本区间回购总额_万元", bb_data)
+        self.assertNotIn("累计已实施回购总额_万元", bb_data)
+        self.assertIn("样本区间回购总额_万港元", bb_data)
+        self.assertIn("累计已实施回购总额_万港元", bb_data)
+
+        # 4. 验证 P2-3 & P3-1: 现金口径说明无 0.035% 泄露并阐明三种机理
+        fin_cf = self.gw.stock_financials({"symbol": "00700", "report_type": "cash_flow", "limit_periods": 1})
+        cf_stmts = fin_cf.get("statements", [])
+        cf_note = cf_stmts[0].get("现金口径说明", "") if cf_stmts else ""
+        self.assertNotIn("0.035%", cf_note)
+        self.assertIn("受限存款列报口径", cf_note)
+        self.assertIn("集团财务公司资金归集", cf_note)
+
+        # 5. 验证 P3-2: 每股收益_TTM 说明区分自然财年与非自然财年
+        f10_ind_00700 = self.gw.stock_f10({"symbol": "00700", "category": "indicators"})
+        eps_note = f10_ind_00700.get("每股收益_TTM_说明", "")
+        self.assertIn("≤1.35%", eps_note)
+        self.assertIn("09988", eps_note)
+
+        # 6. 验证 P3-3: 60 分钟切分说明数值自洽 (330分钟)
+        kline_60m = self.gw.stock_kline({"symbol": "00700", "period": "60m"})
+        split_note = kline_60m.get("港股60分钟跨午休切分机制说明") or kline_60m.get("60分钟切分机制说明", "")
+        self.assertIn("330 分钟", split_note)
+        self.assertNotIn("30+60+60+30", split_note)
+
+        # 7. 验证 P3-4: 盘口仅保留涨跌额_港元，移除涨跌额_元
+        quotes_hk = self.gw.stock_quotes({"symbol": "00700"})
+        hq_hk = quotes_hk.get("盘口核心行情", {})
+        self.assertIn("涨跌额_港元", hq_hk)
+        self.assertNotIn("涨跌额_元", hq_hk)
+
+        # 8. 验证 P3-5 & P3-7: 日 K 附加说明包含成交量口径说明与复权口径说明
+        kline_day = self.gw.stock_kline({"symbol": "00700", "period": "day"})
+        self.assertIn("成交量口径说明", kline_day)
+        self.assertIn("复权口径说明", kline_day)
+
+        # 9. 验证 P3-6: F10 indicators 挂载 PE_TTM校准说明 与 估值时效提示
+        f10_ind = self.gw.stock_f10({"symbol": "00700", "category": "indicators"})
+        self.assertIn("PE_TTM校准说明", f10_ind)
+        self.assertIn("估值时效提示", f10_ind)
+
+        # 10. 验证 P4-1: 日 K 与 60m K 线成交量规整为整数
+        day_rows = kline_day.get("klines") or kline_day.get("data", [])
+        if day_rows:
+            vol_d = day_rows[0].get("volume") if "volume" in day_rows[0] else day_rows[0].get("成交量")
+            self.assertIsInstance(vol_d, int)
+        m60_rows = kline_60m.get("klines") or kline_60m.get("data", [])
+        if m60_rows:
+            vol_m = m60_rows[0].get("volume") if "volume" in m60_rows[0] else m60_rows[0].get("成交量")
+            self.assertIsInstance(vol_m, int)
 
 
 if __name__ == "__main__":

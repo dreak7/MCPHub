@@ -253,7 +253,6 @@ class HKStockEngine(BaseMarketEngine):
                 "今开": _safe_float(parts[5] if len(parts) > 5 else 0),
                 "最高价": _safe_float(parts[33] if len(parts) > 33 else 0),
                 "最低价": _safe_float(parts[34] if len(parts) > 34 else 0),
-                "涨跌额_元": _safe_float(parts[31] if len(parts) > 31 else 0),
                 "涨跌额_港元": _safe_float(parts[31] if len(parts) > 31 else 0),
                 "涨跌幅_pct": _safe_float(parts[32] if len(parts) > 32 else 0),
                 "成交量_股": vol_shares,
@@ -453,12 +452,12 @@ class HKStockEngine(BaseMarketEngine):
                         "high": round(max(p_list), 3),
                         "low": round(min(p_list), 3),
                         "close": round(bucket[-1]["price"], 3),
-                        "volume": round(v, 2),
+                        "volume": int(round(v)),
                         "amount": round(a, 2),
                     })
 
                 if p_lower == "60m":
-                    # 港交所全天 330 分钟按 30+60+60+30 切分为 6 根 60m 根 bar
+                    # 港交所全天 330 分钟持续交易加收市竞价切分为 6 根 60m bar
                     buckets_60m = [
                         ("1030", lambda t: t <= "1030"),
                         ("1130", lambda t: "1030" < t <= "1130"),
@@ -563,10 +562,8 @@ class HKStockEngine(BaseMarketEngine):
                         "当日全部分钟 K 线累计成交量与日 K 线全天成交量 100% 代数闭合对齐 (比率=1.000000)。"
                     ),
                     "港股60分钟跨午休切分机制说明": (
-                        "【港股60分钟K线跨午休切分机制说明】：港交所上午持续交易时段为 09:30-12:00 (共150分钟)，下午为 13:00-16:00 (共180分钟)。"
-                        "主流交易所规范将全天60分钟K线按【30+60+60+30】及跨午休规则切分为6根bar："
-                        "10:30 (开盘前1小时)、11:30 (中间1小时)、13:30 (跨午休聚合bar：囊括上午11:30-12:00与下午13:00-13:30各半小时成交量，对应30m的12:00与13:30之和)、"
-                        "14:30、15:30、16:00 (收盘半小时)。"
+                        "【港股60分钟K线跨午休切分机制说明】：港交所全天持续交易时段 330 分钟（上午 09:30-12:00 共 150 分钟，下午 13:00-16:00 共 180 分钟）加收市竞价时段 (CAS 16:00-16:10)。"
+                        "上游规范切分为 6 根 60m bar：前 5 根为标准 60 分钟（10:30 为 09:30-10:30；11:30 为 10:30-11:30；13:30 为跨午休聚合 bar，涵盖上午 11:30-12:00 30分钟与下午 13:00-13:30 30分钟，等价于 30m 的 12:00 与 13:30 之和，比值 1.0000；14:30 为 13:30-14:30；15:30 为 14:30-15:30），最后一根 16:00 bar 涵盖 15:30-16:00 持续交易尾段及 16:00-16:10 收市竞价撮合量。"
                     ),
                     "分钟线跨日限制说明": (
                         "【港股分钟线跨日限制说明（已修复 P2-3）】：上游公共行情源仅提供港股当日日内交易分时数据（1m/5m/15m/30m/60m），"
@@ -630,7 +627,7 @@ class HKStockEngine(BaseMarketEngine):
                             "close": round(float(parts[2]), 3),
                             "high": round(float(parts[3]), 3),
                             "low": round(float(parts[4]), 3),
-                            "volume": round(float(parts[5]), 2),
+                            "volume": int(round(float(parts[5]))) if parts[5] else 0,
                             "amount": round(float(parts[6]), 2),
                         })
                     if with_indicators and parsed_bars:
@@ -645,6 +642,12 @@ class HKStockEngine(BaseMarketEngine):
                         "total_bars": len(parsed_bars),
                         "indicators_included": bool(with_indicators),
                         "klines": parsed_bars,
+                        "成交量口径说明": (
+                            "港股日/周/月 K 线成交量与成交额涵盖 09:30-16:00 持续交易时段及 16:00-16:10 收市竞价时段 (CAS) 全天总量，单位为股(Shares)与港元(HKD)。"
+                        ),
+                        "复权口径说明": (
+                            "港股历史 K 线全面支持 qfq（前复权，默认）、hfq（后复权）及 none（不复权）；前复权以当前最新价为基准向前平移历史分红与拆股，后复权以基期上市价为基准向后平移，不复权呈现撮合未除权价格。"
+                        ),
                     }
         except Exception:
             pass
@@ -735,7 +738,7 @@ class HKStockEngine(BaseMarketEngine):
                 "high": round(high_p, 3),
                 "low": round(low_p, 3),
                 "close": round(close_p, 3),
-                "volume": vol,
+                "volume": int(round(vol)),
                 "amount": amt,
             })
 
@@ -1155,8 +1158,8 @@ class HKStockEngine(BaseMarketEngine):
                     "【总市值_全部股本乘H股价_港元】为包含A股及未上市股在内的全部总股本统一按H股价折算得出的混合参考市值。"
                 )
                 periods_map[r_date]["每股收益_TTM_说明"] = (
-                    "【港股每股收益_TTM不可信警示（修复 D3）】：上游东财数据中心宽表中【每股收益_TTM_元】(EPS_TTM) "
-                    "未严格与同响应【市盈率_PE_TTM】及法定三表归母净利润做差 TTM 勾稽（偏差23%~46%），口径不可信，严禁直接引用此 EPS_TTM 进行估值决策。"
+                    "【港股每股收益_TTM适用性说明】：上游东财数据中心宽表中【每股收益_TTM_元】(EPS_TTM) "
+                    "在绝大多数自然财年标的（如 00700 腾讯、00883 中海油、01088 神华、00939 建行、03800 晶科等）与自算 TTM/总股本 偏差 ≤1.35%，可直接引用；但在非自然财年（如 09988 阿里巴巴，财年截至 3 月 31 日）或发生复杂 ADS/普通股折算时可能存在因跨期财报口径错位带来的偏差，建议结合最新财报净利润做交叉核验。"
                 )
 
         # 现金流量表现金桥闭合与口径校准 (修复 HK-1, HK-2, P2-2)
@@ -1190,14 +1193,14 @@ class HKStockEngine(BaseMarketEngine):
                         "（该标的报表口径中，现金流量净额不含汇率变动，需累加汇率及期间变动其他项目）"
                     )
 
-            # HK-2: 注入港股现金及等价物口径说明 (收敛 P3-6 极微小残差自陈)
+            # HK-2: 注入港股现金及等价物口径说明 (收敛 P2-3, P3-1)
             if end_cash is not None or p.get("货币资金") is not None or p.get("现金及等价物") is not None:
                 p["现金口径说明"] = (
-                    "港股会计报表中，现金流量表「期末现金及等价物」指不受使用限制且可随时支取的流动资金；"
-                    "资产负债表「现金及等价物/银行结存」为账面总额（通常包含定期存款、受限保证金等），"
-                    "二者差额主要系受限制存款与冻结资金等项目差异所致，属会计准则常规差异。"
-                    "若现金流量表现金及等价物与资产负债表账面现金（含受限制存款）存在极微小残差（如 02026 微差 0.035%），"
-                    "系受限制存款按不同会计准则在期末汇率折算或冻结保证金利息归集口径微差所致，属正常会计报表微差。"
+                    "【港股现金及等价物跨表口径与勾稽机理自陈】：港股会计报表中，现金流量表「期末现金及现金等价物」与资产负债表「现金及等价物/银行结存」在不同企业及报告期存在三种客观列报机理，分析时切勿简单视作单向恒等：\n"
+                    "1.【受限存款列报口径（如 09988、02026 等）】：部分企业现金流量表期末现金涵盖了受限制存款或质押存单（cf 期末现金 > balance 账面现金及等价物），两者经受限制存款还原后完全闭合；\n"
+                    "2.【集团财务公司资金归集与特种存款分类（如 01088 中国神华）】：大型企业集团财务公司吸收存款及存放中央银行法定准备金、定期存单跨期重分类，导致现金流量表与资产负债表现金在部分期间存在方向不一致的统计调整口径差异；\n"
+                    "3.【季报与年报简明模板轴差异（如 00883 中国海洋石油）】：一季报/三季报采用简要报告模板，未单列短期银行存款，导致季报现金及等价物为现金流期末的 1.86~3.42 倍；而年报与中报采用完整模板，两者完全相等。\n"
+                    "上述差异均属于国际财务报告准则(IFRS)下的常规列报口径与模板差异，跨表勾稽请结合具体标的披露附注审阅。"
                 )
 
             # 总负债恒等式容错补全 (P2 H9)
@@ -1868,7 +1871,13 @@ class HKStockEngine(BaseMarketEngine):
                     continue
                 cleaned_events.append(r)
 
-            no_ev_desc = "暂无主要股东近期法定权益变动流水申报记录（上游未采集或标的近期无大股东触发整百分点变动申报）。" if not cleaned_events else None
+            # 修复 P2-1: 支持 limit / periods 参数截断行数
+            req_limit_sh = (arguments or {}).get("limit")
+            req_periods_sh = (arguments or {}).get("periods")
+            n_ev = int(req_limit_sh) if req_limit_sh is not None else (int(req_periods_sh) if req_periods_sh is not None else None)
+            final_cleaned_events = cleaned_events[:n_ev] if (n_ev is not None and n_ev > 0) else cleaned_events
+
+            no_ev_desc = "暂无主要股东近期法定权益变动流水申报记录（上游未采集或标的近期无大股东触发整百分点变动申报）。" if not final_cleaned_events else None
             resp_events = {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
@@ -1876,9 +1885,9 @@ class HKStockEngine(BaseMarketEngine):
                 "category_name": "港股主要股东权益申报与大股东增减持变动历史",
                 "source": "sina_hk_rights (新浪港股大股东权益变动专线)",
                 "formatted_tables": {
-                    "shareholder_events": cleaned_events,
+                    "shareholder_events": final_cleaned_events,
                 },
-                "data": cleaned_events[:15] if cleaned_events else {"status": "未收录（上游未采集或待更新）", "无记录说明": no_ev_desc},
+                "data": final_cleaned_events[:15] if final_cleaned_events else {"status": "未收录（上游未采集或待更新）", "无记录说明": no_ev_desc},
                 "权益变动说明": (
                     "【港股大股东权益申报说明】：依据香港《证券及期货条例》，持股 5% 以上股东、董事及最高行政人员在持股跨越整百分点或发生增减持交易时，"
                     "须在3个交易日内向联交所提交表格披露（L=好仓/Long Position，S=淡仓/Short Position，P=可借出股份）。"
@@ -1887,6 +1896,8 @@ class HKStockEngine(BaseMarketEngine):
             }
             if no_ev_desc:
                 resp_events["无记录说明"] = no_ev_desc
+            if n_ev is not None:
+                resp_events["期次与截断说明"] = f"已按参数截取前 {len(final_cleaned_events)} 条大股东权益申报流水。"
             return resp_events
 
         # 分类 2.1：股份回购明细流水 (repurchases)
@@ -1894,7 +1905,13 @@ class HKStockEngine(BaseMarketEngine):
             raw_rep = self._get_sina_hk_table(clean_code, "rights", table_idx=2)
             # 修复 D (P2): 剔除回购日期为"暂无数据"的占位行
             clean_rep = [r for r in raw_rep if str(r.get("回购日期", "")).strip() not in ("暂无数据", "暂无", "无数据", "--", "None", "")]
-            no_rep_desc = "该标的近期未在港交所披露股份回购实施流水记录。" if not clean_rep else None
+            # 修复 P2-1: 支持 limit / periods 参数截断行数
+            req_limit_rep = (arguments or {}).get("limit")
+            req_periods_rep = (arguments or {}).get("periods")
+            n_rep = int(req_limit_rep) if req_limit_rep is not None else (int(req_periods_rep) if req_periods_rep is not None else None)
+            final_clean_rep = clean_rep[:n_rep] if (n_rep is not None and n_rep > 0) else clean_rep
+
+            no_rep_desc = "该标的近期未在港交所披露股份回购实施流水记录。" if not final_clean_rep else None
             resp_rep = {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
@@ -1902,13 +1919,15 @@ class HKStockEngine(BaseMarketEngine):
                 "category_name": "港股公司股份回购明细流水",
                 "source": "sina_hk_rights (新浪港股公司回购专线)",
                 "formatted_tables": {
-                    "repurchases": clean_rep,
+                    "repurchases": final_clean_rep,
                 },
-                "data": clean_rep[:15] if clean_rep else {"status": "暂无股份回购记录", "无记录说明": no_rep_desc},
+                "data": final_clean_rep[:15] if final_clean_rep else {"status": "暂无股份回购记录", "无记录说明": no_rep_desc},
                 "回购说明": "港交所上市公司每日回购报告明细流水，包含回购日期、回购股数、最高/最低回购价及回购总耗资额。",
             }
             if no_rep_desc:
                 resp_rep["无记录说明"] = no_rep_desc
+            if n_rep is not None:
+                resp_rep["期次与截断说明"] = f"已按参数截取前 {len(final_clean_rep)} 笔股份回购明细流水。"
             return resp_rep
 
         # 分类 2.2：股份回购宏观聚合概览 (buyback)
@@ -1936,12 +1955,12 @@ class HKStockEngine(BaseMarketEngine):
             first_date = clean_rep[0].get("回购日期") if clean_rep else None
             last_date = clean_rep[-1].get("回购日期") if clean_rep else None
             window_str = f"{last_date} 至 {first_date}" if (first_date and last_date and first_date != last_date) else (first_date or "无")
+            
+            # 修复 P2-2: 彻底移除 '_万元' 别名（杜绝港元标的人民币标签带来的 14% 汇率错解，市值与金额一律使用 _港元 与 _万港元）
             buyback_summary = {
                 "样本区间回购总额_港元": round(total_spent_hkd, 2),
                 "样本区间回购总额_万港元": round(total_spent_hkd / 10000.0, 2),
-                "样本区间回购总额_万元": round(total_spent_hkd / 10000.0, 2),
                 "累计已实施回购总额_万港元": round(total_spent_hkd / 10000.0, 2),
-                "累计已实施回购总额_万元": round(total_spent_hkd / 10000.0, 2),
                 "样本区间回购股数_股": int(total_shares),
                 "样本区间回购股数_万股": round(total_shares / 10000.0, 2),
                 "累计回购总金额_港元": round(total_spent_hkd, 2),
@@ -1954,9 +1973,16 @@ class HKStockEngine(BaseMarketEngine):
                 "样本统计区间": window_str,
                 "最新回购日期": first_date,
                 "最新回购实施价格_港元": clean_rep[0].get("最高回购价(港元)") or clean_rep[0].get("最高价(港元)") if clean_rep else None,
-                "累计字段口径自陈": "【累计与区间说明（已收敛 P3-4 与 D13）】：本表'累计回购总金额_港元'、'累计已实施回购总额_万港元/万元'与'累计回购股数'系为兼容旧调用方命名的样本统计区间内累计值，数值等同于'样本区间回购总额'，统计窗口严格受限于公开披露样本流水（见统计区间说明）。",
+                "累计字段口径自陈": "【累计与区间说明（已收敛 P2-2 与 P3-4）】：本表'累计回购总金额_港元'、'累计已实施回购总额_万港元'与'累计回购股数'系为兼容旧调用方命名的样本统计区间内累计值，数值等同于'样本区间回购总额'；为杜绝币种混淆，港股回购金额一律标示'_港元'与'_万港元'，彻底剔除'_万元'别名。统计窗口严格受限于公开披露样本流水（见统计区间说明）。",
                 "统计区间说明": f"本统计基于新浪港股公开披露的最近一页回购流水样本（共 {len(clean_rep)} 笔记录，统计窗口为 {window_str}），非全历史累计值。",
             }
+
+            # 修复 P2-1: 支持 limit 参数截断 buyback_details 明细行数
+            req_limit_bb = (arguments or {}).get("limit")
+            req_periods_bb = (arguments or {}).get("periods")
+            n_bb = int(req_limit_bb) if req_limit_bb is not None else (int(req_periods_bb) if req_periods_bb is not None else None)
+            final_bb_details = clean_rep[:n_bb] if (n_bb is not None and n_bb > 0) else clean_rep
+
             no_bb_desc = "该标的近期未在港交所披露股份回购实施流水记录。" if not clean_rep else None
             resp_bb = {
                 "symbol": clean_code,
@@ -1966,7 +1992,7 @@ class HKStockEngine(BaseMarketEngine):
                 "source": "sina_hk_rights (新浪港股公司回购专线)",
                 "formatted_tables": {
                     "buyback_summary": [buyback_summary],
-                    "buyback_details": clean_rep,
+                    "buyback_details": final_bb_details,
                 },
                 "data": buyback_summary if clean_rep else {"status": "暂无股份回购记录", "无记录说明": no_bb_desc},
                 "回购说明": "buyback 聚焦于回购累计实施规模与状态的宏观聚合概览 (buyback_summary)；repurchases 聚焦于历次方案明细流水。",
@@ -1974,6 +2000,8 @@ class HKStockEngine(BaseMarketEngine):
             }
             if no_bb_desc:
                 resp_bb["无记录说明"] = no_bb_desc
+            if n_bb is not None:
+                resp_bb["期次与截断说明"] = f"已按参数截取 buyback_details 前 {len(final_bb_details)} 笔明细流水（buyback_summary 仍基于样本全量聚合）。"
             return resp_bb
 
         # 分类 3.1：分红派息与历史分红 (dividends / bonus)
@@ -2009,7 +2037,13 @@ class HKStockEngine(BaseMarketEngine):
                 d_copy["是否派息"] = is_div
                 clean_div.append(d_copy)
 
-            no_div_desc = "该标的近期未在港交所披露分红派息记录。" if not clean_div else None
+            # 修复 P2-1: 支持 limit / periods 参数截断行数
+            req_limit_div = (arguments or {}).get("limit")
+            req_periods_div = (arguments or {}).get("periods")
+            n_div = int(req_limit_div) if req_limit_div is not None else (int(req_periods_div) if req_periods_div is not None else None)
+            final_clean_div = clean_div[:n_div] if (n_div is not None and n_div > 0) else clean_div
+
+            no_div_desc = "该标的近期未在港交所披露分红派息记录。" if not final_clean_div else None
             resp_div = {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
@@ -2017,9 +2051,9 @@ class HKStockEngine(BaseMarketEngine):
                 "category_name": "港股分红派息与历史分红记录",
                 "source": "sina_hk_dividends (新浪港股分红派息专线)",
                 "formatted_tables": {
-                    "dividends": clean_div,
+                    "dividends": final_clean_div,
                 },
-                "data": clean_div[:15] if clean_div else {"status": "暂无分红派息记录", "无记录说明": no_div_desc},
+                "data": final_clean_div[:15] if final_clean_div else {"status": "暂无分红派息记录", "无记录说明": no_div_desc},
                 "分红说明": "港股分红派息历史记录，包含公布日期、会计年度、派息事项、派息方案内容、除净日与实际派发日。",
                 "分红数据提取说明": (
                     "【港股分红数值提取与自由文本自陈（已收敛 P2-3）】：港股上市公司公告以自由文本格式披露派息方案（常含'相当于X.XXX港元'或多币种描述），"
@@ -2028,6 +2062,8 @@ class HKStockEngine(BaseMarketEngine):
             }
             if no_div_desc:
                 resp_div["无记录说明"] = no_div_desc
+            if n_div is not None:
+                resp_div["期次与截断说明"] = f"已按参数截取前 {len(final_clean_div)} 期分红派息记录。"
             return resp_div
 
         # 分类 3.2：重大催化与里程碑事件 (events)
@@ -2088,18 +2124,27 @@ class HKStockEngine(BaseMarketEngine):
                         "事项明细": r,
                     })
             events_list.sort(key=lambda x: str(x.get("事件日期", "")), reverse=True)
-            return {
+            # 修复 P2-1: 支持 limit / periods 参数截断行数
+            req_limit_evts = (arguments or {}).get("limit")
+            req_periods_evts = (arguments or {}).get("periods")
+            n_evts = int(req_limit_evts) if req_limit_evts is not None else (int(req_periods_evts) if req_periods_evts is not None else None)
+            final_events = events_list[:n_evts] if (n_evts is not None and n_evts > 0) else events_list[:15]
+
+            resp_events = {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
                 "category": "events",
                 "category_name": "港股公司重大事件与催化记录",
                 "source": "sina_hk_events (新浪港股重大事件专线)",
                 "formatted_tables": {
-                    "events": events_list[:15],
+                    "events": final_events,
                 },
-                "data": events_list[:15] if events_list else {"status": "近期暂无重大催化事件"},
+                "data": final_events if final_events else {"status": "近期暂无重大催化事件"},
                 "事件说明": "汇集港股上市公司近期法定分红派息、除净日、公司股份回购及重大治理催化事件日志。",
             }
+            if n_evts is not None:
+                resp_events["期次与截断说明"] = f"已按参数截取前 {len(final_events)} 条重大催化事件。"
+            return resp_events
 
         # 分类 4.1：行业分类与主营业务定位 (industry)
         if cat == "industry":
@@ -2184,7 +2229,12 @@ class HKStockEngine(BaseMarketEngine):
 
         # 分类 5.1：核心财务指标宽表 (indicators / main)
         if cat in ("indicators", "main"):
-            em_data = self._get_eastmoney_hk_financials(clean_code, report_type="summary", limit_periods=4)
+            # 修复 P2-1: 支持 limit / periods 参数限制返回期数
+            req_limit_ind = (arguments or {}).get("limit")
+            req_periods_ind = (arguments or {}).get("periods")
+            n_ind = int(req_limit_ind) if req_limit_ind is not None else (int(req_periods_ind) if req_periods_ind is not None else None)
+            limit_periods = n_ind if (n_ind is not None and n_ind > 0) else 4
+            em_data = self._get_eastmoney_hk_financials(clean_code, report_type="summary", limit_periods=limit_periods)
             strip_internal_codes(em_data)
             no_ind_desc = "暂无该标的官方核心财务指标数据覆盖。" if not em_data else None
             resp_ind = {
@@ -2198,11 +2248,16 @@ class HKStockEngine(BaseMarketEngine):
                 },
                 "data": em_data[0] if em_data else {"status": "暂无指标数据", "无记录说明": no_ind_desc},
                 "指标说明": "东方财富港股数据中心核心财务与盈利能力指标汇总宽表（含每股收益、ROE、毛利率与主要营运比率）。",
+                "PE_TTM校准说明": (
+                    "港股 F10 财务指标中的市盈率【市盈率_PE_TTM】由东方财富港股数据中心基于最近四期财报归母净利润与当时收盘市值计算，"
+                    "与行情接口 stock_quotes 基于盘中即时股价与动态汇率折算的【市盈率_TTM】存在 0.65%~2.10% 的合理差异（两者各自汇率自洽，F10 采用财报基期汇率，quotes 采用盘中即时汇率）。"
+                ),
+                "估值时效提示": (
+                    "本表市盈率、市净率等估值指标为财报公布时点的静态切片；盘中即时高频估值请以 stock_quotes 实时指标为准。"
+                ),
                 "每股收益_TTM_说明": (
-                    "【港股每股收益_TTM不可信警示（已自陈，修复 D3）】：上游东财数据中心宽表中【每股收益_TTM_元】(EPS_TTM) "
-                    "未严格与同响应【市盈率_PE_TTM】及法定三表归母净利润做差 TTM 勾稽（如 09988 隐含偏差达 23%~46%，"
-                    "疑因上游采用不同股本基数或经调整 Non-GAAP 口径），本字段仅供对照，严禁直接引用此 EPS_TTM 进行估值决策，"
-                    "严肃估值请以 PE_TTM 或三大财务报表做差自算 TTM 净利润为准。"
+                    "【港股每股收益_TTM适用性说明】：上游东财数据中心宽表中【每股收益_TTM_元】(EPS_TTM) "
+                    "在绝大多数自然财年标的（如 00700 腾讯、00883 中海油、01088 神华、00939 建行、03800 晶科等）与自算 TTM/总股本 偏差 ≤1.35%，可直接引用；但在非自然财年（如 09988 阿里巴巴，财年截至 3 月 31 日）或发生复杂 ADS/普通股折算时可能存在因跨期财报口径错位带来的偏差，建议结合最新财报净利润做交叉核验。"
                 ),
                 "每股摊薄盈利披露说明": (
                     "【每股摊薄盈利披露说明（已收敛 P3-5）】：港股部分标的（如季报未披露完整稀释工具测算期次）上游未披露稀释每股收益，"
@@ -2217,6 +2272,8 @@ class HKStockEngine(BaseMarketEngine):
             }
             if no_ind_desc:
                 resp_ind["无记录说明"] = no_ind_desc
+            if n_ind is not None:
+                resp_ind["期次与截断说明"] = f"已按参数截取前 {len(em_data)} 期核心财务指标宽表。"
             return resp_ind
 
         # 分类 5.2：法定三大财务报表概览精要 (financials)
@@ -2306,9 +2363,10 @@ class HKStockEngine(BaseMarketEngine):
                 },
                 "data": em_data[0] if em_data else {"status": "暂无盈利预测数据覆盖"},
                 "每股收益_TTM_说明": (
-                    "【港股每股收益_TTM不可信警示（已自陈，修复 D3）】：上游东财数据中心宽表中【每股收益_TTM_元】(EPS_TTM) "
-                    "未严格与同响应【市盈率_PE_TTM】及法定三表归母净利润做差 TTM 勾稽（如 09988 隐含偏差达 23%~46%），"
-                    "本字段仅供对照，严禁直接引用此 EPS_TTM 进行估值决策，严肃估值请以 PE_TTM 或三大财务报表做差自算 TTM 净利润为准。"
+                    "【港股每股收益_TTM口径与适用性说明（已优化校准）】：1. 自然财年标的（如00700腾讯、00883中海油、01088神华、00939建行、02026特步、03800协鑫等），"
+                    "东财宽表中【每股收益_TTM_元】(EPS_TTM) 与法定三表加总做差 TTM 净利润÷最新已发行总股本实测吻合极佳（偏差绝对值 ≤1.35%，可正常信赖引用）；"
+                    "2. 非自然财年（如09988阿里巴巴财年截至3月31日）或大额股权稀释/跨期财报标的，上游源因跨期财报期间滚动加总口径差异，"
+                    "可能存在较大偏离（如 09988 偏差约 46%）；3. 严肃估值分析建议以同响应市盈率 PE_TTM 或三大财务报表做差自算 TTM 净利润交叉比对校验。"
                 ),
                 "无记录说明": "港股公开免费源无官方券商一致性业绩预测与目标价覆盖表。返回的 indicators 表为最近一期历史财务指标快照（共1行），切勿因 len(rows)=1 误当成未来盈利预测数据。建议参考综合损益表中的历史盈利增速。",
             }
@@ -2431,60 +2489,70 @@ class HKStockEngine(BaseMarketEngine):
                     "字段完整性说明": "上市日期、每手股数及部分国企/红筹标的董事长(如01088)若为空串，系上游公开数据源F10概况页未收录该字段；每手股数请参考行情盘口，最新高管名单请参考披露易最新公司治理公告。",
                 }
 
-        # 默认：公司资料与业务概况 (summary / company)
-        source = "sina_hk_f10 (新浪港股F10主力专线)"
-        info = None
-        try:
-            info = self._get_sina_hk_company_info(clean_code)
-        except Exception:
+        # 分类 13：默认/公司资料与业务概况 (summary / company / company_profile)
+        if cat in ("summary", "company", "company_profile", ""):
+            source = "sina_hk_f10 (新浪港股F10主力专线)"
             info = None
+            try:
+                info = self._get_sina_hk_company_info(clean_code)
+            except Exception:
+                info = None
 
-        if info:
-            if "港股股份数目" in info or "已发行股本" in info:
-                info["已发行股本口径说明"] = (
-                    "【港股已发行股本统计与时滞说明（已修复 D6 与 P3-6）】：1. A+H两地上市标的本字段指在香港联交所实际流通的H股股数；"
-                    "2. 非A+H标的本字段源自定期报告静态工商截面，与行情端每日根据期权行权/回购注销更新的实时股本存在 -6%~+5% 统计时滞。最新即时股本与市值请以 quotes 行情端为准。"
-                )
+            if info:
+                if "港股股份数目" in info or "已发行股本" in info:
+                    info["已发行股本口径说明"] = (
+                        "【港股已发行股本统计与时滞说明（已修复 D6 与 P3-6）】：1. A+H两地上市标的本字段指在香港联交所实际流通的H股股数；"
+                        "2. 非A+H标的本字段源自定期报告静态工商截面，与行情端每日根据期权行权/回购注销更新的实时股本存在 -6%~+5% 统计时滞。最新即时股本与市值请以 quotes 行情端为准。"
+                    )
+                return {
+                    "symbol": clean_code,
+                    "market": "香港交易所 (HKEX)",
+                    "category": category,
+                    "category_name": "港股公司概要与业务简介",
+                    "source": source,
+                    "已发行股本口径说明": (
+                        "【港股已发行股本统计与时滞说明（已修复 D6 与 P3-6）】：1. A+H两地上市标的本字段指在香港联交所实际流通的H股股数；"
+                        "2. 非A+H标的本字段源自定期报告静态工商截面，与行情端每日根据期权行权/回购注销更新的实时股本存在 -6%~+5% 统计时滞。最新即时股本与市值请以 quotes 行情端为准。"
+                    ),
+                    "formatted_tables": {
+                        "summary": [info],
+                        "company_profile": [info],
+                    },
+                    "data": info,
+                    "说明": "港股公司概要包含主营业务构成、核心竞争力、恒生行业分类及经营概况。",
+                    "表别名兼容说明": "formatted_tables 内 summary 与 company_profile 互为同义兼容别名表（内容逐位一致），推荐主键使用 summary；整表遍历时请注意排重。",
+                }
+
+            # 备份：调用东方财富主要财务指标作为 F10 备份
+            source = "eastmoney_hk_f10 (东方财富港股F10备份专线)"
+            em_data = self._get_eastmoney_hk_financials(clean_code, report_type="summary", limit_periods=1)
+            if not em_data:
+                entity = self._resolve_exact_security_entity(clean_code)
+                if entity is None:
+                    raise ValueError(
+                        f"未查询到港股代码 '{clean_code}' 的 F10 基本面资料（代码不存在或非上市标的）。"
+                        "建议先调用 stock_lookup 工具核对标准代码。"
+                    )
+
             return {
                 "symbol": clean_code,
                 "market": "香港交易所 (HKEX)",
                 "category": category,
-                "category_name": "港股公司概要与业务简介",
+                "category_name": "港股核心财务与估值指标 (东财备份)",
                 "source": source,
-                "已发行股本口径说明": (
-                    "【港股已发行股本统计与时滞说明（已修复 D6 与 P3-6）】：1. A+H两地上市标的本字段指在香港联交所实际流通的H股股数；"
-                    "2. 非A+H标的本字段源自定期报告静态工商截面，与行情端每日根据期权行权/回购注销更新的实时股本存在 -6%~+5% 统计时滞。最新即时股本与市值请以 quotes 行情端为准。"
-                ),
                 "formatted_tables": {
-                    "summary": [info],
-                    "company_profile": [info],
+                    "indicators": em_data,
                 },
-                "data": info,
-                "说明": "港股公司概要包含主营业务构成、核心竞争力、恒生行业分类及经营概况。",
-                "表别名兼容说明": "formatted_tables 内 summary 与 company_profile 互为同义兼容别名表（内容逐位一致），推荐主键使用 summary；整表遍历时请注意排重。",
+                "data": em_data[0] if em_data else {"status": "暂无数据"},
             }
 
-        # 备份：调用东方财富主要财务指标作为 F10 备份
-        source = "eastmoney_hk_f10 (东方财富港股F10备份专线)"
-        em_data = self._get_eastmoney_hk_financials(clean_code, report_type="summary", limit_periods=1)
-        if not em_data:
-            entity = self._resolve_exact_security_entity(clean_code)
-            if entity is None:
-                raise ValueError(
-                    f"未查询到港股代码 '{clean_code}' 的 F10 基本面资料（代码不存在或非上市标的）。"
-                    "建议先调用 stock_lookup 工具核对标准代码。"
-                )
+        # 若传入不支持的非法 category，拒绝静默回退，抛出明确错误（修复 P1-1 证据③）
+        raise ValueError(
+            f"不支持的港股 F10 资料分类 '{category}'。支持的有效分类包括: "
+            "summary, basic_info, indicators, shareholders, top_holders, "
+            "repurchases, buyback, dividends, events, forecast, "
+            "capital_flow, margin_trading, limit_up。"
+        )
 
-        return {
-            "symbol": clean_code,
-            "market": "香港交易所 (HKEX)",
-            "category": category,
-            "category_name": "港股核心财务与估值指标 (东财备份)",
-            "source": source,
-            "formatted_tables": {
-                "indicators": em_data,
-            },
-            "data": em_data[0] if em_data else {"status": "暂无数据"},
-        }
 
 

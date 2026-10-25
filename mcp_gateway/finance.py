@@ -934,6 +934,9 @@ class FinanceGateway:
         """工具 1：实体代码/名称 AI RAG 语义检索"""
         query = arguments.get("query", "").strip()
         market_range = arguments.get("range") or arguments.get("market_range") or "AG"
+        valid_ranges = {"AG", "HK-GP", "HK-JJ", "JJ", "MG-GP", "ZS", "A", "HK"}
+        if market_range not in valid_ranges:
+            raise ValueError(f"无效的检索市场范围 '{market_range}'。支持的范围为: ['AG', 'HK-GP', 'HK-JJ', 'JJ', 'MG-GP', 'ZS']")
         if not query:
             raise ValueError("query 不能为空，请输入股票简称或代码（如'贵州茅台'、'腾讯'）")
         entities = self.tdx_client.lookup_stock(query=query, market_range=market_range)
@@ -1008,9 +1011,22 @@ class FinanceGateway:
         symbol = arguments.get("symbol", "").strip()
         if not symbol:
             raise ValueError("symbol 不能为空")
-        period = arguments.get("period", "day")
+        
+        # 严格校验 K 线周期枚举 (修复 P1-1)
+        valid_periods = {"day", "week", "month", "60m", "30m", "15m", "5m", "1m"}
+        period_alias = {"daily": "day", "weekly": "week", "monthly": "month"}
+        period_raw = str(arguments.get("period", "day")).lower().strip()
+        period = period_alias.get(period_raw, period_raw)
+        if period not in valid_periods:
+            raise ValueError(f"无效的 K 线周期 '{arguments.get('period')}'。支持的周期为: ['day', 'week', 'month', '60m', '30m', '15m', '5m', '1m']")
+
+        # 严格校验复权方式枚举 (修复 P1-1)
+        valid_adjusts = {"qfq", "hfq", "none"}
+        adjust = str(arguments.get("adjust", "qfq")).lower().strip()
+        if adjust not in valid_adjusts:
+            raise ValueError(f"无效的复权方式 '{arguments.get('adjust')}'。支持的复权方式为: ['qfq', 'hfq', 'none']")
+
         count = int(arguments.get("count", 30))
-        adjust = arguments.get("adjust", "qfq")
         setcode = arguments.get("setcode")
         with_indicators = bool(arguments.get("with_indicators", True))
         return self.tdx_client.get_kline(
@@ -1028,8 +1044,25 @@ class FinanceGateway:
         symbol = arguments.get("symbol", "").strip()
         if not symbol:
             raise ValueError("symbol 不能为空")
-        report_type = arguments.get("report_type") or arguments.get("statement_type", "balance")
-        period_type = arguments.get("period_type", "report")
+
+        # 严格校验财报类型枚举 (修复 P1-1)
+        valid_report_types = {"balance", "income", "cashflow"}
+        report_aliases = {
+            "balance_sheet": "balance", "zcfzb": "balance", "资产负债表": "balance",
+            "income_statement": "income", "lrb": "income", "lyb": "income", "利润表": "income", "损益表": "income",
+            "cashflow_statement": "cashflow", "cash_flow": "cashflow", "cash_flow_statement": "cashflow", "cash": "cashflow", "xjllb": "cashflow", "现金流量表": "cashflow",
+        }
+        raw_type = str(arguments.get("report_type") or arguments.get("statement_type", "balance")).lower().strip()
+        report_type = report_aliases.get(raw_type, raw_type)
+        if report_type not in valid_report_types:
+            raise ValueError(f"无效的财务报表类型 '{arguments.get('report_type') or arguments.get('statement_type')}'。支持的报表类型为: ['balance', 'income', 'cashflow']")
+
+        # 严格校验报告期口径枚举 (修复 P1-1)
+        valid_period_types = {"report", "quarter"}
+        period_type = str(arguments.get("period_type", "report")).lower().strip()
+        if period_type not in valid_period_types:
+            raise ValueError(f"无效的报告期口径 '{arguments.get('period_type')}'。支持的口径为: ['report', 'quarter']")
+
         limit_periods = int(arguments.get("limit_periods", 4))
         return self.tdx_client.get_financial_statements(
             symbol=symbol,
@@ -1046,7 +1079,15 @@ class FinanceGateway:
             raise ValueError("symbol 不能为空")
         clean_code = re.sub(r"[^\d]", "", symbol)
         category = arguments.get("category", "concepts")
-        cat_lower = category.lower().strip()
+        cat_lower = str(category).lower().strip()
+        
+        # 严格校验 F10 分类枚举与别名映射 (修复 P1-1)
+        valid_categories = {
+            "concepts", "industry", "events", "dividends", "forecast",
+            "shareholders", "top_holders", "repurchases", "buyback",
+            "margin_trading", "capital_flow", "limit_up", "lhb",
+            "unlocks", "summary", "basic_info", "indicators", "financials",
+        }
         category_alias_map = {
             "sector": "industry",
             "dividends": "dividends",
@@ -1056,13 +1097,26 @@ class FinanceGateway:
             "repurchases": "repurchases",
             "indicators": "indicators",
             "financials": "financials",
+            "holders": "top_holders",
+            "shareholder_events": "shareholders",
+            "main": "indicators",
+            "funds": "capital_flow",
+            "moneyflow": "capital_flow",
+            "rzrq": "margin_trading",
+            "margin": "margin_trading",
+            "ztb": "limit_up",
+            "price_limit": "limit_up",
+            "company": "summary",
+            "company_profile": "summary",
         }
         norm_cat = category_alias_map.get(cat_lower, cat_lower)
+        if norm_cat not in valid_categories:
+            raise ValueError(f"无效的 F10 基本面分类 '{category}'。支持的分类为: ['concepts', 'industry', 'events', 'dividends', 'forecast', 'shareholders', 'top_holders', 'repurchases', 'buyback', 'margin_trading', 'capital_flow', 'limit_up', 'lhb', 'unlocks', 'summary', 'basic_info', 'indicators', 'financials']")
 
         # 港股标的（5位代码）：启用新浪港股F10主力专线与东方财富高可用备份专线 (透传 arguments 支持 periods/limit)
         if infer_market_setcode(symbol) == "31" or len(clean_code) == 5:
             norm_code = clean_code.zfill(5)
-            return self.tdx_client._get_hk_f10(norm_code, category=cat_lower, arguments=arguments)
+            return self.tdx_client._get_hk_f10(norm_code, category=norm_cat, arguments=arguments)
 
         # =========================================================================
         # 【功能块 8.1：A股全分类统一前置有效代码拦截守卫 (修复 P1-1 契约分裂)】

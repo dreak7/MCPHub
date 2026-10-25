@@ -14,6 +14,7 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 # 内部计算用裸码与临时字段黑名单集合（一律在交付前物理弹出清洗）
+# 依据 D5 与 P2-2 契约，内部裸码 DATE_TYPE_CODE 在交付层物理清洗，对外统一使用标准中文字段【报告期标签】/【单期标签】
 INTERNAL_CODE_BLACKLIST: Set[str] = {
     "DATE_TYPE_CODE",
     "_DATE_TYPE_CODE",
