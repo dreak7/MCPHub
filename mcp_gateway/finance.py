@@ -1113,10 +1113,30 @@ class FinanceGateway:
         if norm_cat not in valid_categories:
             raise ValueError(f"无效的 F10 基本面分类 '{category}'。支持的分类为: ['concepts', 'industry', 'events', 'dividends', 'forecast', 'shareholders', 'top_holders', 'repurchases', 'buyback', 'margin_trading', 'capital_flow', 'limit_up', 'lhb', 'unlocks', 'summary', 'basic_info', 'indicators', 'financials']")
 
+        # 修复 P2-1: 通用 limit 截断器（支持对所有单表返回行数限制参数全局生效）
+        def _apply_limit_post(res_dict: dict[str, Any]) -> dict[str, Any]:
+            req_lim = arguments.get("limit")
+            if req_lim is not None:
+                try:
+                    n_lim = int(req_lim)
+                    if n_lim > 0:
+                        tbls = res_dict.get("formatted_tables")
+                        if isinstance(tbls, dict):
+                            for k, v in tbls.items():
+                                if isinstance(v, list) and len(v) > n_lim:
+                                    tbls[k] = v[:n_lim]
+                        if isinstance(res_dict.get("data"), list) and len(res_dict["data"]) > n_lim:
+                            res_dict["data"] = res_dict["data"][:n_lim]
+                        if "期次与截断说明" not in res_dict:
+                            res_dict["期次与截断说明"] = f"已按参数 limit={n_lim} 截取单表前 {n_lim} 条记录。"
+                except (ValueError, TypeError):
+                    pass
+            return res_dict
+
         # 港股标的（5位代码）：启用新浪港股F10主力专线与东方财富高可用备份专线 (透传 arguments 支持 periods/limit)
         if infer_market_setcode(symbol) == "31" or len(clean_code) == 5:
             norm_code = clean_code.zfill(5)
-            return self.tdx_client._get_hk_f10(norm_code, category=norm_cat, arguments=arguments)
+            return _apply_limit_post(self.tdx_client._get_hk_f10(norm_code, category=norm_cat, arguments=arguments))
 
         # =========================================================================
         # 【功能块 8.1：A股全分类统一前置有效代码拦截守卫 (修复 P1-1 契约分裂)】
@@ -1174,7 +1194,7 @@ class FinanceGateway:
                 "申万二级行业": sw_ind_2 or "未知",
                 "主营业务简述": main_biz or "暂无主营简述",
             }
-            return {
+            return _apply_limit_post({
                 "symbol": clean_code,
                 "category": "industry",
                 "category_name": "官方行业分类 (证监会行业与申万行业)",
@@ -1184,7 +1204,7 @@ class FinanceGateway:
                 },
                 "data": ind_record,
                 "行业说明": "A股上市公司所属中国证监会官方门类大类行业与申万一、二级细分行业分类。",
-            }
+            })
 
         # =========================================================================
         # 【功能块 8.3：A股权威龙虎榜异动与席位明细专线 (修复 A (P1) 双层嵌套与假否定句)】
@@ -1219,7 +1239,7 @@ class FinanceGateway:
             }
             if not has_records:
                 res_obj["无记录说明"] = f"标的 {symbol} 近期无公开披露的龙虎榜异动登榜记录（低波动或未触发交易所异动披露机制）。"
-            return res_obj
+            return _apply_limit_post(res_obj)
 
         # =========================================================================
         # 【功能块 8.4：A股股份回购方案与实施明细专线 (修复 P2-7 与 P2-3)】
@@ -1299,12 +1319,12 @@ class FinanceGateway:
                 res_obj["参数说明"] = "buyback 聚焦于回购累计实施规模与状态的高维聚合概览 (buyback_summary)；repurchases 聚焦于历次方案明细流水。"
             if not has_records:
                 res_obj["无记录说明"] = f"标的 {symbol} 近期无公开披露的股份回购方案或实施记录。"
-            return res_obj
+            return _apply_limit_post(res_obj)
 
         # A 股标的：若请求 dividends/bonus，路由至真实分红派息专线 (修复 Issue 4)
         if norm_cat == "dividends":
             div_rows = self.tdx_client._get_ashare_dividends(clean_code)
-            return {
+            return _apply_limit_post({
                 "symbol": clean_code,
                 "category": "dividends",
                 "category_name": "A股历年分红派息与送转明细",
@@ -1314,7 +1334,7 @@ class FinanceGateway:
                 },
                 "data": div_rows if div_rows else {"status": "暂无分红派息记录"},
                 "分红说明": "A股历年权益分派方案、派息送股及除权除息日明细。",
-            }
+            })
 
         # 1. 首先尝试通达信官方专线获取（优先官方授权渠道）
         try:
@@ -1884,7 +1904,7 @@ class FinanceGateway:
                         tdx_res["data"]["无记录说明"] = tdx_res["无记录说明"]
                     if tdx_res.get("业务构成说明") and "业务构成说明" not in tdx_res["data"]:
                         tdx_res["data"]["业务构成说明"] = tdx_res["业务构成说明"]
-                return tdx_res
+                return _apply_limit_post(tdx_res)
         except ValueError:
             raise
         except Exception:
@@ -1934,7 +1954,7 @@ class FinanceGateway:
         if isinstance(fallback_res.get("data"), dict):
             if fallback_res.get("无记录说明") and "无记录说明" not in fallback_res["data"]:
                 fallback_res["data"]["无记录说明"] = fallback_res["无记录说明"]
-        return fallback_res
+        return _apply_limit_post(fallback_res)
 
     # =========================================================================
     # 【功能块 8.5：F10 摘要表业务增强与防幻觉校准处理器】

@@ -3628,6 +3628,75 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
             vol_m = m60_rows[0].get("volume") if "volume" in m60_rows[0] else m60_rows[0].get("成交量")
             self.assertIsInstance(vol_m, int)
 
+    # =========================================================================
+    # 【功能块 测试集：A股实测缺陷 (P1-1, P2-1, P2-2, P4-1) 综合回归验证】
+    # - 输入：网关调用 stock_kline, stock_financials, stock_f10, stock_quotes
+    # - 功能：
+    #   1. 验证 P1-1: A 股与港股 stock_kline 拒绝非法周期 period='year'，抛出 ValueError
+    #   2. 验证 P1-1: 港股 stock_financials 拒绝非法报表类型 report_type='invalid_type'，抛出 ValueError
+    #   3. 验证 P1-1: 港股 stock_f10 拒绝非法分类 category='not_a_category'，抛出 ValueError
+    #   4. 验证 P2-1: A 股 600519 stock_f10 repurchases limit=1 截断生效（<=1行）
+    #   5. 验证 P2-1: A 股 600519 stock_f10 dividends limit=3 截断生效（<=3行）
+    #   6. 验证 P2-1: A 股 600519 stock_f10 events limit=2 截断生效（<=2行）
+    #   7. 验证 P2-1: 港股 00700 stock_f10 repurchases limit=5 截断生效（<=5行）
+    #   8. 验证 P2-2: 002594 比亚迪 BPS 漏项导致 PB 偏离时，说明包含 BPS口径偏差与重算警示，绝无'无需换期重算'
+    #   9. 验证 P4-1: A 股日 K 线 volume 严格规整为整型 (int)
+    # - 输出：全部断言通过，无任何回归故障
+    # =========================================================================
+    def test_a_share_p1_p2_p4_comprehensive_fixes(self):
+        """全面验证 A 股与港股 P1-1 非法枚举严格校验、P2-1 全分类 limit 截断生效、P2-2 比亚迪 PB 偏离警示与 P4-1 日K volume 整型化"""
+        # 1. 验证 P1-1: A 股与港股 stock_kline 非法 period 严格拒绝
+        with self.assertRaises(ValueError):
+            self.gw.stock_kline({"symbol": "600519", "period": "year"})
+        with self.assertRaises(ValueError):
+            self.gw.stock_kline({"symbol": "00700", "period": "year"})
+
+        # 2. 验证 P1-1: 港股 stock_financials 非法 report_type 严格拒绝
+        with self.assertRaises(ValueError):
+            self.gw.stock_financials({"symbol": "00700", "report_type": "invalid_type"})
+
+        # 3. 验证 P1-1: 港股 stock_f10 非法 category 严格拒绝
+        with self.assertRaises(ValueError):
+            self.gw.stock_f10({"symbol": "00700", "category": "not_a_category"})
+
+        # 4. 验证 P2-1: A 股 600519 各表 limit 截断生效
+        # 4.1 repurchases limit=1
+        f10_rep = self.gw.stock_f10({"symbol": "600519", "category": "repurchases", "limit": 1})
+        rep_rows = f10_rep.get("formatted_tables", {}).get("repurchases", [])
+        self.assertLessEqual(len(rep_rows), 1)
+        self.assertIn("期次与截断说明", f10_rep)
+
+        # 4.2 dividends limit=3
+        f10_div = self.gw.stock_f10({"symbol": "600519", "category": "dividends", "limit": 3})
+        div_rows = f10_div.get("formatted_tables", {}).get("dividends", [])
+        self.assertLessEqual(len(div_rows), 3)
+        self.assertIn("期次与截断说明", f10_div)
+
+        # 4.3 events limit=2
+        f10_events = self.gw.stock_f10({"symbol": "600519", "category": "events", "limit": 2})
+        events_rows = f10_events.get("formatted_tables", {}).get("table0", [])
+        self.assertLessEqual(len(events_rows), 2)
+        self.assertIn("期次与截断说明", f10_events)
+
+        # 5. 验证 P2-1: 港股 00700 repurchases limit=5 截断生效
+        f10_hk_rep = self.gw.stock_f10({"symbol": "00700", "category": "repurchases", "limit": 5})
+        hk_rep_rows = f10_hk_rep.get("formatted_tables", {}).get("repurchases", [])
+        self.assertLessEqual(len(hk_rep_rows), 5)
+        self.assertIn("期次与截断说明", f10_hk_rep)
+
+        # 6. 验证 P2-2: 002594 比亚迪 BPS 漏项导致 PB 偏离时，说明包含 BPS口径偏差与重算警示，绝无'无需换期重算'
+        res_byd = self.gw.stock_quotes({"symbol": "002594"})
+        byd_ext = res_byd.get("估值与基本盘面", {})
+        byd_note = byd_ext.get("派生指标换期说明", "")
+        self.assertNotIn("无需换期重算", byd_note)
+        self.assertIn("市净率_PB_自算_普通股", byd_note)
+
+        # 7. 验证 P4-1: A 股日 K 线 volume 严格规整为整型 (int)
+        kline_a = self.gw.stock_kline({"symbol": "600519", "period": "day", "count": 2})
+        bars = kline_a.get("klines", [])
+        self.assertTrue(len(bars) > 0)
+        self.assertIsInstance(bars[0]["volume"], int)
+
 
 if __name__ == "__main__":
     unittest.main()

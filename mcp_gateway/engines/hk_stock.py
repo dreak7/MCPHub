@@ -99,11 +99,25 @@ class HKStockEngine(BaseMarketEngine):
         clean_code = re.sub(r"[^\d]", "", symbol)
         if not clean_code:
             raise ValueError(f"无效的证券代码 '{symbol}'，港股标的代码必须包含有效数字编号（如 '00700'）。")
+
+        # 严格校验 K 线周期枚举与复权方式 (修复 P1-1: 港股拒绝非法周期静默映射为日线)
+        valid_periods = {"day", "week", "month", "60m", "30m", "15m", "5m", "1m"}
+        period_alias = {"daily": "day", "weekly": "week", "monthly": "month"}
+        period_raw = str(period).lower().strip()
+        norm_period = period_alias.get(period_raw, period_raw)
+        if norm_period not in valid_periods:
+            raise ValueError(f"无效的 K 线周期 '{period}'。支持的周期为: ['day', 'week', 'month', '60m', '30m', '15m', '5m', '1m']")
+
+        valid_adjusts = {"qfq", "hfq", "none"}
+        adjust_raw = str(adjust).lower().strip()
+        if adjust_raw not in valid_adjusts:
+            raise ValueError(f"无效的复权方式 '{adjust}'。支持的复权方式为: ['qfq', 'hfq', 'none']")
+
         return self._get_hk_kline(
             clean_code,
-            period=period,
+            period=norm_period,
             count=count,
-            adjust=adjust,
+            adjust=adjust_raw,
             with_indicators=with_indicators,
         )
 
@@ -116,17 +130,54 @@ class HKStockEngine(BaseMarketEngine):
     ) -> dict[str, Any]:
         """获取港股三大财务报表 (东财主力 + 新浪备份)"""
         clean_code = re.sub(r"[^\d]", "", symbol).zfill(5)
+
+        # 严格校验财报类型枚举 (修复 P1-1: 港股拒绝非法财报类型静默映射为资产负债表)
+        valid_report_types = {"balance", "income", "cashflow"}
+        report_aliases = {
+            "balance_sheet": "balance", "zcfzb": "balance", "资产负债表": "balance",
+            "income_statement": "income", "lrb": "income", "lyb": "income", "利润表": "income", "损益表": "income",
+            "cashflow_statement": "cashflow", "cash_flow": "cashflow", "cash_flow_statement": "cashflow", "cash": "cashflow", "xjllb": "cashflow", "现金流量表": "cashflow",
+        }
+        raw_type = str(report_type).lower().strip()
+        norm_type = report_aliases.get(raw_type, raw_type)
+        if norm_type not in valid_report_types:
+            raise ValueError(f"无效的财务报表类型 '{report_type}'。支持的报表类型为: ['balance', 'income', 'cashflow']")
+
+        valid_period_types = {"report", "quarter"}
+        period_type_raw = str(period_type).lower().strip()
+        if period_type_raw not in valid_period_types:
+            raise ValueError(f"无效的报告期口径 '{period_type}'。支持的口径为: ['report', 'quarter']")
+
         return self._get_hk_financials(
             clean_code,
-            report_type=report_type,
-            period_type=period_type,
+            report_type=norm_type,
+            period_type=period_type_raw,
             limit_periods=limit_periods,
         )
 
     def get_f10(self, symbol: str, category: str = "summary", arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         """获取港股 F10 深度基本面"""
         clean_code = re.sub(r"[^\d]", "", symbol).zfill(5)
-        return self._get_hk_f10(clean_code, category=category, arguments=arguments)
+        res = self._get_hk_f10(clean_code, category=category, arguments=arguments)
+
+        # 统一全局拦截：当传入 limit 且返回中包含 formatted_tables 时，严格按单表返回行数限制截断各子表 (修复 P2-1)
+        req_limit = (arguments or {}).get("limit")
+        if req_limit is not None:
+            try:
+                n_lim = int(req_limit)
+                if n_lim > 0:
+                    tbls = res.get("formatted_tables")
+                    if isinstance(tbls, dict):
+                        for k, v in tbls.items():
+                            if isinstance(v, list) and len(v) > n_lim:
+                                tbls[k] = v[:n_lim]
+                    if isinstance(res.get("data"), list) and len(res["data"]) > n_lim:
+                        res["data"] = res["data"][:n_lim]
+                    if "期次与截断说明" not in res:
+                        res["期次与截断说明"] = f"已按参数 limit={n_lim} 截取单表前 {n_lim} 条记录。"
+            except (ValueError, TypeError):
+                pass
+        return res
 
     # =========================================================================
     # 【功能块：腾讯免费公开港股实时行情获取与格式标准化】
@@ -374,8 +425,19 @@ class HKStockEngine(BaseMarketEngine):
     ) -> dict[str, Any]:
         norm_code = clean_code.zfill(5)
         limit_cnt = max(1, min(int(count), 500))
-        p_lower = period.lower()
-        adj_lower = adjust.lower()
+
+        # 严格校验 K 线周期枚举与复权方式 (修复 P1-1: 港股拒绝非法周期静默映射为日线)
+        valid_periods = {"day", "week", "month", "60m", "30m", "15m", "5m", "1m"}
+        period_alias = {"daily": "day", "weekly": "week", "monthly": "month"}
+        period_raw = str(period).lower().strip()
+        p_lower = period_alias.get(period_raw, period_raw)
+        if p_lower not in valid_periods:
+            raise ValueError(f"无效的 K 线周期 '{period}'。支持的周期为: ['day', 'week', 'month', '60m', '30m', '15m', '5m', '1m']")
+
+        valid_adjusts = {"qfq", "hfq", "none"}
+        adj_lower = str(adjust).lower().strip()
+        if adj_lower not in valid_adjusts:
+            raise ValueError(f"无效的复权方式 '{adjust}'。支持的复权方式为: ['qfq', 'hfq', 'none']")
 
         # ---------------------------------------------------------------------
         # 1. 港股日内分钟线切片聚合 (1m / 5m / 15m / 30m / 60m)
@@ -597,8 +659,8 @@ class HKStockEngine(BaseMarketEngine):
         # ---------------------------------------------------------------------
         klt_map = {"day": 101, "week": 102, "month": 103}
         fqt_map = {"none": 0, "qfq": 1, "hfq": 2}
-        klt = klt_map.get(p_lower, 101)
-        fqt = fqt_map.get(adj_lower, 1)
+        klt = klt_map[p_lower]
+        fqt = fqt_map[adj_lower]
         # 预热缓冲区机制：请求时多拉取 200 根历史 K 线消除初值截断漂移 (解决 P1-2)
         warmup_cnt = min(320, limit_cnt + 200) if with_indicators else limit_cnt
 
@@ -759,8 +821,8 @@ class HKStockEngine(BaseMarketEngine):
             "symbol": norm_code,
             "name": name,
             "setcode": "31",
-            "period": period,
-            "adjust": adjust,
+            "period": p_lower,
+            "adjust": adj_lower,
             "total_bars": len(parsed_bars),
             "indicators_included": bool(with_indicators),
             "klines": parsed_bars,
@@ -928,7 +990,10 @@ class HKStockEngine(BaseMarketEngine):
             "main": "RPT_HKF10_FN_MAININDICATOR",
             "indicator": "RPT_HKF10_FN_MAININDICATOR",
         }
-        rep_name = rep_map.get(report_type.lower(), "RPT_HKF10_FN_BALANCE")
+        rep_type_lower = report_type.lower().strip()
+        if rep_type_lower not in rep_map:
+            raise ValueError(f"无效的财务报表类型 '{report_type}'。支持的报表类型为: ['balance', 'income', 'cashflow']")
+        rep_name = rep_map[rep_type_lower]
         base_url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
         page_size = max(500, limit_periods * 120)
         params = {

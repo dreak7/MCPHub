@@ -803,6 +803,23 @@ class AStockEngine(BaseMarketEngine):
                         mapped_ext["普通股每股净资产_BPS_自算"] = calc_bps_common
                         mapped_ext["普通股归母权益_元"] = ptg_qy
 
+            # 修复 P2-2: 002594 (比亚迪) 等标的 BPS 漏算外币报表折算差额/专项储备导致行情 PB 高估 8.7%
+            # 无论是否处于财报换期窗口，只要行情 PB 与自算普通股 PB 偏差超过 3% 且当前说明误报“无需换期重算”，
+            # 必须强制纠偏为警示，严禁误导称“无需换期重算”
+            calc_pb_val = mapped_ext.get("市净率_PB_自算_普通股")
+            pb_simple_val = round(now_p / mgjzc, 4) if (mgjzc > 0 and now_p > 0) else 0.0
+            cur_note = str(mapped_ext.get("派生指标换期说明", ""))
+            if "无需换期重算" in cur_note and calc_pb_val and calc_pb_val > 0 and pb_simple_val > 0:
+                rel_diff = abs(pb_simple_val - calc_pb_val) / calc_pb_val
+                if rel_diff > 0.03:
+                    pct_str = round(rel_diff * 100.0, 1)
+                    direction = "高估" if pb_simple_val > calc_pb_val else "低估"
+                    mapped_ext["派生指标换期说明"] = (
+                        f"【BPS口径偏差与重算警示】：该标的行情 BPS ({mgjzc}元) 分母仍基于报告期旧股本或存在外币报表折算差额/其他权益工具漏算，"
+                        f"导致行情市净率_PB({pb_simple_val}倍)被{direction}约 {pct_str}%（偏离真实普通股归母权益）；"
+                        f"推算真实市净率必须使用【市净率_PB_自算_普通股】({calc_pb_val}倍)，严禁直接用现价/BPS推算。"
+                    )
+
             if "市净率_PB_自算_普通股" not in mapped_ext and mapped_ext.get("市净率_PB") is not None:
                 mapped_ext["市净率_PB_自算_普通股"] = round(float(mapped_ext["市净率_PB"]), 4)
             if syl != 0:
@@ -1002,13 +1019,26 @@ class AStockEngine(BaseMarketEngine):
         else:
             m_setcode = inferred
 
+        # 严格校验 K 线周期枚举与复权方式 (修复 P1-1: 杜绝非法周期静默映射为日线)
+        valid_periods = {"day", "week", "month", "60m", "30m", "15m", "5m", "1m"}
+        period_alias = {"daily": "day", "weekly": "week", "monthly": "month"}
+        period_raw = str(period).lower().strip()
+        norm_period = period_alias.get(period_raw, period_raw)
+        if norm_period not in valid_periods:
+            raise ValueError(f"无效的 K 线周期 '{period}'。支持的周期为: ['day', 'week', 'month', '60m', '30m', '15m', '5m', '1m']")
+
+        valid_adjusts = {"qfq", "hfq", "none"}
+        adjust_raw = str(adjust).lower().strip()
+        if adjust_raw not in valid_adjusts:
+            raise ValueError(f"无效的复权方式 '{adjust}'。支持的复权方式为: ['qfq', 'hfq', 'none']")
+
         # 周期映射: day->4, week->5, month->6, 60m->3, 30m->2, 15m->1, 5m->0, 1m->7
         period_map = {"5m": 0, "15m": 1, "30m": 2, "60m": 3, "day": 4, "week": 5, "month": 6, "1m": 7}
-        p_val = period_map.get(period.lower(), 4)
+        p_val = period_map[norm_period]
 
         # 复权映射: qfq->1, hfq->2, none->0 (通达信官方 PBFXT 底层协议规范)
         adjust_map = {"none": 0, "qfq": 1, "hfq": 2}
-        tq_val = adjust_map.get(adjust.lower(), 1)
+        tq_val = adjust_map[adjust_raw]
 
         # 预热缓冲区机制：针对计算技术指标 (MACD/EMA/BOLL/KDJ) 的场景，自动多拉取 200 根历史预热缓冲 (Warm-up buffer)
         # 消除递归指数滤波在截断窗口内的初值漂移缺陷 (解决 P1-2)
@@ -1046,7 +1076,7 @@ class AStockEngine(BaseMarketEngine):
                 continue
             # 通达信 ListItem Item 结构: [日期, 时间(自午夜秒数), 今开, 最高, 最低, 收盘, 成交额, 成交额, 成交量...]
             raw_date = str(raw_row[0])
-            if period.lower() in ("1m", "5m", "15m", "30m", "60m") and len(raw_row) > 1 and str(raw_row[1]).replace(".", "").isdigit():
+            if norm_period in ("1m", "5m", "15m", "30m", "60m") and len(raw_row) > 1 and str(raw_row[1]).replace(".", "").isdigit():
                 sec = int(float(raw_row[1]))
                 hh = sec // 3600
                 mm = (sec % 3600) // 60
@@ -1066,10 +1096,12 @@ class AStockEngine(BaseMarketEngine):
             low_p = round(float(raw_row[4]), price_dec)
             close_p = round(float(raw_row[5]), price_dec)
             amt_val = round(float(raw_row[6]), 2) if len(raw_row) > 6 else 0.0
-            vol_val = round(float(raw_row[8]), 2) if len(raw_row) > 8 else (round(float(raw_row[7]), 2) if len(raw_row) > 7 else 0.0)
+            # 修复 P4-1: 成交量严格四舍五入整型规范化，消除单精度浮点导致的 1 手微差毛刺
+            raw_vol_f = float(raw_row[8]) if len(raw_row) > 8 else (float(raw_row[7]) if len(raw_row) > 7 else 0.0)
+            vol_val = int(round(raw_vol_f))
             # 周线与月线通达信底层上报单位为手 (1手=100股)，日线与分钟线底层为股。统一跨周期成交量单位为【股】消除漂移
-            if period.lower() in ("week", "month"):
-                vol_val = round(vol_val * 100.0, 2)
+            if norm_period in ("week", "month"):
+                vol_val = int(round(raw_vol_f * 100.0))
 
             parsed_bars.append({
                 "time": dt_str,
@@ -1099,8 +1131,8 @@ class AStockEngine(BaseMarketEngine):
             "symbol": clean_code,
             "name": stock_name,
             "setcode": m_setcode,
-            "period": period,
-            "adjust": adjust,
+            "period": norm_period,
+            "adjust": adjust_raw,
             "total_bars": len(parsed_bars),
             "indicators_included": bool(with_indicators),
             "klines": parsed_bars,
