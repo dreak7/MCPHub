@@ -1606,7 +1606,9 @@ class FinanceGateway:
                                     row["成交额补充说明"] = "历史异动上游专线未单独披露成交金额，日K线回溯超出覆盖范围"
                             else:
                                 up_amt = float(row.get("当日成交金额_万元") or 0.0)
-                                if kline_amt is not None and kline_amt > 0 and abs(up_amt - kline_amt) > 1.0:
+                                if kline_amt is None:
+                                    row["成交额补充说明"] = f"上游专线披露成交金额为 {up_amt:,.2f} 万元；因涨停日超出日K线 300 根回溯窗口，全天日K成交额暂未关联"
+                                elif kline_amt > 0 and abs(up_amt - kline_amt) > 1.0:
                                     ratio = round((up_amt / kline_amt) * 100.0, 1)
                                     row["成交额补充说明"] = (
                                         f"上游专线披露值为【封板/异动时段成交金额】({up_amt:,.2f}万元，约占全天{ratio}%)；"

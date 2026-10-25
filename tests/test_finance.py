@@ -2893,25 +2893,41 @@ class TestFinanceGateway(unittest.TestCase):
 
 
 # =========================================================================
-# 【第三道防翻车安全门：12 只核心行业标杆特种标的自动化碰撞测试套件】
+# 【第三道防翻车安全门：28 只核心行业标杆特种标的自动化碰撞测试套件】
 # - 标的矩阵（全市场五大板块全面覆盖）：
 #   【沪市主板】
 #   1. 601658 邮储银行：银行业资产负债表与特有负债（吸收存款）、年化 EPS、深市两融 T+1 时差
 #   2. 600030 中信证券：券商准则、永续债 PB 修正、客户资金存款双计剔除
 #   3. 601336 新华保险：险企 CAS 25 保险合同负债 1.6 万亿缺口自陈、预案分红说明
 #   4. 600875 东方电气：工业白马、龙虎榜多日窗口万元对齐买入13.4亿、日K成交额口径挂载
+#   5. 600276 恒瑞医药：创新药龙头、高研发投入费用化/资本化核算与医药管线
+#   6. 601012 隆基绿能：光伏硅片组件龙头、大额在建工程与存货跌价准备
+#   7. 601933 永辉超市：连锁生鲜商超、新租赁准则使用权资产与租赁负债
 #   【深市主板】
-#   5. 002594 比亚迪：深市主板新能源汽车制造巨头，超大供应链制造体系、高应收应付周转、A/H 架构
-#   6. 000063 中兴通讯：深市主板通信与算力网络龙头，A+H架构(00763)、高研发与合同资产、国际化汇率对冲
+#   8. 002594 比亚迪：深市主板新能源汽车制造巨头，超大供应链制造体系、高应收应付周转、A/H 架构
+#   9. 000063 中兴通讯：深市主板通信与算力网络龙头，A+H架构(00763)、高研发与合同资产、国际化汇率对冲
+#   10. 002277 友阿股份：商业百货与区域新零售、投资性房地产公允价值计量
+#   11. 002293 罗莱生活：家纺消费品龙头、营业总成本税金附加完全闭合标杆
 #   【创业板】
-#   7. 300124 汇川技术：创业板工控自动化白马龙头，创业板 20% 涨跌幅机制、高研发投入与股权激励、高 ROE
-#   8. 300450 先导智能：创业板高端锂电装备制造，重订单非标定制化、大额发出商品与合同负债（预收款）、存货跌价准备
+#   12. 300124 汇川技术：创业板工控自动化白马龙头，创业板 20% 涨跌幅机制、高研发投入与股权激励、高 ROE
+#   13. 300450 先导智能：创业板高端锂电装备制造，重订单非标定制化、大额发出商品与合同负债（预收款）、存货跌价准备
+#   14. 300866 安克创新：跨境电商消费电子、全球化海外营收结算与供应链库存周转
 #   【科创板】
-#   9. 688777 中控技术：科创板高端工业软件与控制系统，软件增值税即征即退、政府补助进入其他收益、GDR 发行
-#   10. 688008 澜起科技：科创板半导体芯片龙头，Fabless 轻资产运作、百亿级货币资金与理财资产（大存大贷辨析）、超高毛利率
+#   15. 688777 中控技术：科创板高端工业软件与控制系统，软件增值税即征即退、政府补助进入其他收益、GDR 发行
+#   16. 688008 澜起科技：科创板半导体芯片龙头，Fabless 轻资产运作、百亿级货币资金与理财资产（大存大贷辨析）、超高毛利率
 #   【港股主板】
-#   11. 02026 小马智行：港股/美股法定美元原币记账、东财汇率 6.8~7.1 倍反解还原
-#   12. 09988 阿里巴巴：跨自然年 3 月财年、财年首季守护禁止跨年相减
+#   17. 02026 小马智行：港股/美股法定美元原币记账、东财汇率 6.8~7.1 倍反解还原
+#   18. 09988 阿里巴巴：跨自然年 3 月财年、财年首季守护禁止跨年相减
+#   19. 00700 腾讯控股：社交娱乐与数字经济巨头、单季前驱做差真实单季推算还原
+#   20. 03690 美团：本地生活即时配送平台龙头、零售核心本地商业模式
+#   21. 02628 中国人寿：大型国有寿险央企、全股本市值口径与 A+H 股比价
+#   22. 00728 中国电信：基础电信运营商与产业数字化云网融合龙头
+#   23. 09969 诺诚健华：创新抗癌靶向药龙头、18A 生物医药研发与商业化
+#   24. 03908 中金公司：头部顶级投资银行、跨境资本运作与投行业务
+#   25. 00981 中芯国际：晶圆代工制造龙头、重资产资本开支与大额折旧摊销
+#   26. 01810 小米集团：手机×AIoT生态龙头、智能电动汽车双轮驱动
+#   27. 01585 雅迪控股：全球两轮电动车制造龙头、出海全球化供应链
+#   28. 09880 优必选：人形机器人第一股、具身智能与智能制造商业化落地
 # =========================================================================
 class TestTwelveEliteStocksSuite(unittest.TestCase):
     def setUp(self) -> None:
@@ -3003,6 +3019,135 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         """标杆 12：09988 阿里巴巴（港股主板 - 跨自然年 3 月财年做差与首季守护）"""
         f10 = self.gw.stock_f10({"symbol": "09988", "category": "financials"})
         self.assertTrue("formatted_tables" in f10 or "data" in f10)
+
+    def test_13_anker_innovations_300866(self) -> None:
+        """标杆 13：300866 安克创新（创业板 - 跨境电商与消费电子、海外营收占比与供应链周转）"""
+        res = self.gw.stock_financials({"symbol": "300866", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", res)
+        st = res["statements"][0]
+        self.assertIsNotNone(st.get("资产总计"))
+        q = self.gw.stock_quotes({"symbol": "300866"})
+        self.assertEqual(q.get("symbol"), "300866")
+
+    def test_14_hengrui_medicine_600276(self) -> None:
+        """标杆 14：600276 恒瑞医药（沪市主板 - 创新药龙头、高研发投入费用化/资本化核算）"""
+        res = self.gw.stock_financials({"symbol": "600276", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", res)
+        st = res["statements"][0]
+        self.assertIsNotNone(st.get("资产总计"))
+        q = self.gw.stock_quotes({"symbol": "600276"})
+        self.assertEqual(q.get("symbol"), "600276")
+
+    def test_15_longi_green_energy_601012(self) -> None:
+        """标杆 15：601012 隆基绿能（沪市主板 - 光伏硅片与单晶组件龙头、大额在建工程与存货跌价准备）"""
+        res = self.gw.stock_financials({"symbol": "601012", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", res)
+        st = res["statements"][0]
+        self.assertIsNotNone(st.get("资产总计"))
+        q = self.gw.stock_quotes({"symbol": "601012"})
+        self.assertEqual(q.get("symbol"), "601012")
+
+    def test_16_yonghui_superstores_601933(self) -> None:
+        """标杆 16：601933 永辉超市（沪市主板 - 连锁生鲜商超、新租赁准则使用权资产与租赁负债）"""
+        res = self.gw.stock_financials({"symbol": "601933", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", res)
+        st = res["statements"][0]
+        self.assertIsNotNone(st.get("资产总计"))
+        q = self.gw.stock_quotes({"symbol": "601933"})
+        self.assertEqual(q.get("symbol"), "601933")
+
+    def test_17_youa_group_002277(self) -> None:
+        """标杆 17：002277 友阿股份（深市主板 - 商业百货与区域新零售、投资性房地产公允价值计量）"""
+        res = self.gw.stock_financials({"symbol": "002277", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", res)
+        st = res["statements"][0]
+        self.assertIsNotNone(st.get("资产总计"))
+        q = self.gw.stock_quotes({"symbol": "002277"})
+        self.assertEqual(q.get("symbol"), "002277")
+
+    def test_18_luolai_lifestyle_002293(self) -> None:
+        """标杆 18：002293 罗莱生活（深市主板 - 家纺消费品龙头、营业总成本税金附加完全闭合标杆）"""
+        res = self.gw.stock_financials({"symbol": "002293", "report_type": "balance", "limit_periods": 1})
+        self.assertIn("statements", res)
+        st = res["statements"][0]
+        self.assertIsNotNone(st.get("资产总计"))
+        q = self.gw.stock_quotes({"symbol": "002293"})
+        self.assertEqual(q.get("symbol"), "002293")
+
+    def test_19_tencent_00700(self) -> None:
+        """标杆 19：00700 腾讯控股（港股主板 - 社交娱乐与云科技巨头、单季前驱做差真实单季还原）"""
+        q = self.gw.stock_quotes({"symbol": "00700"})
+        self.assertEqual(q.get("symbol"), "00700")
+        f10 = self.gw.stock_f10({"symbol": "00700", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
+
+    def test_20_meituan_03690(self) -> None:
+        """标杆 20：03690 美团（港股主板 - 本地生活即时配送平台、科技零售综合业务）"""
+        q = self.gw.stock_quotes({"symbol": "03690"})
+        self.assertEqual(q.get("symbol"), "03690")
+        f10 = self.gw.stock_f10({"symbol": "03690", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
+
+    def test_21_china_life_02628(self) -> None:
+        """标杆 21：02628 中国人寿（港股主板 - 大型国有寿险央企、全股本市值口径与A+H比价）"""
+        q = self.gw.stock_quotes({"symbol": "02628"})
+        self.assertEqual(q.get("symbol"), "02628")
+        f10 = self.gw.stock_f10({"symbol": "02628", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
+
+    def test_22_china_telecom_00728(self) -> None:
+        """标杆 22：00728 中国电信（港股主板 - 电信通信运营商与产业数字化云网融合龙头）"""
+        q = self.gw.stock_quotes({"symbol": "00728"})
+        self.assertEqual(q.get("symbol"), "00728")
+        f10 = self.gw.stock_f10({"symbol": "00728", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
+
+    def test_23_innocare_pharma_09969(self) -> None:
+        """标杆 23：09969 诺诚健华（港股主板 - 创新抗癌靶向药、18A生物科技标的研发与商业化）"""
+        q = self.gw.stock_quotes({"symbol": "09969"})
+        self.assertEqual(q.get("symbol"), "09969")
+        f10 = self.gw.stock_f10({"symbol": "09969", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
+
+    def test_24_cicc_03908(self) -> None:
+        """标杆 24：03908 中金公司（港股主板 - 头部顶级投资银行、跨境资本市场业务与机构经纪）"""
+        q = self.gw.stock_quotes({"symbol": "03908"})
+        self.assertEqual(q.get("symbol"), "03908")
+        f10 = self.gw.stock_f10({"symbol": "03908", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
+
+    def test_25_smic_00981(self) -> None:
+        """标杆 25：00981 中芯国际（港股主板 - 晶圆代工制造龙头、重资产资本开支与折旧摊销）"""
+        q = self.gw.stock_quotes({"symbol": "00981"})
+        self.assertEqual(q.get("symbol"), "00981")
+        f10 = self.gw.stock_f10({"symbol": "00981", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
+
+    def test_26_xiaomi_01810(self) -> None:
+        """标杆 26：01810 小米集团（港股主板 - 手机×AIoT生态龙头、智能电动汽车双轮驱动）"""
+        q = self.gw.stock_quotes({"symbol": "01810"})
+        self.assertEqual(q.get("symbol"), "01810")
+        f10 = self.gw.stock_f10({"symbol": "01810", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
+
+    def test_27_yadea_01585(self) -> None:
+        """标杆 27：01585 雅迪控股（港股主板 - 全球两轮电动车制造龙头、出海全球化供应链）"""
+        q = self.gw.stock_quotes({"symbol": "01585"})
+        self.assertEqual(q.get("symbol"), "01585")
+        f10 = self.gw.stock_f10({"symbol": "01585", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
+
+    def test_28_ubtech_09880(self) -> None:
+        """标杆 28：09880 优必选（港股主板 - 人形机器人第一股、具身智能与智能制造商业化）"""
+        q = self.gw.stock_quotes({"symbol": "09880"})
+        self.assertEqual(q.get("symbol"), "09880")
+        f10 = self.gw.stock_f10({"symbol": "09880", "category": "financials"})
+        self.assertTrue("formatted_tables" in f10 or "data" in f10 or "statements" in f10)
+
+
+# 向后兼容别名：支持 28 标的全量测试套件
+TestTwentyEightEliteStocksSuite = TestTwelveEliteStocksSuite
+TestEliteBenchmarkStocksSuite = TestTwelveEliteStocksSuite
 
 
 if __name__ == "__main__":

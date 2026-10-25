@@ -173,6 +173,9 @@ class AStockEngine(BaseMarketEngine):
                     resp_bytes = resp.read()
                     return json.loads(resp_bytes.decode("utf-8", errors="replace"))
             except HTTPError as exc:
+                if attempt < max_retries and exc.code in (500, 502, 503, 504, 429):
+                    time.sleep(0.89 * (attempt + 1))
+                    continue
                 err_msg = f"HTTP {exc.code} {exc.reason}"
                 try:
                     detail = exc.read().decode("utf-8", errors="replace")
@@ -182,13 +185,13 @@ class AStockEngine(BaseMarketEngine):
                 raise RuntimeError(f"TDX API request failed ({err_msg})") from exc
             except (URLError, TimeoutError, socket.timeout) as exc:
                 if attempt < max_retries:
-                    time.sleep(0.2 * (attempt + 1))
+                    time.sleep(0.89 * (attempt + 1))
                     continue
                 reason = getattr(exc, "reason", str(exc))
                 raise RuntimeError(f"TDX API network connection error ({reason})") from exc
             except Exception as exc:
                 if attempt < max_retries and ("timeout" in str(exc).lower() or "handshake" in str(exc).lower()):
-                    time.sleep(0.2 * (attempt + 1))
+                    time.sleep(0.89 * (attempt + 1))
                     continue
                 raise
 
@@ -296,19 +299,20 @@ class AStockEngine(BaseMarketEngine):
 
         seat_records = []
         try:
-            url_seats = (
+            url_buy = (
                 f"https://datacenter-web.eastmoney.com/api/data/v1/get?"
                 f"reportName=RPT_BILLBOARD_DAILYDETAILSBUY&columns=ALL&"
                 f"filter=(SECURITY_CODE%3D%22{clean_code}%22)&sortColumns=TRADE_DATE&sortTypes=-1&pageSize=20"
             )
-            req = Request(url_seats, headers=headers)
-            with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
-                d = json.loads(resp.read().decode("utf-8", errors="replace"))
-                if d.get("result") and d["result"].get("data"):
-                    for row in d["result"]["data"]:
+            req_buy = Request(url_buy, headers=headers)
+            with _SECURE_OPENER.open(req_buy, timeout=self.timeout) as resp:
+                d_buy = json.loads(resp.read().decode("utf-8", errors="replace"))
+                if d_buy.get("result") and d_buy["result"].get("data"):
+                    for row in d_buy["result"]["data"]:
                         t_date = str(row.get("TRADE_DATE", ""))[:10]
                         seat_records.append({
                             "交易日期": t_date,
+                            "席位类型": "买入前五席位",
                             "营业部席位名称": row.get("OPERATEDEPT_NAME"),
                             "买入金额_万元": round(float(row.get("BUY") or 0.0) / 10000.0, 2),
                             "卖出金额_万元": round(float(row.get("SELL") or 0.0) / 10000.0, 2),
@@ -317,6 +321,32 @@ class AStockEngine(BaseMarketEngine):
                             "占总成交比例_说明": "占总成交比例系相对异动统计窗口期累计总成交额计算，非单日K线成交额",
                             "上榜异动说明": row.get("EXPLANATION"),
                         })
+
+            url_sell = (
+                f"https://datacenter-web.eastmoney.com/api/data/v1/get?"
+                f"reportName=RPT_BILLBOARD_DAILYDETAILSSELL&columns=ALL&"
+                f"filter=(SECURITY_CODE%3D%22{clean_code}%22)&sortColumns=TRADE_DATE&sortTypes=-1&pageSize=20"
+            )
+            req_sell = Request(url_sell, headers=headers)
+            with _SECURE_OPENER.open(req_sell, timeout=self.timeout) as resp:
+                d_sell = json.loads(resp.read().decode("utf-8", errors="replace"))
+                if d_sell.get("result") and d_sell["result"].get("data"):
+                    for row in d_sell["result"]["data"]:
+                        t_date = str(row.get("TRADE_DATE", ""))[:10]
+                        seat_records.append({
+                            "交易日期": t_date,
+                            "席位类型": "卖出前五席位",
+                            "营业部席位名称": row.get("OPERATEDEPT_NAME"),
+                            "买入金额_万元": round(float(row.get("BUY") or 0.0) / 10000.0, 2),
+                            "卖出金额_万元": round(float(row.get("SELL") or 0.0) / 10000.0, 2),
+                            "净买入额_万元": round(float(row.get("NET") or 0.0) / 10000.0, 2),
+                            "占总成交比例_pct": round(float(row.get("TOTAL_SELLRIO") or 0.0) * 100.0, 2) if row.get("TOTAL_SELLRIO") else None,
+                            "占总成交比例_说明": "占总成交比例系相对异动统计窗口期累计总成交额计算，非单日K线成交额",
+                            "上榜异动说明": row.get("EXPLANATION"),
+                        })
+
+            if seat_records:
+                seat_records.sort(key=lambda x: str(x.get("交易日期", "")), reverse=True)
         except Exception:
             pass
 
@@ -686,11 +716,12 @@ class AStockEngine(BaseMarketEngine):
                                 if close_ref > 0:
                                     pb_yishou_recalc = round(close_ref / mgjzc, 4)
                                     pb_now_recalc = round(now_p / mgjzc, 4) if now_p > 0 else pb_yishou_recalc
+                                    derived_old_bps = round(close_ref / t6_sjl, 3)
                                     mapped_ext["市净率_PB_昨收_换期重算"] = pb_yishou_recalc
                                     # 修复 D4: 当发生换期时，市净率_PB_F10 同步校准为换期后新BPS与现价计算的真实PB，与 F10 table6 市净率_PB 100% 对齐
                                     mapped_ext["市净率_PB_F10"] = pb_now_recalc
                                     mapped_ext["市净率_PB_昨收_校准说明"] = (
-                                        f"F10 table6.市净率_PB_昨收(sjl)={t6_sjl} 系上游 F10 通道基于旧期次净资产({raw_mgjzc}元/股)的收盘清算 PB，"
+                                        f"F10 table6.市净率_PB_昨收(sjl)={t6_sjl} 系上游 F10 通道基于上一期旧净资产(反解约{derived_old_bps}元/股)的收盘清算 PB，"
                                         f"未随本次换期({f10_bgq})自动重算；网关已以最新报告期 BPS({mgjzc}元)自算得 "
                                         f"PB_昨收_换期重算={pb_yishou_recalc}倍；现价市净率_PB_F10 同步校准为 {pb_now_recalc} 倍；下游横比请使用换期重算值，切勿直接引用原始 sjl 字段。"
                                     )
@@ -812,7 +843,7 @@ class AStockEngine(BaseMarketEngine):
                 mapped_ext["次日涨跌幅限制_pct"] = round(r_limit * 100.0, 1)
                 mapped_ext["涨跌停价时效说明"] = (
                     f"【涨跌停价时效与次日限价说明】表中【涨停价】/【当日涨停价】({zt_curr}元)为上游交易所针对当日交易日（基于昨收价）设定的法定限价；"
-                    f"盘后休市期间，上游字段尚未更新至下一个交易日（如 600875 盘后字段 24.15元 仍为当日限价）。"
+                    f"盘后休市期间，上游字段尚未更新至下一个交易日（如当前标的 {clean_code} 盘后字段 {zt_curr}元 仍为当日限价）。"
                     f"网关已依据当日最新基准现价({ref_price}元)及标的板块涨跌幅限制(±{int(r_limit*100)}%)自算生成【次日参考涨停价】({next_zt}元)与【次日参考跌停价】({next_dt}元)供隔夜推演参考；"
                     "次日官方实际涨跌停价请以交易所早间开盘清算价为准。"
                 )
@@ -1201,18 +1232,34 @@ class AStockEngine(BaseMarketEngine):
                                 md_map = {"一季报": "03-31", "中报": "06-30", "三季报": "09-30", "年报": "12-31"}
                                 iso_date = f"{y_str}-{md_map.get(rpt_txt, '12-31')}"
 
+                    is_quarter_mode = (period_type.lower() == "quarter")
                     if iso_date:
                         period_dict["截止日期"] = iso_date
                         period_dict["报告期日期"] = iso_date
                         month = iso_date[5:7] if len(iso_date) >= 7 else ""
                         rpt_name = "一季报" if month == "03" else ("中报" if month == "06" else ("三季报" if month == "09" else ("年报" if month == "12" else "")))
-                        if rpt_name:
-                            period_dict["报表类型"] = rpt_name
-                            period_dict["报告期"] = f"{iso_date[:4]}{rpt_name}"
-                            period_dict["报告期标签"] = f"{iso_date[:4]}{rpt_name}"
+                        q_map = {"03": "一季度", "06": "二季度", "09": "三季度", "12": "四季度"}
+                        if is_quarter_mode:
+                            q_label = q_map.get(month, "单季度")
+                            period_dict["报表类型"] = f"{iso_date[:4]}{q_label}"
+                            period_dict["报告期"] = f"{iso_date[:4]}{q_label}"
+                            period_dict["报告期标签"] = f"{iso_date[:4]}{q_label}"
+                            period_dict["单期标签"] = f"{iso_date[:4]}{q_label}"
+                            period_dict["单季度计算说明"] = f"本行为 {iso_date[:4]} 年第{q_label[0]}季度独立单季发生额（非累计值）。"
+                        else:
+                            if rpt_name:
+                                period_dict["报表类型"] = rpt_name
+                                period_dict["报告期"] = f"{iso_date[:4]}{rpt_name}"
+                                period_dict["报告期标签"] = f"{iso_date[:4]}{rpt_name}"
                     elif raw_end:
-                        period_dict["报告期"] = raw_end
-                        period_dict["报告期标签"] = raw_end
+                        if is_quarter_mode:
+                            period_dict["报告期"] = raw_end
+                            period_dict["报告期标签"] = raw_end
+                            period_dict["单期标签"] = raw_end
+                            period_dict["单季度计算说明"] = f"本行为 {raw_end} 独立单季发生额（非累计值）。"
+                        else:
+                            period_dict["报告期"] = raw_end
+                            period_dict["报告期标签"] = raw_end
 
                     # 修复 G (P3): 统一对齐挂载 币种 与 金额单位
                     period_dict["币种"] = "CNY"
@@ -1790,7 +1837,8 @@ class AStockEngine(BaseMarketEngine):
                 "4.【所有者权益加总纪律与库存股抵减项】：依据财政部《企业会计准则》，‘库存股’是所有者权益的法定抵减科目（借方余额），本接口统一收敛为唯一规范键【库存股】（杜绝'减_库存股'与'库存股_抵减项'等正数别名造成遍历加总时3倍虚增）。在计算归母所有者权益时，必须从各项权益总和中扣除库存股：【归母所有者权益 = 实收资本 + 资本公积 + 盈余公积 + 未分配利润 + 其他综合收益 + 专项储备 − 库存股】。严禁将库存股作为正数加计！\n"
                 "5.【权益分区专项储备与不可加总差额】：针对工商业底层数据源未收录【专项储备】（如高危行业安全生产费储备）或特殊权益工具导致的明细与归母权益总额客观差额，网关已自动核算并自陈至【归母所有者权益不可加总差额_专项储备及其他权益项等】。\n"
                 "6.【现金流量表结构规范与商业银行明细覆盖限制】：现金流量表现已将主表（直接法三大活动流向）与间接法调节表物理隔离，间接法补充资料独立归集于‘补充资料_间接法’字典中，彻底避免科目遍历时的静默双计。同时特别警示：商业银行现金流明细缺失严重（筹资流出缺失达70%~90%），禁止用于内部结构分析，必须且只能引用三大净额与期末现金余额（勾稽桥式严格闭合）。\n"
-                "7.【披露期三表期次同步说明】：在上市公司定期报告披露季（如三季报、年报发布期），上游数据库各报表库更新存在时间差（如资产负债表库通常优先录入，利润表与现金流量表随后入库），若发现三表最新期次不一致，属于上游数据源入库批次时差，调用时请核对每期'截止日期'或'报告期日期'。"
+                "7.【披露期三表期次同步说明】：在上市公司定期报告披露季（如三季报、年报发布期），上游数据库各报表库更新存在时间差（如资产负债表库通常优先录入，利润表与现金流量表随后入库），若发现三表最新期次不一致，属于上游数据源入库批次时差，调用时请核对每期'截止日期'或'报告期日期'。\n"
+                "8.【三表股本与二级市场实时总股本口径说明】：资产负债表所有者权益中的【实收资本】/【股本】严格反映上市公司在该报告期经审计与工商核准的法定登记股本；若标的发生限售股解禁（如600030中信证券解禁限售股）、A/H双重架构、定向增发或二级市场转增，二级市场可流通交易的实时总股本会领先于历史财报中的法定股本。财务建模与计算最新每股指标（如最新BPS、PB、动态PE）时，请以 stock_quotes 中的【总股本_股】与【市净率_PB_自算_普通股】为准，严禁直接拿历史财报静态股本除算实时市值。"
             ),
             "会计口径与合并说明": (
                 "1.【金融与工商业准则双轨制】：本接口底层内置工商业与金融企业（银行/保险/证券）双套专业映射体系，"
