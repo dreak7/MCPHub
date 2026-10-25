@@ -52,7 +52,37 @@ class AStockEngine(BaseMarketEngine):
         self.timeout = timeout
         self.logger = logger or logging.getLogger("mcp_gateway.finance.a_engine")
         self._entity_cache: dict[str, dict[str, Any] | None] = {}
+        # 缓存标的最新普通股归母权益信息 (clean_code -> (普通股归母权益, 原始归母合计, 报告期, 缓存时间戳))
+        self._equity_cache: dict[str, tuple[float, float, str, float]] = {}
         self._post_fn = post_fn
+
+    # =========================================================================
+    # 【功能块 0.1：最新财报普通股股东权益提取与缓存器 (修复 D2: 真实普通股市净率自算)】
+    # - 输入：clean_code (str): 6位A股代码
+    # - 功能：向底层财报接口查询最新1期资产负债表，提取归母所有者权益合计并扣除其他权益工具（永续债/优先股），
+    #         计算真实普通股股东权益，并以 1800 秒 TTL 缓存避免高频重复拉取
+    # - 输出：tuple[float, float, str] | None: (普通股股东权益_元, 归属于母公司所有者权益合计_元, 报告期截止日期)
+    # =========================================================================
+    def _get_latest_equity_info(self, clean_code: str) -> tuple[float, float, str] | None:
+        now_ts = time.time()
+        cached = self._equity_cache.get(clean_code)
+        if cached and (now_ts - cached[3] < 1800.0):
+            return (cached[0], cached[1], cached[2])
+        try:
+            fin = self.get_financials(clean_code, report_type="balance", limit_periods=1)
+            stmts = fin.get("statements", [])
+            if stmts:
+                row = stmts[0]
+                gm = float(row.get("归母所有者权益合计") or row.get("归属于母公司所有者权益合计") or row.get("归属于母公司股东权益合计") or row.get("所有者权益合计") or 0.0)
+                qt = float(row.get("其他权益工具") or 0.0)
+                ptg_qy = round(gm - qt, 2)
+                bgq = str(row.get("截止日期") or row.get("报告期") or "")
+                res_tuple = (ptg_qy, gm, bgq, now_ts)
+                self._equity_cache[clean_code] = res_tuple
+                return (ptg_qy, gm, bgq)
+        except Exception:
+            pass
+        return None
 
     def resolve_entity(self, clean_code: str) -> dict[str, Any] | None:
         """A 股 6 位代码三轨反查正主实体"""
@@ -350,7 +380,7 @@ class AStockEngine(BaseMarketEngine):
         except Exception:
             pass
 
-        return {
+        res_lhb = {
             "symbol": clean_code,
             "category": "lhb",
             "category_name": "龙虎榜异动与营业部席位追踪",
@@ -360,8 +390,10 @@ class AStockEngine(BaseMarketEngine):
                 "billboard_records": billboard_records,
                 "seat_details": seat_records,
             },
-            "无记录说明": "该标的近期未触发交易所龙虎榜公开信息披露标准（近期无严重异动/偏离值未达标），暂无营业部席位数据。" if not billboard_records else None,
         }
+        if not billboard_records:
+            res_lhb["无记录说明"] = "该标的近期未触发交易所龙虎榜公开信息披露标准（近期无严重异动/偏离值未达标），暂无营业部席位数据。"
+        return res_lhb
 
     # =========================================================================
     # 【功能块 5.5.2：A股官方股份回购方案与实施进度提取器】
@@ -379,6 +411,7 @@ class AStockEngine(BaseMarketEngine):
             f"filter=(DIM_SCODE%3D%22{clean_code}%22)&sortColumns=NOTICEDATE&sortTypes=-1&pageSize=20"
         )
         records = []
+        total_done_wan = 0.0
         try:
             req = Request(url, headers=headers)
             with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
@@ -392,6 +425,8 @@ class AStockEngine(BaseMarketEngine):
                         amt_lower = round(float(row.get("REPURAMOUNTLOWER") or 0.0) / 10000.0, 2) if row.get("REPURAMOUNTLOWER") else None
                         amt_limit = round(float(row.get("REPURAMOUNTLIMIT") or 0.0) / 10000.0, 2) if row.get("REPURAMOUNTLIMIT") else None
                         amt_done = round(float(row.get("REPURAMOUNT") or 0.0) / 10000.0, 2) if row.get("REPURAMOUNT") else None
+                        if amt_done is not None:
+                            total_done_wan += amt_done
                         records.append({
                             "公告日期": n_date,
                             "回购方案类型": row.get("REPUROBJECTIVE"),
@@ -409,7 +444,7 @@ class AStockEngine(BaseMarketEngine):
         except Exception:
             pass
 
-        return {
+        res_rep = {
             "symbol": clean_code,
             "category": "repurchases",
             "category_name": "股份回购方案与实施明细",
@@ -417,8 +452,12 @@ class AStockEngine(BaseMarketEngine):
             "formatted_tables": {
                 "repurchases": records,
             },
-            "无记录说明": "该标的历史无公开披露的股份回购实施记录（或近期未发布股份回购方案）。如需获取公司最新重大公告，请调用 stock_news 工具。" if not records else None,
+            "累计已实施回购总额_万元": round(total_done_wan, 2) if records else 0.0,
+            "样本区间回购总额_万元": round(total_done_wan, 2) if records else 0.0,
         }
+        if not records:
+            res_rep["无记录说明"] = "该标的历史无公开披露的股份回购实施记录（或近期未发布股份回购方案）。如需获取公司最新重大公告，请调用 stock_news 工具。"
+        return res_rep
 
 
     def get_quotes(self, symbol: str, setcode: str | None = None) -> dict[str, Any]:
@@ -638,7 +677,6 @@ class AStockEngine(BaseMarketEngine):
                             mapped_ext["流通股本_股"] = t6_ltgb
                         t6_sjl = float(t6_row.get("sjl") or 0.0)
                         if t6_sjl > 0:
-                            mapped_ext["市净率_PB_自算_普通股"] = round(t6_sjl, 4)
                             mapped_ext["市净率_PB_F10"] = round(t6_sjl, 4)
 
                     if t4_row and t4_row.get("bgq"):
@@ -744,6 +782,27 @@ class AStockEngine(BaseMarketEngine):
             if mgjzc > 0:
                 if now_p > 0 and "市净率_PB" not in mapped_ext:
                     mapped_ext["市净率_PB"] = round(now_p / mgjzc, 2)
+
+            # =========================================================================
+            # 【功能块 4.1.1：真实普通股市净率自算 (市净率_PB_自算_普通股，修复 D2)】
+            # - 输入：clean_code (标的代码), now_p (现价), mapped_ext 中总股本_股, _get_latest_equity_info
+            # - 功能：向底层财报系统获取最新资产负债表归母所有者权益合计，依法扣除其他权益工具（永续债/优先股），
+            #         计算真实普通股归母权益；以 [现价 × 总股本 ÷ 普通股归母权益] 真实自算普通股市净率，
+            #         彻底终结因上游 F10 漏算专项储备（如比亚迪 002594 漏算 208 亿高估 8.69%）或含永续债导致的失真
+            # - 输出：写入 mapped_ext["市净率_PB_自算_普通股"] 与 mapped_ext["普通股每股净资产_BPS_自算"]
+            # =========================================================================
+            zgb_current = mapped_ext.get("总股本_股") or (int(round(zgb_wan * 10000)) if zgb_wan > 0 else 0)
+            if zgb_current > 0 and now_p > 0:
+                eq_info = self._get_latest_equity_info(clean_code)
+                if eq_info:
+                    ptg_qy, raw_gm, eq_bgq = eq_info
+                    if ptg_qy > 0:
+                        calc_pb_common = round((now_p * zgb_current) / ptg_qy, 4)
+                        calc_bps_common = round(ptg_qy / zgb_current, 4)
+                        mapped_ext["市净率_PB_自算_普通股"] = calc_pb_common
+                        mapped_ext["普通股每股净资产_BPS_自算"] = calc_bps_common
+                        mapped_ext["普通股归母权益_元"] = ptg_qy
+
             if "市净率_PB_自算_普通股" not in mapped_ext and mapped_ext.get("市净率_PB") is not None:
                 mapped_ext["市净率_PB_自算_普通股"] = round(float(mapped_ext["市净率_PB"]), 4)
             if syl != 0:
@@ -1155,6 +1214,17 @@ class AStockEngine(BaseMarketEngine):
                         is_financial = True
                     break
 
+        # =========================================================================
+        # 【功能块 7.1.1：金融细分子行业智能分类器 (券商/保险/银行，修复 D1)】
+        # - 输入：is_financial (bool), entity 名称与代码
+        # - 功能：精准识别金融机构细分子行业（券商/证券、保险、银行），供现金流与利润表科目映射特化使用
+        # - 输出：is_broker, is_insurance, is_bank 布尔标志位
+        # =========================================================================
+        entity_name = str((entity.get("entity_name") or entity.get("name") or "") if isinstance(entity, dict) else (getattr(entity, "name", "") or ""))
+        is_broker = is_financial and any(k in entity_name for k in ("证券", "券商", "信托", "期货"))
+        is_insurance = is_financial and any(k in entity_name for k in ("保险", "人寿", "太保", "平安", "新华"))
+        is_bank = is_financial and ("银行" in entity_name)
+
         if is_financial:
             standard_name = "金融企业会计准则 (银行 / 保险 / 证券 / 金融控股)"
             if rtype in ("balance", "balance_sheet", "zcfzb"):
@@ -1296,12 +1366,31 @@ class AStockEngine(BaseMarketEngine):
                         for hk in ("现金的期末余额_核对", "减_现金的期初余额_核对", "加_现金等价物的期末余额_核对", "减_现金等价物的期初余额_核对", "现金及现金等价物净增加额_主表", "现金及现金等价物净增加额_补充法"):
                             period_dict.pop(hk, None)
                         if is_financial:
+                            # =========================================================================
+                            # 【功能块 7.1.2：券商专有现金流出科目纠偏 (修复 D1)】
+                            # - 输入：is_broker (bool), period_dict 中 N020 原生映射字段
+                            # - 功能：针对券商/证券类标的，将通达信 N020 原生错误映射的【支付原保险合同赔付款项的现金】
+                            #         转换为规范券商科目【为交易目的而持有的金融资产及融出资金等净支出】，
+                            #         消除在券商现金流中出现巨额保险赔付的事实性荒谬
+                            # - 输出：写入规范券商科目并移除保险专用科目
+                            # =========================================================================
+                            if is_broker and "支付原保险合同赔付款项的现金" in period_dict:
+                                val_n020 = period_dict.pop("支付原保险合同赔付款项的现金")
+                                period_dict["为交易目的而持有的金融资产及融出资金等净支出"] = val_n020
+
+                            broker_cf_note = (
+                                "【证券企业现金流科目纠偏说明（已收敛 D1）】：券商无保险合同业务，通达信专线原生字段 N020 实际对应券商"
+                                "【为交易目的而持有的金融资产及融出资金等净支出】（金额达数百亿，属自营投资与两融融出资金净支出）。"
+                                "网关已自动纠偏至规范券商科目，彻底清除保险专用科目误导。\n"
+                            ) if is_broker else ""
+
                             period_dict["现金流量表加总纪律说明"] = (
-                                "【金融企业现金流量表核算规范】本表遵循《金融企业财务报表格式》（银行/保险/证券）。"
-                                "因底层行情专线未采集保险原保费收入、证券代理买卖等特殊金融科目明细，流入/流出细项之和与小计可能存在差额，"
-                                "差额已自动自陈至不可加总差额科目。财务分析必须且只能引用三大活动净额（经营净额、投资净额、筹资净额）"
-                                "与期末现金及现金等价物余额。\n"
-                                "【金融企业（银行/保险/证券）现金流明细覆盖度限制特别警示】通达信及公开专线对金融企业现金流量表明细采集严重缺失（如保险企业601336经营流入98.6%靠自陈差额、银行企业601658筹资流出70%~90%靠自陈差额），明细科目严重空洞，严禁用于现金流内部百分比结构分析！财务建模与流动性分析时，必须且只能引用三大活动净额与期末现金及现金等价物余额（三净额与期末现金桥28/28严格闭合）。\n"
+                                "【金融企业现金流量表核算规范】本表遵循《金融企业财务报表格式》（银行/保险/证券）。\n"
+                                f"{broker_cf_note}"
+                                "【金融企业税费返还科目特别提示（已收敛 D6）】：通达信专线将科目 N010 映射为【收到的税费返还】，"
+                                "在银行与券商等机构中金额较大（占营收比例较高），系底层报表归集口径包含代扣代缴返还或税金清算，数据完全透传自通达信专线原生字段。\n"
+                                "【金融企业现金流明细覆盖度限制特别警示】通达信及公开专线对金融企业现金流量表明细采集存在客观缺失，明细科目严禁用于现金流内部百分比结构分析！"
+                                "财务建模与流动性分析时，必须且只能引用三大活动净额与期末现金及现金等价物余额（三净额与期末现金桥严格闭合）。\n"
                                 "【间接法补充资料披露规则】依据《企业会计准则第31号》，上市公司季报（一季报03-31/三季报09-30）依法无需披露间接法附表，故季报期【补充资料_间接法】为空，仅中报(06-30)与年报(12-31)完整披露。"
                             )
                             # 金融企业经营活动现金流入不可加总差额 (原保险保费、代理买卖证券、拆入回购等缺项，修复 D2)
@@ -1318,18 +1407,20 @@ class AStockEngine(BaseMarketEngine):
                                 if abs(diff_fin_in) > 0.01:
                                     period_dict["经营活动现金流入不可加总差额_原保险保费及拆入回购等金融科目缺项"] = diff_fin_in
 
-                            # 金融企业经营活动现金流出不可加总差额 (原保险赔付、返售拆出等缺项，修复 D2)
+                            # 金融企业经营活动现金流出不可加总差额 (原保险赔付、融出资金、返售拆出等缺项，修复 D1 & D2)
                             jy_out = period_dict.get("经营活动现金流出小计")
                             if jy_out is not None and isinstance(jy_out, (int, float)):
                                 known_fin_jy_out = [
-                                    "客户贷款及垫款净增加额", "存放中央银行和同业款项净增加额", "支付原保险合同赔付款项的现金",
+                                    "客户贷款及垫款净增加额", "存放中央银行和同业款项净增加额",
+                                    "支付原保险合同赔付款项的现金", "为交易目的而持有的金融资产及融出资金等净支出",
                                     "拆出资金净增加额", "返售业务资金净增加额", "支付利息、手续费及佣金的现金",
                                     "支付保单红利的现金", "支付再保业务现金净额", "支付原保险合同款项现金",
                                     "支付给职工以及为职工支付的现金", "支付的各项税费", "支付其他与经营活动有关的现金"
                                 ]
                                 diff_fin_out = round(float(jy_out) - sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_fin_jy_out), 2)
                                 if abs(diff_fin_out) > 0.01:
-                                    period_dict["经营活动现金流出不可加总差额_保险赔付及拆出返售等金融科目缺项"] = diff_fin_out
+                                    diff_cf_out_key = "经营活动现金流出不可加总差额_金融交易及细项科目缺项" if is_broker else "经营活动现金流出不可加总差额_保险赔付及拆出返售等金融科目缺项"
+                                    period_dict[diff_cf_out_key] = diff_fin_out
 
                             # 金融企业投资活动现金流入/流出不可加总差额 (修复 P2-3)
                             tz_in = period_dict.get("投资活动现金流入小计")
@@ -1529,12 +1620,27 @@ class AStockEngine(BaseMarketEngine):
                                 sub_fin_yysr = sum(float(period_dict.get(k, 0.0) or 0.0) for k in known_fin_yysr)
                                 diff_yysr = round(float(yysr) - sub_fin_yysr, 2)
                                 if abs(diff_yysr) > 0.01:
-                                    period_dict["营业收入不可加总差额_保险服务收入及金融专有科目缺项"] = diff_yysr
-                                    period_dict["保险企业收入说明"] = (
-                                        "该标的执行新保险合同准则(CAS 25/IFRS 17)，上游专线未单独收录【保险服务收入/已赚保费】细项，"
-                                        f"导致营业收入与已知金融收益项之和存在客观缺口({round(diff_yysr / 100000000.0, 2)}亿元)。"
-                                        "【可用性结论】金融/保险企业营业收入构成明细严禁用于收入结构分析；但顶层【营业收入】总额真实准确，财务建模请直接引用官方【营业收入】整体。"
-                                    )
+                                    if is_insurance:
+                                        period_dict["营业收入不可加总差额_保险服务收入及金融专有科目缺项"] = diff_yysr
+                                        period_dict["保险企业收入说明"] = (
+                                            "该标的执行新保险合同准则(CAS 25/IFRS 17)，上游专线未单独收录【保险服务收入/已赚保费】细项，"
+                                            f"导致营业收入与已知金融收益项之和存在客观缺口({round(diff_yysr / 100000000.0, 2)}亿元)。"
+                                            "【可用性结论】金融/保险企业营业收入构成明细严禁用于收入结构分析；但顶层【营业收入】总额真实准确，财务建模请直接引用官方【营业收入】整体。"
+                                        )
+                                    elif is_broker:
+                                        period_dict["营业收入不可加总差额_证券专有科目及其他收益缺项"] = diff_yysr
+                                        period_dict["证券企业收入说明"] = (
+                                            "该标的为证券/金融机构，营业收入以手续费及佣金净收入、利息净收入、投资收益、公允价值变动收益为核心支柱。"
+                                            f"上游专线未单独列示其他业务收益与专有科目细项，导致营业收入与已知金融收益项存在微小统计差异({round(diff_yysr / 100000000.0, 2)}亿元)。"
+                                            "【可用性结论】顶层【营业收入】总额真实准确，财务建模请直接引用官方【营业收入】整体。"
+                                        )
+                                    else:
+                                        period_dict["营业收入不可加总差额_金融专有科目及其他收益缺项"] = diff_yysr
+                                        period_dict["金融企业收入说明"] = (
+                                            "该标的为金融机构，营业收入以存贷款利息与手续费净收入为主。"
+                                            f"上游专线未单独列示部分非主营收益细项，导致营业收入与已知收益项之和存在客观差异({round(diff_yysr / 100000000.0, 2)}亿元)。"
+                                            "【可用性结论】顶层【营业收入】总额真实准确，财务建模请直接引用官方【营业收入】整体。"
+                                        )
 
                             # 金融企业综合收益与扣非净利润勾稽 (P2-4, P2-5)
                             g_total_ci = period_dict.get("归属于母公司股东的综合收益总额")
@@ -1820,7 +1926,12 @@ class AStockEngine(BaseMarketEngine):
                                 wb_val = period_dict.get("外币报表折算差额")
                                 if zx_val is not None and wb_val is not None and zx_val == wb_val and float(zx_val) != 0:
                                     items_to_sum.remove("专项储备")
-                                    period_dict["所有者权益双计剔除说明"] = "检测到上游专线将【外币报表折算差额】与【专项储备】同值并发，网关已在权益明细校验中剔除双计项。"
+                                    # 修复 D3 (P2): 物理剔除重复别名键【专项储备】，彻底杜绝下游整表遍历加总双计 208 亿
+                                    period_dict.pop("专项储备", None)
+                                    period_dict["所有者权益双计剔除说明"] = (
+                                        "检测到上游专线将【外币报表折算差额】与【专项储备】同值别名并发（如 002594 比亚迪均为 208.47 亿元逐位相同），"
+                                        "网关已物理剔除重复别名键【专项储备】，保留法定真实科目【外币报表折算差额】，彻底杜绝下游整表遍历求和双计。"
+                                    )
                                 sub_eq = sum(float(period_dict.get(k, 0.0) or 0.0) for k in items_to_sum if k in period_dict) - treasury_stock
                                 diff_eq = round(float(parent_eq_total) - sub_eq, 2)
                                 if abs(diff_eq) > 0.01:

@@ -3337,6 +3337,104 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
             cash_desc = str(cf_02026_stmts[0].get("现金口径说明", ""))
             self.assertIn("极微小残差", cash_desc)
 
+    # =========================================================================
+    # 【功能块 8.5：A股与港股实测 D1~D14 专项问题修复全量回归测试】
+    # - 输入：网关调用 stock_financials, stock_quotes, stock_f10, stock_kline
+    # - 功能：
+    #   1. D1: 600030 券商现金流无保险科目，映射为交易目的资产净支出，利润表挂证券收入说明
+    #   2. D2: 002594 比亚迪自算普通股 PB 为 2.8461，002698 为 2.7869
+    #   3. D3: 002594 资产负债表物理剔除重复别名键【专项储备】
+    #   4. D4: 港股行情挂载【总市值_港元】并自陈币种为 HKD
+    #   5. D5: 港股财报清洗 DATE_TYPE_CODE 裸码
+    #   6. D7: 02026 现金流勾稽声明去除绝对化无缝勾稽
+    #   7. D8: 港股财报说明动态感知记账币种，消除 USD 标的写 CNY 的自相矛盾
+    #   8. D9: 港股分钟线成交量说明声明已覆盖 16:08 CAS 竞价且总量闭合
+    #   9. D10: indicators.table5 空表时注入明确质押状态说明
+    #   10. D13: 回购卡片跨市场统一挂载【样本区间回购总额_万元】
+    #   11. D14: 00700 等有回购记录时不保留为 null 的无记录说明键
+    # - 输出：所有断言全部成功通过
+    # =========================================================================
+    def test_d1_to_d14_fixes(self):
+        """验证实测 A 股与港股 D1~D14 专项问题修复收敛性与口径自洽性"""
+        # 1. 验证 D1: 600030 中信证券现金流纠正与利润表说明无保险词眼
+        cf_600030 = self.gw.stock_financials({"symbol": "600030", "report_type": "cashflow", "limit_periods": 1})
+        cf_row = cf_600030["statements"][0]
+        self.assertNotIn("支付原保险合同赔付款项的现金", cf_row)
+        self.assertIn("为交易目的而持有的金融资产及融出资金等净支出", cf_row)
+        self.assertGreater(cf_row["为交易目的而持有的金融资产及融出资金等净支出"], 40000000000.0)
+        self.assertIn("证券企业现金流科目纠偏说明", cf_row.get("现金流量表加总纪律说明", ""))
+        self.assertIn("收到的税费返还", cf_row.get("现金流量表加总纪律说明", ""))
+
+        inc_600030 = self.gw.stock_financials({"symbol": "600030", "report_type": "income", "limit_periods": 1})
+        inc_row = inc_600030["statements"][0]
+        self.assertNotIn("保险企业收入说明", inc_row)
+        self.assertIn("证券企业收入说明", inc_row)
+
+        # 验证 601336 真保险不受影响
+        inc_601336 = self.gw.stock_financials({"symbol": "601336", "report_type": "income", "limit_periods": 1})
+        self.assertIn("保险企业收入说明", inc_601336["statements"][0])
+
+        # 2. 验证 D2: 002594 比亚迪自算普通股 PB 为 2.8461，002698 为 2.7869
+        q_002594 = self.gw.stock_quotes({"symbol": "002594"})
+        ext_002594 = q_002594.get("估值与基本盘面", {})
+        self.assertEqual(ext_002594.get("市净率_PB_自算_普通股"), 2.8461)
+
+        q_002698 = self.gw.stock_quotes({"symbol": "002698"})
+        ext_002698 = q_002698.get("估值与基本盘面", {})
+        self.assertEqual(ext_002698.get("市净率_PB_自算_普通股"), 2.7869)
+
+        # 3. 验证 D3: 002594 资产负债表物理剔除重复别名键【专项储备】
+        bal_002594 = self.gw.stock_financials({"symbol": "002594", "report_type": "balance", "limit_periods": 1})
+        bal_row = bal_002594["statements"][0]
+        self.assertNotIn("专项储备", bal_row)
+        self.assertIn("外币报表折算差额", bal_row)
+        self.assertIn("所有者权益双计剔除说明", bal_row)
+
+        # 4. 验证 D4: 港股行情挂载【总市值_港元】、【流通市值_港元】
+        q_00700 = self.gw.stock_quotes({"symbol": "00700"})
+        ext_00700 = q_00700.get("估值与基本盘面", {})
+        self.assertIn("总市值_港元", ext_00700)
+        self.assertIn("流通市值_港元", ext_00700)
+        self.assertEqual(ext_00700["总市值_港元"], ext_00700["总市值_元"])
+        self.assertIn("港股市值计价货币特别提示", ext_00700.get("市值口径说明", ""))
+
+        # 5. 验证 D5: 港股财报清洗 DATE_TYPE_CODE 裸码
+        fin_00700 = self.gw.stock_financials({"symbol": "00700", "report_type": "income", "limit_periods": 2})
+        for s in fin_00700.get("statements", []):
+            self.assertNotIn("DATE_TYPE_CODE", s)
+
+        # 6. 验证 D7: 02026 现金流跨表说明去除“无缝勾稽”
+        cf_02026 = self.gw.stock_financials({"symbol": "02026", "report_type": "cashflow", "limit_periods": 1})
+        cf_02026_row = cf_02026["statements"][0]
+        cross_note = cf_02026_row.get("跨表币种勾稽说明", "")
+        self.assertNotIn("无缝勾稽", cross_note)
+        self.assertIn("准则残差", cross_note)
+
+        # 7. 验证 D8: 02026 财报会计口径说明不称统一为 CNY，体现 USD
+        account_note = cf_02026.get("会计口径与说明", "")
+        self.assertNotIn("币种统一为【CNY】", account_note)
+        self.assertIn("USD", account_note)
+
+        # 8. 验证 D9: 港股分钟线成交量说明声明已覆盖 16:08 CAS 竞价且总量闭合
+        kline_00700 = self.gw.stock_kline({"symbol": "00700", "period": "1m", "count": 10})
+        vol_note = kline_00700.get("成交量口径说明", "")
+        self.assertIn("收市竞价交易时段 (CAS)", vol_note)
+        self.assertIn("100% 代数闭合对齐", vol_note)
+
+        # 9. 验证 D10: indicators.table5 空表时注入明确质押状态说明
+        f10_ind = self.gw.stock_f10({"symbol": "600519", "category": "indicators"})
+        self.assertIn("质押状态说明", f10_ind)
+
+        # 10. 验证 D13: 回购卡片跨市场统一挂载【样本区间回购总额_万元】
+        bb_hk = self.gw.stock_f10({"symbol": "00700", "category": "buyback"})
+        self.assertIn("累计已实施回购总额_万元", bb_hk.get("data", {}))
+        self.assertIn("样本区间回购总额_万元", bb_hk.get("data", {}))
+
+        # 11. 验证 D14: 00700 等有回购记录时不保留为 null 的无记录说明键
+        self.assertNotIn("无记录说明", bb_hk)
+        rep_hk = self.gw.stock_f10({"symbol": "00700", "category": "repurchases"})
+        self.assertNotIn("无记录说明", rep_hk)
+
 
 if __name__ == "__main__":
     unittest.main()

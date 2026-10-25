@@ -1667,17 +1667,17 @@ class FinanceGateway:
                             tdx_res["多阶段解禁明细"] = fb_unlocks
                     except Exception:
                         pass
-                elif norm_cat == "summary":
+                elif norm_cat in ("summary", "indicators"):
                     t5_rows = formatted_tables.get("table5", [])
-                    # 检查整张 F10 摘要表是否具备任何实质非空非 None 业务数据
+                    # 检查整张 F10 摘要/指标表是否具备任何实质非空非 None 业务数据
                     summary_has_real_data = any(
                         any(v is not None and str(v).strip() not in ("", "--", "None", "null") for v in row.values())
                         for t_rows in formatted_tables.values() for row in t_rows
                     )
-                    # 修复 P2-5：严谨区分“确无质押”与“未采集”，空表时客观说明无记录，有明细时准确呈现
+                    # 修复 P2-5 与 D10：严谨区分“确无质押”与“未采集”，indicators/summary 下空表时客观说明无记录，有明细时准确呈现
                     if not t5_rows:
                         if summary_has_real_data:
-                            tdx_res["质押状态说明"] = "F10 摘要未收录当前股东股权质押明细（暂无质押披露记录或数据源未采集，不可直接等同于已核实零质押，请以中登公司及交易所官方质押公告为准）。"
+                            tdx_res["质押状态说明"] = "F10 摘要/指标表未收录当前股东股权质押明细（暂无质押披露记录或数据源未采集，不可直接等同于已核实零质押，请以中登公司及交易所官方质押公告为准）。"
                     else:
                         tdx_res["质押状态说明"] = f"该公司存在股东股权质押明细记录（共 {len(t5_rows)} 条记录，详见 table5 质押明细表）。"
                         tdx_res["质押比例口径说明"] = (
@@ -1904,11 +1904,20 @@ class FinanceGateway:
                 for ok, cn in F10_TABLE0_SUMMARY_MAP.items():
                     if ok in row:
                         row[cn] = row.pop(ok)
-                # 规范化 业绩披露日期 为 ISO 格式 YYYY-MM-DD，并自陈排期状态 (修复 Q4 与 P2-3)
+                # 规范化 业绩披露日期 为 ISO 格式 YYYY-MM-DD，并自陈排期状态 (修复 Q4 与 P2-3, 收敛 D14)
                 raw_jjrq = str(row.get("业绩披露日期") or "").strip()
                 if re.match(r"^\d{8}$", raw_jjrq):
-                    row["业绩披露日期"] = f"{raw_jjrq[:4]}-{raw_jjrq[4:6]}-{raw_jjrq[6:8]}"
-                    row["业绩披露日期说明"] = "该日期为上游通达信收录的预约或实际财报披露日；若存在超出当前年度的远期占位，以交易所官方最新披露预约日历为准。"
+                    formatted_dt = f"{raw_jjrq[:4]}-{raw_jjrq[4:6]}-{raw_jjrq[6:8]}"
+                    row["业绩披露日期"] = formatted_dt
+                    y_val = int(raw_jjrq[:4])
+                    curr_year = datetime.datetime.now().year
+                    if y_val > curr_year + 1:
+                        row["业绩披露日期说明"] = (
+                            f"上游通达信原始披露日({formatted_dt})年份超出当前排期窗口({curr_year}年)，系数据源远期排期占位符（非真实预约日）；"
+                            "下一期真实业绩披露预约时间请以交易所（上交所/深交所）官方预约披露日历为准。"
+                        )
+                    else:
+                        row["业绩披露日期说明"] = "该日期为上游通达信收录的官方预约或实际财报披露日；若存在超出当前年度的远期占位，以交易所官方最新披露预约日历为准。"
                 else:
                     row["业绩披露日期"] = None
                     row["业绩披露日期说明"] = "交易所与上游通道暂未收录下一期财报预约披露日（尚未排期或上一披露窗口已过等待新排期）。"
