@@ -378,6 +378,41 @@ class TdxClient:
                     if common_prefix_len >= 3:
                         filtered_candidates.append(e)
                 valid_entities = filtered_candidates
+            elif not clean_code.isdigit() and valid_entities:
+                # =========================================================================
+                # 【功能块 3.6：名称型查询无关联语义近邻过滤 (修复 P3-3)】
+                # - 输入：raw_query (用户输入的查询字符串), valid_entities (当前已初筛实体列表)
+                # - 功能：解决 RAG 向量检索在用户输入不存在的公司名（如'不存在的公司名XYZ'）时
+                #         强制返回中国移动/中国电信/张家界等完全无关近邻的缺陷；
+                #         通过字面公共汉字交集、子串包含及拼音子串关联度检验，彻底剔除零关联假近邻。
+                # - 输出：过滤后的有效相关实体列表（无任何关联时规范收敛为空列表）
+                # =========================================================================
+                q_lower = raw_query.lower()
+                q_chinese = set(re.findall(r"[\u4e00-\u9fa5]", q_lower))
+                common_stop = {"股", "份", "有", "限", "公", "司", "集", "团", "a", "b", "h", "s", "w", "港"}
+                meaningful_q_chinese = q_chinese - common_stop
+                q_alpha = re.sub(r"[^a-z0-9]", "", q_lower)
+
+                filtered_name_candidates = []
+                for e in valid_entities:
+                    cand_name = str(e.get("name") or "").lower()
+                    cand_aliases = [str(a).lower() for a in e.get("aliases", []) if str(a).strip()]
+                    # 1. 强关联：query 是名称/别名子串，或名称/别名是 query 子串
+                    if (cand_name and (cand_name in q_lower or q_lower in cand_name)) or any(a and (a in q_lower or q_lower in a) for a in cand_aliases):
+                        filtered_name_candidates.append(e)
+                        continue
+                    # 2. 中文匹配：若查询词包含有意义汉字，必须至少存在 1 个非停用词汉字交集
+                    if meaningful_q_chinese:
+                        cand_chars = set(re.findall(r"[\u4e00-\u9fa5]", cand_name)) - common_stop
+                        if meaningful_q_chinese & cand_chars:
+                            filtered_name_candidates.append(e)
+                            continue
+                    # 3. 拼音或纯字母/代码匹配：仅当查询包含至少2位字母且为别名子串或别名为其子串时保留
+                    elif len(q_alpha) >= 2:
+                        if any(len(a) >= 2 and (q_alpha in a or a in q_alpha) for a in cand_aliases):
+                            filtered_name_candidates.append(e)
+                            continue
+                valid_entities = filtered_name_candidates
 
             entities = valid_entities
         elif market_range in ("HK", "HK-GP"):
@@ -391,6 +426,33 @@ class TdxClient:
                 if not (c_str.isdigit() and len(c_str) == 5):
                     continue
                 valid_entities.append(e)
+
+            # 港股名称型查询同样过滤无关联近邻 (修复 P3-3)
+            if not clean_code.isdigit() and valid_entities:
+                q_lower = raw_query.lower()
+                q_chinese = set(re.findall(r"[\u4e00-\u9fa5]", q_lower))
+                common_stop = {"股", "份", "有", "限", "公", "司", "集", "团", "a", "b", "h", "s", "w", "港"}
+                meaningful_q_chinese = q_chinese - common_stop
+                q_alpha = re.sub(r"[^a-z0-9]", "", q_lower)
+
+                filtered_name_candidates = []
+                for e in valid_entities:
+                    cand_name = str(e.get("name") or "").lower()
+                    cand_aliases = [str(a).lower() for a in e.get("aliases", []) if str(a).strip()]
+                    if (cand_name and (cand_name in q_lower or q_lower in cand_name)) or any(a and (a in q_lower or q_lower in a) for a in cand_aliases):
+                        filtered_name_candidates.append(e)
+                        continue
+                    if meaningful_q_chinese:
+                        cand_chars = set(re.findall(r"[\u4e00-\u9fa5]", cand_name)) - common_stop
+                        if meaningful_q_chinese & cand_chars:
+                            filtered_name_candidates.append(e)
+                            continue
+                    elif len(q_alpha) >= 2:
+                        if any(len(a) >= 2 and (q_alpha in a or a in q_alpha) for a in cand_aliases):
+                            filtered_name_candidates.append(e)
+                            continue
+                valid_entities = filtered_name_candidates
+
             entities = valid_entities
 
         return entities
@@ -572,7 +634,14 @@ class PublicFallbackClient:
     def get_news(self, symbol: str, limit: int = 5, entity_name: str | None = None) -> list[dict[str, Any]]:
         raw_query = symbol.strip()
         clean_code = re.sub(r"[^\d]", "", raw_query)
-        req_limit = max(1, min(limit, 10))
+        # 严格校验新闻 limit 参数范围 (修复 P3-1: 杜绝 limit=0 越界返回 1 条)
+        try:
+            n_limit = int(limit)
+        except (ValueError, TypeError):
+            raise ValueError(f"limit 必须为整数，收到: {limit}")
+        if n_limit < 1 or n_limit > 10:
+            raise ValueError(f"limit 参数越界: {n_limit}，必须在 1 到 10 之间")
+        req_limit = n_limit
 
         # 智能确定检索词与标的名称组合（确保精准命中正主个股，杜绝泛化模糊数字匹配噪声）
         if entity_name:
@@ -1026,7 +1095,15 @@ class FinanceGateway:
         if adjust not in valid_adjusts:
             raise ValueError(f"无效的复权方式 '{arguments.get('adjust')}'。支持的复权方式为: ['qfq', 'hfq', 'none']")
 
-        count = int(arguments.get("count", 30))
+        # 严格校验请求根数参数范围 (修复 P3-1: 杜绝非法负数/零越界)
+        raw_count = arguments.get("count", 30)
+        try:
+            count = int(raw_count)
+        except (ValueError, TypeError):
+            raise ValueError(f"count 必须为整数，收到: {raw_count}")
+        if count < 1 or count > 500:
+            raise ValueError(f"count 参数越界: {count}，必须在 1 到 500 之间")
+
         setcode = arguments.get("setcode")
         with_indicators = bool(arguments.get("with_indicators", True))
         return self.tdx_client.get_kline(
@@ -1063,7 +1140,15 @@ class FinanceGateway:
         if period_type not in valid_period_types:
             raise ValueError(f"无效的报告期口径 '{arguments.get('period_type')}'。支持的口径为: ['report', 'quarter']")
 
-        limit_periods = int(arguments.get("limit_periods", 4))
+        # 严格校验历史财报期数范围 (修复 P3-1: 杜绝 limit_periods=0 导致空表及 >10 越界)
+        raw_lp = arguments.get("limit_periods", 4)
+        try:
+            limit_periods = int(raw_lp)
+        except (ValueError, TypeError):
+            raise ValueError(f"limit_periods 必须为整数，收到: {raw_lp}")
+        if limit_periods < 1 or limit_periods > 10:
+            raise ValueError(f"limit_periods 参数越界: {limit_periods}，必须在 1 到 10 之间")
+
         return self.tdx_client.get_financial_statements(
             symbol=symbol,
             report_type=report_type,
@@ -1112,6 +1197,25 @@ class FinanceGateway:
         norm_cat = category_alias_map.get(cat_lower, cat_lower)
         if norm_cat not in valid_categories:
             raise ValueError(f"无效的 F10 基本面分类 '{category}'。支持的分类为: ['concepts', 'industry', 'events', 'dividends', 'forecast', 'shareholders', 'top_holders', 'repurchases', 'buyback', 'margin_trading', 'capital_flow', 'limit_up', 'lhb', 'unlocks', 'summary', 'basic_info', 'indicators', 'financials']")
+
+        # 严格校验 periods 与 limit 参数边界 (修复 P3-1: 杜绝越界静默接收与空表)
+        req_periods = arguments.get("periods")
+        if req_periods is not None:
+            try:
+                n_p = int(req_periods)
+            except (ValueError, TypeError):
+                raise ValueError(f"periods 必须为整数，收到: {req_periods}")
+            if n_p < 1 or n_p > 30:
+                raise ValueError(f"periods 参数越界: {n_p}，必须在 1 到 30 之间")
+
+        req_limit = arguments.get("limit")
+        if req_limit is not None:
+            try:
+                n_l = int(req_limit)
+            except (ValueError, TypeError):
+                raise ValueError(f"limit 必须为整数，收到: {req_limit}")
+            if n_l < 1 or n_l > 200:
+                raise ValueError(f"limit 参数越界: {n_l}，必须在 1 到 200 之间")
 
         # 修复 P2-1: 通用 limit 截断器（支持对所有单表返回行数限制参数全局生效）
         def _apply_limit_post(res_dict: dict[str, Any]) -> dict[str, Any]:
@@ -2240,7 +2344,9 @@ class FinanceGateway:
                                     row["市净率_PB"] = real_pb_val
                                     pb_yishou = gz_info.get("市净率_PB_昨收_换期重算")
                                     if pb_yishou:
-                                        row["市净率_PB_昨收"] = pb_yishou
+                                        # 修复 P2-1: 保持 table6.市净率_PB_昨收 清算日基准价统一，
+                                        # 严禁将其覆盖为上一交易日昨收价计算的 pb_yishou 造成跨标的口径分裂；
+                                        # 昨收换期重算仅作为显式独立键挂载供特殊需要参考
                                         row["市净率_PB_昨收_换期重算"] = pb_yishou
                                     row["PB校准说明"] = calib_note
                     except Exception:
@@ -2278,8 +2384,23 @@ class FinanceGateway:
         message = (arguments.get("message") or arguments.get("query") or arguments.get("condition") or "").strip()
         if not message:
             raise ValueError("message 不能为空，请输入自然语言选股条件")
-        limit = int(arguments.get("limit", 10))
-        page = int(arguments.get("page", 1))
+        # 严格校验选股 limit 与 page 参数范围 (修复 P3-1: 杜绝 page=21 等越界返回看似成功的值或空表)
+        raw_limit = arguments.get("limit", 10)
+        try:
+            limit = int(raw_limit)
+        except (ValueError, TypeError):
+            raise ValueError(f"limit 必须为整数，收到: {raw_limit}")
+        if limit < 1 or limit > 100:
+            raise ValueError(f"limit 参数越界: {limit}，必须在 1 到 100 之间")
+
+        raw_page = arguments.get("page", 1)
+        try:
+            page = int(raw_page)
+        except (ValueError, TypeError):
+            raise ValueError(f"page 必须为整数，收到: {raw_page}")
+        if page < 1 or page > 20:
+            raise ValueError(f"page 参数越界: {page}，必须在 1 到 20 之间")
+
         filter_st = bool(arguments.get("filter_st", True))
         return self.tdx_client.screener(message=message, limit=limit, page=page, filter_st=filter_st)
 
@@ -2299,7 +2420,15 @@ class FinanceGateway:
                 )
             entity_name = entity.get("entity_name")
 
-        limit = int(arguments.get("limit", 5))
+        # 严格校验新闻 limit 参数范围 (修复 P3-1: 杜绝 limit=0 越界返回 1 条)
+        raw_limit = arguments.get("limit", 5)
+        try:
+            limit = int(raw_limit)
+        except (ValueError, TypeError):
+            raise ValueError(f"limit 必须为整数，收到: {raw_limit}")
+        if limit < 1 or limit > 10:
+            raise ValueError(f"limit 参数越界: {limit}，必须在 1 到 10 之间")
+
         news = self.fallback_client.get_news(symbol=symbol, limit=limit, entity_name=entity_name)
         if news and isinstance(news, list):
             news.sort(key=lambda x: str(x.get("time") or x.get("datetime") or ""), reverse=True)

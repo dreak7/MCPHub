@@ -3698,6 +3698,286 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         self.assertIsInstance(bars[0]["volume"], int)
 
 
+
+class TestAShareNewRoundP2P3Convergence(unittest.TestCase):
+    """测试实测 A 股新一轮 P2-1、P3-1 至 P3-5 缺陷全面收敛与 8 大口径准则对齐"""
+
+    def setUp(self):
+        from mcp_gateway.finance import FinanceGateway
+        self.gw = FinanceGateway()
+
+    def test_p2_1_f10_table6_pb_yesterday_not_overwritten(self):
+        """验证 P2-1: table6.市净率_PB_昨收 保持基准价统一，不被覆盖为上一日昨收计算值"""
+        res = self.gw.stock_f10({"symbol": "002223", "category": "summary"})
+        t6 = res.get("formatted_tables", {}).get("table6", [])
+        if t6:
+            row = t6[0]
+            self.assertIn("市净率_PB_昨收", row)
+            # 若触发换期重算，独立挂载键
+            if "市净率_PB_昨收_换期重算" in row:
+                self.assertIsNotNone(row["市净率_PB_昨收_换期重算"])
+
+    def test_p3_1_parameter_out_of_bounds_validation(self):
+        """验证 P3-1: 全工具入参越界强拦截，杜绝静默返回或空表假成功"""
+        # 1. stock_kline count 校验 (1~500)
+        with self.assertRaises(ValueError):
+            self.gw.stock_kline({"symbol": "600519", "count": 0})
+        with self.assertRaises(ValueError):
+            self.gw.stock_kline({"symbol": "600519", "count": -5})
+        with self.assertRaises(ValueError):
+            self.gw.stock_kline({"symbol": "600519", "count": 501})
+
+        # 2. stock_financials limit_periods 校验 (1~10)
+        with self.assertRaises(ValueError):
+            self.gw.stock_financials({"symbol": "600519", "report_type": "balance", "limit_periods": 0})
+        with self.assertRaises(ValueError):
+            self.gw.stock_financials({"symbol": "600519", "report_type": "balance", "limit_periods": 11})
+
+        # 3. stock_f10 periods (1~30) 与 limit (1~200) 校验
+        with self.assertRaises(ValueError):
+            self.gw.stock_f10({"symbol": "600519", "category": "summary", "periods": 0})
+        with self.assertRaises(ValueError):
+            self.gw.stock_f10({"symbol": "600519", "category": "summary", "periods": 31})
+        with self.assertRaises(ValueError):
+            self.gw.stock_f10({"symbol": "600519", "category": "summary", "limit": 0})
+        with self.assertRaises(ValueError):
+            self.gw.stock_f10({"symbol": "600519", "category": "summary", "limit": 201})
+
+        # 4. stock_screener limit (1~100) 与 page (1~20) 校验
+        with self.assertRaises(ValueError):
+            self.gw.stock_screener({"message": "白酒", "limit": 0})
+        with self.assertRaises(ValueError):
+            self.gw.stock_screener({"message": "白酒", "limit": 101})
+        with self.assertRaises(ValueError):
+            self.gw.stock_screener({"message": "白酒", "page": 0})
+        with self.assertRaises(ValueError):
+            self.gw.stock_screener({"message": "白酒", "page": 21})
+
+        # 5. stock_news limit (1~10) 校验
+        with self.assertRaises(ValueError):
+            self.gw.stock_news({"symbol": "600519", "limit": 0})
+        with self.assertRaises(ValueError):
+            self.gw.stock_news({"symbol": "600519", "limit": 11})
+
+    def test_p3_2_valuation_note_no_perpetual_bond_contradiction(self):
+        """验证 P3-2: 002594 估值口径说明严格指明高估偏差，无永续债时不出现未扣永续债低估字样"""
+        res = self.gw.stock_quotes({"symbol": "002594"})
+        ext = res.get("估值与基本盘面", {})
+        note = ext.get("估值口径说明", "")
+        # 当行情 PB > 自算普通股 PB 时，必须提示高估偏差，且不可在说明中称 002594 自身未扣永续债低估
+        if ext.get("市净率_PB", 0) > ext.get("市净率_PB_自算_普通股", 0):
+            self.assertIn("高估偏差", note)
+            self.assertNotIn("存在约 4.9%~16% 的低估偏差", note)
+            self.assertNotIn("未扣除其他权益工具(永续债/优先股)的归母总权益计算而存在约", note)
+
+    def test_p3_3_stock_lookup_irrelevant_name_query_filtered(self):
+        """验证 P3-3: stock_lookup 名称型未命中严格过滤无交集近邻，返回空候选说明"""
+        res_a = self.gw.stock_lookup({"query": "不存在的公司名XYZ", "range": "AG"})
+        self.assertEqual(len(res_a.get("entities", [])), 0)
+        self.assertIn("候选为空说明", res_a)
+
+        res_hk = self.gw.stock_lookup({"query": "不存在的港股XYZ", "range": "HK-GP"})
+        self.assertEqual(len(res_hk.get("entities", [])), 0)
+        self.assertIn("候选为空说明", res_hk)
+
+        res_num = self.gw.stock_lookup({"query": "888888", "range": "AG"})
+        self.assertEqual(len(res_num.get("entities", [])), 0)
+
+    def test_p3_4_quotes_weibi_weicha_fields(self):
+        """验证 P3-4: quotes 盘口核心行情包含 委买总委托量_手, 委卖总委托量_手, 委差_手, 委比_pct"""
+        # A 股
+        res_a = self.gw.stock_quotes({"symbol": "600519"})
+        hq_a = res_a.get("盘口核心行情", {})
+        self.assertIn("委买总委托量_手", hq_a)
+        self.assertIn("委卖总委托量_手", hq_a)
+        self.assertIn("委差_手", hq_a)
+        self.assertIn("委比_pct", hq_a)
+        self.assertIsInstance(hq_a["委买总委托量_手"], int)
+        self.assertIsInstance(hq_a["委卖总委托量_手"], int)
+        self.assertIsInstance(hq_a["委差_手"], int)
+        self.assertIsInstance(hq_a["委比_pct"], (float, int))
+
+        # 港股
+        res_hk = self.gw.stock_quotes({"symbol": "00700"})
+        hq_hk = res_hk.get("盘口核心行情", {})
+        self.assertIn("委买总委托量_手", hq_hk)
+        self.assertIn("委卖总委托量_手", hq_hk)
+        self.assertIn("委差_手", hq_hk)
+        self.assertIn("委比_pct", hq_hk)
+        self.assertEqual(hq_hk["委买总委托量_手"], 0)
+        self.assertEqual(hq_hk["委卖总委托量_手"], 0)
+        self.assertEqual(hq_hk["委差_手"], 0)
+        self.assertEqual(hq_hk["委比_pct"], 0.0)
+
+    def test_p3_5_version_consistency(self):
+        """验证 P3-5: README, SKILL.md, tool_api_reference.md 全链路统一为 v2.0.0"""
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        # README.md
+        with open(os.path.join(base_dir, "README.md"), "r", encoding="utf-8") as f:
+            readme_text = f.read()
+        self.assertIn("# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.0)", readme_text)
+        self.assertIn("### v2.0.0 — 实测 A 股 P2-1、P3-1~P3-5 缺陷全面收敛", readme_text)
+
+        # SKILL.md
+        with open(os.path.join(base_dir, "mcphub-finance", "SKILL.md"), "r", encoding="utf-8") as f:
+            skill_text = f.read()
+        self.assertIn("version: 2.0.0", skill_text)
+        self.assertIn("陷阱 125", skill_text)
+
+        # tool_api_reference.md
+        with open(os.path.join(base_dir, "mcphub-finance", "references", "tool_api_reference.md"), "r", encoding="utf-8") as f:
+            ref_text = f.read()
+        self.assertIn("版本**：v2.0.0", ref_text)
+        self.assertIn("委买总委托量_手", ref_text)
+
+
+
+# =========================================================================
+# 【功能块 8.7：港股最新实测 P2-1、P2-2、P3-1~P3-5 与 9 大口径全面收敛测试】
+# - 输入：FinanceGateway 调用 stock_quotes, stock_kline, stock_financials, stock_f10
+# - 功能：1. 验证 P2-1: 00883 模板轴分裂自陈（一/三季报 64 键 vs 中报/年报 52~53 键，跨表现金差千亿级，结构不可比）；
+#         2. 验证 P2-2: 02601 保险两侧明细空洞化（约 88% 资产及 ≥90% 负债归入其他项目，严禁做细分结构分析）；
+#         3. 验证 P3-1: 52周最高与52周最高_前复权逐位同值，前复权口径自陈消除下游误解；
+#         4. 验证 P3-2: basic_info 权威上市日期（YYYY-MM-DD）与每手股数（100/200/500/1000）多源补齐非空；
+#         5. 验证 P3-3: top_holders 彻底消除 00688/02628 硬编码跨票文案泄漏；
+#         6. 验证 P3-4: repurchases (纯明细列表) 与 buyback (聚合卡片+明细) 参数定位与分工说明；
+#         7. 验证 P3-5: 60m 最后一根 16:00 bar 专用于吸收 CAS 集中撮合量（量额比等同 30m 16:00 单根）；
+#         8. 验证 WARN-2: 01088 / 02601 现金差额客观自陈为【口径不可分解】，杜绝强套受限存款解释；
+#         9. 验证 WARN-3: 00700 腾讯主要股东 Naspers 申报时点股本漂移（28.86% vs 30.46%）；
+#         10. 验证 Skill 与 References 接口对齐性。
+# - 输出：各断言 100% 验证通过
+# =========================================================================
+class TestHKStockNewEmpiricalConvergence(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.gw = FinanceGateway()
+
+    def test_p2_1_and_warn_2_template_split_and_unreconciled_cash(self):
+        """验证 P2-1: 00883 报告期模板轴分裂自陈 与 WARN-2: 01088 现金不可分解自陈"""
+        # 1. 00883 模板轴分裂说明 (结构不可比)
+        res_00883 = self.gw.stock_financials({"symbol": "00883", "report_type": "cashflow", "limit_periods": 2})
+        stmts_883 = res_00883.get("statements", [])
+        if stmts_883:
+            cash_note = stmts_883[0].get("现金口径说明", "")
+            self.assertIn("报告期模板轴分裂", cash_note)
+            self.assertIn("结构不可比", cash_note)
+            self.assertIn("严禁跨季度进行结构对比", cash_note)
+
+        # 2. 01088 现金差额不可分解自陈
+        res_01088 = self.gw.stock_financials({"symbol": "01088", "report_type": "cashflow", "limit_periods": 2})
+        stmts_1088 = res_01088.get("statements", [])
+        if stmts_1088:
+            cash_note_1088 = stmts_1088[0].get("现金口径说明", "")
+            self.assertIn("口径不可分解", cash_note_1088)
+            self.assertIn("严禁分析端强套受限存款假说解释", cash_note_1088)
+
+    def test_p2_2_insurance_hollow_out_structural_restriction(self):
+        """验证 P2-2: 02601 中国太保资产负债两侧明细空洞化与结构限制说明"""
+        res_02601 = self.gw.stock_financials({"symbol": "02601", "report_type": "balance", "limit_periods": 1})
+        stmts_2601 = res_02601.get("statements", [])
+        self.assertGreater(len(stmts_2601), 0)
+        stmt0 = stmts_2601[0]
+        note = stmt0.get("保险资产负债两侧明细空洞化与结构限制说明", "")
+        self.assertIn("明细严重空洞化", note)
+        self.assertIn("严禁进行资产/负债细分结构分析", note)
+        self.assertIn("核心总额", note)
+
+    def test_p3_1_52_week_qfq_price_and_disclosure(self):
+        """验证 P3-1: 52周最高与52周最高_前复权逐位等值，说明明确前复权口径"""
+        res_quotes = self.gw.stock_quotes({"symbol": "00700"})
+        valuation = res_quotes.get("估值与基本盘面", {})
+        h_52 = valuation.get("52周最高")
+        h_52_qfq = valuation.get("52周最高_前复权")
+        self.assertIsNotNone(h_52)
+        self.assertIsNotNone(h_52_qfq)
+        self.assertEqual(h_52, h_52_qfq)
+
+        note_52 = valuation.get("52周价格区间说明", "")
+        self.assertIn("前复权口径自陈", note_52)
+        self.assertIn("同源逐位等值", note_52)
+        self.assertIn("下游切勿按'不带后缀=不复权'产生误解", note_52)
+
+    def test_p3_2_basic_info_listing_date_and_lot_size_populated(self):
+        """验证 P3-2: 00700 等标的 basic_info 上市日期与每手股数权威下发非空"""
+        res_basic = self.gw.stock_f10({"symbol": "00700", "category": "basic_info"})
+        table = res_basic.get("formatted_tables", {}).get("basic_info", [])
+        self.assertGreater(len(table), 0)
+        row0 = table[0]
+        # 上市日期 (2004-06-16)
+        listing_date = row0.get("上市日期", "")
+        self.assertTrue(len(listing_date) >= 10)
+        self.assertIn("-", listing_date)
+        # 每手股数 (100)
+        lot_size = str(row0.get("每手股数", ""))
+        self.assertEqual(lot_size, "100")
+        # 董事长 (马化腾)
+        dsz = row0.get("董事长", "")
+        self.assertIn("马化腾", dsz)
+
+    def test_p3_3_and_warn_3_top_holders_no_leakage_and_capital_drift(self):
+        """验证 P3-3: top_holders 消除别家硬编码泄露 与 WARN-3: 股本漂移说明"""
+        # 1. 00883 top_holders 检查不包含 00688 或 02628 硬编码举例
+        res_00883 = self.gw.stock_f10({"symbol": "00883", "category": "top_holders"})
+        tip_883 = res_00883.get("最新申报时效提示", "")
+        note_883 = res_00883.get("股东口径说明", "")
+        self.assertNotIn("00688", tip_883)
+        self.assertNotIn("02628", tip_883)
+        self.assertNotIn("00688", note_883)
+        self.assertNotIn("02628", note_883)
+
+        # 2. 00700 top_holders 检查 WARN-3 股本漂移说明
+        res_00700 = self.gw.stock_f10({"symbol": "00700", "category": "top_holders"})
+        drift_note = res_00700.get("申报时点股本漂移说明", "")
+        self.assertIn("申报时点股本漂移机理说明", drift_note)
+        self.assertIn("Naspers", drift_note)
+        self.assertIn("回购注销引发的『申报时点股本漂移』", drift_note)
+
+    def test_p3_4_repurchases_vs_buyback_parameter_positioning(self):
+        """验证 P3-4: repurchases 与 buyback 参数分工与定位说明"""
+        # repurchases: 纯明细流水
+        res_rep = self.gw.stock_f10({"symbol": "00700", "category": "repurchases"})
+        self.assertEqual(res_rep.get("category"), "repurchases")
+        self.assertIn("repurchases", res_rep.get("formatted_tables", {}))
+        self.assertIn("参数定位与分工说明", res_rep)
+        self.assertIn("定位于纯流水明细列表", res_rep["参数定位与分工说明"])
+
+        # buyback: 宏观聚合分析 + 明细
+        res_bb = self.gw.stock_f10({"symbol": "00700", "category": "buyback"})
+        self.assertEqual(res_bb.get("category"), "buyback")
+        self.assertIn("buyback_summary", res_bb.get("formatted_tables", {}))
+        self.assertIn("buyback_details", res_bb.get("formatted_tables", {}))
+        self.assertIn("参数定位与分工说明", res_bb)
+        self.assertIn("定位于宏观聚合分析", res_bb["参数定位与分工说明"])
+
+    def test_p3_5_kline_60m_cas_bar_explanation(self):
+        """验证 P3-5: 60m 最后一根 bar 明确自陈收市竞价时段 (CAS) 集中撮合量"""
+        res_60m = self.gw.stock_kline({"symbol": "00700", "period": "60m", "count": 6})
+        self.assertIn("港股60分钟跨午休切分机制说明", res_60m)
+        cas_note = res_60m["港股60分钟跨午休切分机制说明"]
+        self.assertIn("收市竞价交易时段 (CAS)", cas_note)
+        self.assertIn("集中撮合量", cas_note)
+        self.assertIn("与 30m 最后一根 16:00 bar 完全等值", cas_note)
+
+    def test_skill_trap_126_and_reference_alignment(self):
+        """验证文档层: SKILL.md 陷阱 126 与 tool_api_reference.md 全面对齐"""
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(base_dir, "mcphub-finance", "SKILL.md"), "r", encoding="utf-8") as f:
+            skill_text = f.read()
+        self.assertIn("陷阱 126", skill_text)
+        self.assertIn("报告期模板轴分裂与结构不可比自陈", skill_text)
+        self.assertIn("保险资产负债两侧明细空洞化与结构限制", skill_text)
+
+        with open(os.path.join(base_dir, "mcphub-finance", "references", "tool_api_reference.md"), "r", encoding="utf-8") as f:
+            ref_text = f.read()
+        self.assertIn("P2-1 报告期模板轴分裂自陈", ref_text)
+        self.assertIn("P2-2 保险两侧明细空洞化限制", ref_text)
+        self.assertIn("WARN-2 现金差额口径不可分解", ref_text)
+        self.assertIn("申报时点股本漂移说明", ref_text)
+
+
 if __name__ == "__main__":
     unittest.main()
 

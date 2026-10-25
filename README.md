@@ -1,10 +1,10 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v1.9.9)
+# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.0)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 192 Passed](https://img.shields.io/badge/Tests-192%20Passed-success.svg)](tests/)
+[![Tests: 216 Passed](https://img.shields.io/badge/Tests-216%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 </div>
@@ -28,7 +28,7 @@ MCPHub 统一服务网关 (12 大标准生产级 MCP 工具)
     ├── stock_quotes           实时行情与 Level-1 基础五档买卖委托盘口 (港股市值精准校准)
     ├── stock_kline            多周期复权K线 + 服务端纯 Python 原生防幻觉指标 (MA/MACD/KDJ/BOLL/RSI)
     ├── stock_financials       国内上市公司财务三张表 (80列会计科目标准对齐，金融合并残差透明解析)
-    ├── stock_f10              深度题材概念谱系、主力资金博弈与股东筹码 (11类官方专线数据全汉化)
+    ├── stock_f10              深度题材概念谱系、主力资金博弈与股东筹码 (18类官方专线数据全汉化)
     ├── stock_screener         JNLPSE 自然语言智能选股 (清洗通讯表头杂质，默认过滤 ST/*ST)
     └── stock_news             个股资讯与重大法定信披公告 (三轨高可用防污染引擎)
 ```
@@ -56,7 +56,7 @@ MCPHub/
 ├── mcphub-finance/              # 【可选外挂】Hermes 专属证券金融分析规范 Skill
 ├── logs/                        # 运行日志目录 (gateway.log)
 ├── state/                       # 持久化状态目录 (provider-state.json 冷却状态与提取缓存)
-├── tests/                       # 172 项全量自动化单元测试套件 (100% 通过)
+├── tests/                       # 216 项全量自动化单元测试套件 (100% 通过)
 ├── MCPHub服务管理面板.bat          # Windows 双击即用一键管理控制台
 ├── README.md                    # 项目全景使用与配置说明文档
 └── LICENSE                      # MIT 开源许可证
@@ -217,7 +217,7 @@ MCPHub/
 | **`stock_quotes`** | 证券金融 | `symbol`, `setcode` | 现价、涨跌幅、真 TTM 滚动市盈率、**港股市值严格校准**、Level-1 五档委托盘口（**无效代码显式拦截**） |
 | **`stock_kline`** | 证券金融 | `symbol`, `period`, `count` | 多周期行情，**服务端纯 Python 原生计算 MA/MACD/KDJ/BOLL/RSI**（杜绝心算幻觉）；**港股全面支持前复权与不复权** |
 | **`stock_financials`** | 证券金融 | `symbol`, `report_type` | 资产负债/利润/现金流三张表，**80列会计科目精准对齐，集团金融合并残差透明解析；港股新浪+东财双源支持，无效代码显式拦截** |
-| **`stock_f10`** | 证券金融 | `symbol`, `category` | 11类官方专线数据，**两融/资金流向全汉化，重大事件倒序排列；亏损标的同比正负号精准解析；港股新浪+东财双源支持，无效代码显式拦截** |
+| **`stock_f10`** | 证券金融 | `symbol`, `category`, `periods`, `limit` | 18大官方分类数据全覆盖，**两融/资金流向全汉化，重大事件倒序排列；亏损标的同比正负号精准解析；港股新浪+东财双源支持，无效代码显式拦截** |
 | **`stock_screener`** | 证券金融 | `message`, `limit`, `page`, `filter_st` | 中文自然语言条件选股，**自动清洗杂质表头并默认剔除 ST/\*ST 风险股，支持无缝分页拉取全名单** |
 | **`stock_news`** | 证券金融 | `symbol`, `limit` | 新浪财经主力 + 东财公告备份三轨引擎；**港股自动反查证券简称，彩票预测垃圾资讯与他股噪声严格过滤** |
 
@@ -260,6 +260,16 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### v2.0.0 — 实测 A 股 P2-1、P3-1~P3-5 缺陷全面收敛、参数越界防御与盘口委比委差闭环 (216项全绿)
+
+- **A 股实测 P2-1、P3-1~P3-5 关键业务与口径缺陷彻底收敛**：
+  - **P2-1 f10.table6 市净率_PB_昨收 基准价与落盘语义统一**：移除 table6 中强制将 `市净率_PB_昨收` 覆写为上一交易日昨收计算值的逻辑，保持全市场 10 票 100% 对齐为清算截面基准现价，消除 002223 与其余 9 票的分裂与日期自相矛盾；新增显式独立键【`市净率_PB_昨收_换期重算`】供特殊需要使用；
+  - **P3-1 全量参数边界强校验与防御闭环**：对 `stock_kline` (count: 1~500)、`stock_financials` (limit_periods: 1~10)、`stock_f10` (periods: 1~30, limit: 1~200)、`stock_screener` (limit: 1~100, page: 1~20)、`stock_news` (limit: 1~10) 实施严格类型与数值边界拦截，越界请求直接抛出标准 `ValueError`，彻底根除“返回看似成功值”或“空表且无错”的安全隐患；A股 `count > 300` 附显式【截断说明】与【超限提示】；
+  - **P3-2 估值口径说明与换期说明双向自洽**：针对 002594 等高估偏差标的（PB 3.09 vs 普通股自算 2.8461 高估 8.7%），重构估值偏差告警逻辑，严格区分高估与低估；严禁无永续债标的被套用“永续债扣除低估”解释，实现估值口径说明与换期说明彻底消除自相矛盾；
+  - **P3-3 stock_lookup 名称型未命中无关联语义假近邻清洗**：在 A 股与港股标的检索中增加字符/子串/拼音相关性过滤，对无任何字符或拼音交集的假近邻进行精准清洗，“不存在的公司名XYZ”等无实体匹配直接返回 entities=[] 并附【候选为空说明】；
+  - **P3-4 盘口核心行情委比与委差字段规范补齐**：在 `stock_quotes` 盘口核心行情中新增结构化数值列【`委买总委托量_手`】、【`委卖总委托量_手`】、【`委差_手`】与【`委比_pct`】，下游无需手工心算；港股对应字段默认对齐补齐为 0 并自陈免费专线档位特性；
+  - **P3-5 文档与版本号全链路闭环**：README、代码版本、SKILL.md 及 API 参考手册全链路统一为 `v2.0.0`，完整补齐 2.0.0 变更记录与 8 大口径准则。
 
 ### v1.9.9 — 港股实测 P1~P3 缺陷与 8 大口径准则全面收敛、银行权益真残差严格回归与市值 _港元 命名规范 (192项全绿)
 

@@ -868,7 +868,16 @@ class AStockEngine(BaseMarketEngine):
             pb_calc_str = f"，网关自算普通股市净率为 {pb_calc} 倍" if pb_calc is not None else ""
             pb_diff_warn = ""
             if pb_val is not None and pb_calc is not None and abs(pb_val - pb_calc) > 0.03:
-                pb_diff_warn = f"（注：行情市净率 {pb_val} 倍因BPS分母基于未扣除永续债的归母总权益计算而存在约4.9%~16%的低估偏差；真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
+                pct_diff = round(abs(pb_val - pb_calc) / pb_calc * 100.0, 1)
+                if pb_val > pb_calc:
+                    # 行情市净率高于普通股自算市净率 (如 002594 比亚迪 3.09 vs 2.8461，高估 8.7%)
+                    pb_diff_warn = f"（注：行情市净率 {pb_val} 倍与普通股真实市净率存在约 {pct_diff}% 的高估偏差，系行情 BPS 分母仍基于报告期旧股本或上游净资产统计口径差异所致；真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
+                else:
+                    # 行情市净率低于普通股自算市净率 (低估偏差，如金融股含有永续债或股本扩增)
+                    if 'eq_info' in locals() and eq_info and (raw_gm - ptg_qy > 1000):
+                        pb_diff_warn = f"（注：行情市净率 {pb_val} 倍因BPS分母基于未扣除其他权益工具(永续债/优先股)的归母总权益计算而存在约 {pct_diff}% 的低估偏差；真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
+                    else:
+                        pb_diff_warn = f"（注：行情市净率 {pb_val} 倍与普通股真实市净率存在约 {pct_diff}% 的低估偏差，系行情 BPS 分母基数或口径差异所致；真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
             pb_note = (
                 f"市净率_PB({pb_val}倍{pb_calc_str})由[现价÷每股净资产_BPS]派生；若标的近期发生送转增发导致总股本变动，"
                 "上游每股净资产若停留在报告期旧股本口径将导致PB低估。精确普通股PB建议结合资产负债表重算：普通工商业标的为[总市值 ÷ 归母所有者权益]；"
@@ -962,6 +971,27 @@ class AStockEngine(BaseMarketEngine):
                 "卖五": {"价格": bsp_raw.get("SellPrice5") or bsp_raw.get("SellP5"), "委托量_手": bsp_raw.get("SellVol5") or bsp_raw.get("SellV5")},
             }
 
+        # 修复 P3-4: 自动计算委买总委托量、委卖总委托量、委差与委比并注入【盘口核心行情】
+        buy_total_hand = sum(
+            int(bsp_dict[f"买{i}"]["委托量_手"])
+            for i in range(1, 6)
+            if f"买{i}" in bsp_dict and isinstance(bsp_dict[f"买{i}"].get("委托量_手"), (int, float))
+        )
+        sell_total_hand = sum(
+            int(bsp_dict[f"卖{i}"]["委托量_手"])
+            for i in range(1, 6)
+            if f"卖{i}" in bsp_dict and isinstance(bsp_dict[f"卖{i}"].get("委托量_手"), (int, float))
+        )
+        weicha_hand = buy_total_hand - sell_total_hand
+        total_entrust = buy_total_hand + sell_total_hand
+        weibi_pct = round((weicha_hand / total_entrust) * 100.0, 2) if total_entrust > 0 else 0.0
+
+        if "盘口核心行情" in result:
+            result["盘口核心行情"]["委买总委托量_手"] = buy_total_hand
+            result["盘口核心行情"]["委卖总委托量_手"] = sell_total_hand
+            result["盘口核心行情"]["委差_手"] = weicha_hand
+            result["盘口核心行情"]["委比_pct"] = weibi_pct
+
         if bsp_dict:
             result["五档深度盘口"] = bsp_dict
             # 检查是否处于盘后休市时段（交易所停止连续竞价撮合，盘口仅剩少量静态残量挂单）
@@ -1042,7 +1072,15 @@ class AStockEngine(BaseMarketEngine):
 
         # 预热缓冲区机制：针对计算技术指标 (MACD/EMA/BOLL/KDJ) 的场景，自动多拉取 200 根历史预热缓冲 (Warm-up buffer)
         # 消除递归指数滤波在截断窗口内的初值漂移缺陷 (解决 P1-2)
-        req_count = max(1, min(int(count), 300))
+        # 严格校验请求根数参数范围 (修复 P3-1: 杜绝非法负数/零越界)
+        try:
+            n_count = int(count)
+        except (ValueError, TypeError):
+            raise ValueError(f"count 必须为整数，收到: {count}")
+        if n_count < 1 or n_count > 500:
+            raise ValueError(f"count 参数越界: {n_count}，必须在 1 到 500 之间")
+
+        req_count = min(n_count, 300)
         warmup_buffer = 200 if with_indicators else 0
         want_num = min(800, req_count + warmup_buffer)
 
@@ -1193,6 +1231,14 @@ class AStockEngine(BaseMarketEngine):
             raise ValueError(f"标的代码 '{symbol}' 为港股标的，请调用港股引擎。")
         if not clean_code or len(clean_code) != 6:
             raise ValueError(f"无效的证券代码 '{symbol}'，A 股证券标的代码必须为 6 位数字（如 '600519'）。建议先调用 stock_lookup 工具核对标准代码。")
+
+        # 严格校验历史财报期数范围 (修复 P3-1: 杜绝 limit_periods=0 导致空表及 >10 越界)
+        try:
+            n_lp = int(limit_periods)
+        except (ValueError, TypeError):
+            raise ValueError(f"limit_periods 必须为整数，收到: {limit_periods}")
+        if n_lp < 1 or n_lp > 10:
+            raise ValueError(f"limit_periods 参数越界: {n_lp}，必须在 1 到 10 之间")
 
         # =========================================================================
         # 【功能块 7.1：A股财报统一前置正主有效性拦截守卫 (修复 P0·本轮新发现)】
@@ -2087,15 +2133,30 @@ class AStockEngine(BaseMarketEngine):
 
     def screener(self, message: str, limit: int = 10, page: int = 1, filter_st: bool = True, query: str | None = None, condition: str | None = None, **kwargs: Any) -> dict[str, Any]:
         """通达信自然语言智能选股 (输入中文自然语言条件，如'主板 绩优 储能 连板')"""
+        # 严格校验选股 limit 与 page 参数范围 (修复 P3-1: 杜绝 page=21 等越界返回看似成功的值或空表)
+        try:
+            n_limit = int(limit)
+        except (ValueError, TypeError):
+            raise ValueError(f"limit 必须为整数，收到: {limit}")
+        if n_limit < 1 or n_limit > 100:
+            raise ValueError(f"limit 参数越界: {n_limit}，必须在 1 到 100 之间")
+
+        try:
+            n_page = int(page)
+        except (ValueError, TypeError):
+            raise ValueError(f"page 必须为整数，收到: {page}")
+        if n_page < 1 or n_page > 20:
+            raise ValueError(f"page 参数越界: {n_page}，必须在 1 到 20 之间")
+
         # 修复 Issue 8: 识别查询条件中的港股/香港意图 (包含常见知名港股巨头与港股关键词)
         is_hk_query = bool(re.search(r"港股|香港|HKEX|\bHK\b|恒生|H股|腾讯|美团|阿里|中芯国际港股|小米", message, re.I))
         # 修复 P1: 分页请求与上游切片严格保持 1:1 对齐 (pageSize = limit)
         # 严禁人为虚增 pageSize，避免上游以 (pageNo - 1) * pageSize 计算偏移量时产生翻倍偏移、跳过整页标的
-        fetch_size = max(1, min(limit, 100))
+        fetch_size = n_limit
         req_body = [{
             "message": message.strip(),
             "rang": "AG",
-            "pageNo": str(page),
+            "pageNo": str(n_page),
             "pageSize": str(fetch_size),
         }]
         url = f"{self.api_endpoint}?Entry=JNLPSE:wendaQuery"
