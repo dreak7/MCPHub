@@ -55,6 +55,56 @@ from .invariants import verify_all_financial_invariants
 
 
 # =========================================================================
+# 【功能块 2.0：语义近邻相关度纯函数 (stock_lookup 专用)】
+# - 输入：查询串、RAG 返回的候选实体列表
+# - 功能：剔除未命中时被硬凑出来的零关联近邻；数字码按公共前缀、名称按字面相关度判定
+# - 输出：过滤后的候选列表（零关联时规范收敛为空列表）
+# =========================================================================
+def _common_code_prefix_len(query_code: str, cand_code: str) -> int:
+    n = 0
+    for q_ch, c_ch in zip(query_code, cand_code):
+        if q_ch != c_ch:
+            break
+        n += 1
+    return n
+
+
+def _filter_name_candidates(entities: list[dict[str, Any]], raw_query: str) -> list[dict[str, Any]]:
+    """名称型查询的相关度过滤。
+
+    子串命中（名称/别名与查询互为子串）直接保留；中文查询要求至少 2 个非停用汉字交集
+    （查询本身只有 1 个有效汉字时放宽为 1 个）；纯字母查询沿用「≥2 位且与别名为子串关系」。
+    单字交集不算相关度：一个虚字就能把「不存在…」匹配到「零在科技金融」。
+    """
+    q_lower = raw_query.lower()
+    common_stop = {"股", "份", "有", "限", "公", "司", "集", "团", "a", "b", "h", "s", "w", "港"}
+    meaningful = set(re.findall(r"[\u4e00-\u9fa5]", q_lower)) - common_stop
+    need = min(2, len(meaningful)) if meaningful else 0
+    q_alpha = re.sub(r"[^a-z0-9]", "", q_lower)
+
+    kept: list[dict[str, Any]] = []
+    for e in entities:
+        cand_name = str(e.get("name") or "").lower()
+        cand_aliases = [str(a).lower() for a in e.get("aliases", []) if str(a).strip()]
+        # 1. 强关联：query 是名称/别名子串，或名称/别名是 query 子串
+        if (cand_name and (cand_name in q_lower or q_lower in cand_name)) or any(
+            a and (a in q_lower or q_lower in a) for a in cand_aliases
+        ):
+            kept.append(e)
+            continue
+        # 2. 中文匹配：交集汉字数必须达到 need（默认 2）
+        if meaningful:
+            cand_chars = set(re.findall(r"[\u4e00-\u9fa5]", cand_name)) - common_stop
+            if len(meaningful & cand_chars) >= need:
+                kept.append(e)
+                continue
+        # 3. 纯字母/拼音匹配：≥2 位且与别名互为子串
+        elif len(q_alpha) >= 2 and any(len(a) >= 2 and (q_alpha in a or a in q_alpha) for a in cand_aliases):
+            kept.append(e)
+    return kept
+
+
+# =========================================================================
 # 【功能块 2.1：第一道防翻车安全门（代数闭环安检网装饰器）】
 # - 输入：func (Callable): 网关对外接口方法
 # - 功能：自动对对外交付的财报、行情估值与龙虎榜执行代数恒等式闭环审查
@@ -94,6 +144,7 @@ class TdxClient:
         self.timeout = timeout
         self.logger = logger or logging.getLogger("mcp_gateway.finance")
         self._entity_cache: dict[str, dict[str, Any] | None] = {}
+        self.last_lookup_pruned = 0
         self.hk_engine = HKStockEngine(timeout=self.timeout, logger=self.logger)
         self.a_engine = AStockEngine(token=self.token, api_endpoint=self.api_endpoint, rag_endpoint=self.rag_endpoint, timeout=self.timeout, logger=self.logger, post_fn=lambda url, body: self._post(url, body))
 
@@ -287,6 +338,7 @@ class TdxClient:
             # 应对偶发 RAG 网络超时/握手抖动，若为 5-6 位代码且正主能独立反查，优雅降级至独立反查 (解决 P2-1)
             resp = {}
         entities: list[dict[str, Any]] = []
+        pruned = 0  # 语义近邻过滤剔除计数，供网关层写进 近邻过滤说明
         if isinstance(resp, dict) and "retrieved_entities" in resp:
             raw_entities = resp["retrieved_entities"]
             if isinstance(raw_entities, list):
@@ -366,53 +418,17 @@ class TdxClient:
 
             # 若用户查询为 6 位纯数字且该代码在全市场不存在（如 610617、601617），过滤掉无公共前缀的无关 RAG 幻觉推荐 (修复 P3-1)
             if clean_code.isdigit() and len(clean_code) == 6 and not exact_target:
-                filtered_candidates = []
-                for e in valid_entities:
-                    cand_code = str(e.get("code") or "")
-                    common_prefix_len = 0
-                    for c1, c2 in zip(clean_code, cand_code):
-                        if c1 == c2:
-                            common_prefix_len += 1
-                        else:
-                            break
-                    if common_prefix_len >= 3:
-                        filtered_candidates.append(e)
-                valid_entities = filtered_candidates
+                before_num = len(valid_entities)
+                valid_entities = [
+                    e for e in valid_entities
+                    if _common_code_prefix_len(clean_code, str(e.get("code") or "")) >= 3
+                ]
+                pruned += before_num - len(valid_entities)
             elif not clean_code.isdigit() and valid_entities:
-                # =========================================================================
-                # 【功能块 3.6：名称型查询无关联语义近邻过滤 (修复 P3-3)】
-                # - 输入：raw_query (用户输入的查询字符串), valid_entities (当前已初筛实体列表)
-                # - 功能：解决 RAG 向量检索在用户输入不存在的公司名（如'不存在的公司名XYZ'）时
-                #         强制返回中国移动/中国电信/张家界等完全无关近邻的缺陷；
-                #         通过字面公共汉字交集、子串包含及拼音子串关联度检验，彻底剔除零关联假近邻。
-                # - 输出：过滤后的有效相关实体列表（无任何关联时规范收敛为空列表）
-                # =========================================================================
-                q_lower = raw_query.lower()
-                q_chinese = set(re.findall(r"[\u4e00-\u9fa5]", q_lower))
-                common_stop = {"股", "份", "有", "限", "公", "司", "集", "团", "a", "b", "h", "s", "w", "港"}
-                meaningful_q_chinese = q_chinese - common_stop
-                q_alpha = re.sub(r"[^a-z0-9]", "", q_lower)
-
-                filtered_name_candidates = []
-                for e in valid_entities:
-                    cand_name = str(e.get("name") or "").lower()
-                    cand_aliases = [str(a).lower() for a in e.get("aliases", []) if str(a).strip()]
-                    # 1. 强关联：query 是名称/别名子串，或名称/别名是 query 子串
-                    if (cand_name and (cand_name in q_lower or q_lower in cand_name)) or any(a and (a in q_lower or q_lower in a) for a in cand_aliases):
-                        filtered_name_candidates.append(e)
-                        continue
-                    # 2. 中文匹配：若查询词包含有意义汉字，必须至少存在 1 个非停用词汉字交集
-                    if meaningful_q_chinese:
-                        cand_chars = set(re.findall(r"[\u4e00-\u9fa5]", cand_name)) - common_stop
-                        if meaningful_q_chinese & cand_chars:
-                            filtered_name_candidates.append(e)
-                            continue
-                    # 3. 拼音或纯字母/代码匹配：仅当查询包含至少2位字母且为别名子串或别名为其子串时保留
-                    elif len(q_alpha) >= 2:
-                        if any(len(a) >= 2 and (q_alpha in a or a in q_alpha) for a in cand_aliases):
-                            filtered_name_candidates.append(e)
-                            continue
-                valid_entities = filtered_name_candidates
+                # 名称型查询：剔除零关联语义近邻（单字交集不算相关度，规则见 _filter_name_candidates）
+                before_name = len(valid_entities)
+                valid_entities = _filter_name_candidates(valid_entities, raw_query)
+                pruned += before_name - len(valid_entities)
 
             entities = valid_entities
         elif market_range in ("HK", "HK-GP"):
@@ -427,34 +443,23 @@ class TdxClient:
                     continue
                 valid_entities.append(e)
 
-            # 港股名称型查询同样过滤无关联近邻 (修复 P3-3)
-            if not clean_code.isdigit() and valid_entities:
-                q_lower = raw_query.lower()
-                q_chinese = set(re.findall(r"[\u4e00-\u9fa5]", q_lower))
-                common_stop = {"股", "份", "有", "限", "公", "司", "集", "团", "a", "b", "h", "s", "w", "港"}
-                meaningful_q_chinese = q_chinese - common_stop
-                q_alpha = re.sub(r"[^a-z0-9]", "", q_lower)
-
-                filtered_name_candidates = []
-                for e in valid_entities:
-                    cand_name = str(e.get("name") or "").lower()
-                    cand_aliases = [str(a).lower() for a in e.get("aliases", []) if str(a).strip()]
-                    if (cand_name and (cand_name in q_lower or q_lower in cand_name)) or any(a and (a in q_lower or q_lower in a) for a in cand_aliases):
-                        filtered_name_candidates.append(e)
-                        continue
-                    if meaningful_q_chinese:
-                        cand_chars = set(re.findall(r"[\u4e00-\u9fa5]", cand_name)) - common_stop
-                        if meaningful_q_chinese & cand_chars:
-                            filtered_name_candidates.append(e)
-                            continue
-                    elif len(q_alpha) >= 2:
-                        if any(len(a) >= 2 and (q_alpha in a or a in q_alpha) for a in cand_aliases):
-                            filtered_name_candidates.append(e)
-                            continue
-                valid_entities = filtered_name_candidates
+            # 数字型查询与 A 股同规则：公共前缀 <3 的近邻一律剔除（如 88888 不得回 08347/00888）
+            if clean_code.isdigit() and len(clean_code) == 5 and not exact_target:
+                before_num = len(valid_entities)
+                valid_entities = [
+                    e for e in valid_entities
+                    if _common_code_prefix_len(clean_code, str(e.get("code") or "")) >= 3
+                ]
+                pruned += before_num - len(valid_entities)
+            # 名称型查询同样过滤无关联近邻（单字交集不算相关度）
+            elif not clean_code.isdigit() and valid_entities:
+                before_name = len(valid_entities)
+                valid_entities = _filter_name_candidates(valid_entities, raw_query)
+                pruned += before_name - len(valid_entities)
 
             entities = valid_entities
 
+        self.last_lookup_pruned = pruned
         return entities
 
     # =========================================================================
@@ -1064,6 +1069,10 @@ class FinanceGateway:
             )
         else:
             res["候选为空说明"] = f"在指定市场范围 ({market_range}) 中未检索到与 '{query}' 相关的证券标的或候选实体，请核对代码或名称。"
+
+        pruned = int(getattr(self.tdx_client, "last_lookup_pruned", 0) or 0)
+        if pruned > 0:
+            res["近邻过滤说明"] = f"已剔除 {pruned} 条与查询字面无关联的语义近邻候选（单字交集不计为相关）。"
         return res
 
     @_enforce_gate_invariants

@@ -4073,6 +4073,110 @@ class TestHKInvalidCodeGateOffline(unittest.TestCase):
         self.assertIn("88888", str(ctx.exception))
 
 
+class TestHKLookupAndF10CleaningOffline(unittest.TestCase):
+    """批次1：语义近邻收紧、summary 键名归一、top_holders 零股/空名清洗（全部离线）"""
+
+    def test_name_candidates_single_char_overlap_is_not_relevance(self) -> None:
+        from mcp_gateway.finance import _filter_name_candidates
+
+        noisy = [{"name": "零在科技金融", "aliases": ["lzkjjr"]}]
+        self.assertEqual(
+            _filter_name_candidates(noisy, "不存在的公司名XYZ"), [],
+            "单字交集仍被判为相关，假近邻没清掉",
+        )
+
+    def test_name_candidates_keep_real_hits(self) -> None:
+        from mcp_gateway.finance import _filter_name_candidates
+
+        cands = [
+            {"name": "腾讯控股", "aliases": ["TENCENT"]},
+            {"name": "阿里健康", "aliases": ["ALIHEALTH"]},
+            {"name": "宁德时代", "aliases": ["CATL"]},
+        ]
+        self.assertEqual(len(_filter_name_candidates(cands, "腾讯控股")), 1)
+        self.assertEqual(len(_filter_name_candidates(cands, "腾讯")), 1)
+        self.assertEqual(len(_filter_name_candidates(cands, "宁德")), 1, "子串命中被误杀")
+        self.assertEqual(len(_filter_name_candidates(cands, "阿里巴巴")), 1, "2 字交集应保留相关同业候选")
+        self.assertEqual(len(_filter_name_candidates(cands, "tencent")), 1)
+
+    def test_common_code_prefix_len(self) -> None:
+        from mcp_gateway.finance import _common_code_prefix_len
+
+        self.assertEqual(_common_code_prefix_len("88888", "08347"), 0)
+        self.assertEqual(_common_code_prefix_len("600519", "600520"), 4)
+        self.assertEqual(_common_code_prefix_len("88888", "88888"), 5)
+
+    def test_lookup_prunes_numeric_hk_near_neighbours(self) -> None:
+        """港股数字码 88888：近邻公共前缀 <3 全部剔除，并留下过滤说明"""
+        gw = FinanceGateway()
+        fake_rag = {
+            "retrieved_entities": [
+                {"entity_code": "08347", "entity_name": "F8企业", "entity_type": "港股代码", "entity_setcode": 31},
+                {"entity_code": "00888", "entity_name": "链信控股", "entity_type": "港股代码", "entity_setcode": 31},
+            ]
+        }
+        with unittest.mock.patch.object(gw.tdx_client, "_post", return_value=fake_rag):
+            with unittest.mock.patch.object(gw.tdx_client, "_resolve_exact_security_entity", return_value=None):
+                res = gw.stock_lookup({"query": "88888", "range": "HK"})
+        self.assertEqual(res["entities"], [])
+        self.assertIn("近邻过滤说明", res)
+        self.assertIn("未命中说明", res)
+
+    def test_lookup_prunes_name_near_neighbours_in_hk(self) -> None:
+        gw = FinanceGateway()
+        fake_rag = {
+            "retrieved_entities": [
+                {"entity_code": "00093", "entity_name": "零在科技金融", "entity_type": "港股代码", "entity_setcode": 31},
+            ]
+        }
+        with unittest.mock.patch.object(gw.tdx_client, "_post", return_value=fake_rag):
+            res = gw.stock_lookup({"query": "不存在的公司名XYZ", "range": "HK"})
+        self.assertEqual(res["entities"], [])
+        self.assertIn("近邻过滤说明", res)
+
+    def test_summary_key_typo_normalized_and_code_alias(self) -> None:
+        from mcp_gateway.engines import hk_stock as hk_module
+
+        engine = hk_module.HKStockEngine(timeout=1)
+        html = (
+            "<html><body><table>"
+            "<tr><td>证劵代码</td><td>00700</td></tr>"
+            "<tr><td>公司名称(中文)</td><td>腾讯控股有限公司</td></tr>"
+            "</table></body></html>"
+        )
+        with unittest.mock.patch.object(
+            hk_module._SECURE_OPENER, "open", side_effect=lambda *a, **k: _FakeHKResponse(html.encode("gbk"))
+        ):
+            with unittest.mock.patch.object(engine, "_get_eastmoney_hk_company_profile", return_value={}):
+                with unittest.mock.patch.object(engine, "get_quotes", return_value={}):
+                    info = engine._get_sina_hk_company_info("00700")
+        self.assertIsNotNone(info)
+        assert info is not None  # 供类型检查收窄
+        self.assertEqual(info.get("证券代码"), "00700")
+        self.assertNotIn("证劵代码", info)
+
+        with unittest.mock.patch.object(engine, "_get_sina_hk_company_info", return_value=dict(info)):
+            res = engine._get_hk_f10("00700", category="summary")
+        self.assertEqual(res["data"].get("股份代码"), "00700")
+
+    def test_top_holders_drops_zero_share_and_nameless_rows(self) -> None:
+        from mcp_gateway.engines import hk_stock as hk_module
+
+        engine = hk_module.HKStockEngine(timeout=1)
+        rows = [
+            {"持股人名字": "Naspers Limited", "中文股东名称": "", "目前类别": "L", "目前结余(股)": "2769333600", "事件日期": "2024-01-02"},
+            {"持股人名字": "The Northern Trust Company (ALA)", "中文股东名称": "", "目前类别": "L", "目前结余(股)": "0", "事件日期": "2023-01-02"},
+            {"持股人名字": "", "中文股东名称": "", "目前类别": "L", "目前结余(股)": "100", "事件日期": "2023-01-02"},
+        ]
+        with unittest.mock.patch.object(engine, "_get_sina_hk_table", return_value=[dict(r) for r in rows]):
+            res = engine._get_hk_f10("00700", category="top_holders")
+        table = res["formatted_tables"]["top_holders"]
+        self.assertEqual(len(table), 1)
+        self.assertEqual(table[0]["股东名称"], "Naspers Limited")
+        self.assertIn("零持股", res["股东行清洗说明"])
+        self.assertIn("无股东名称", res["股东行清洗说明"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

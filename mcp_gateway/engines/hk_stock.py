@@ -1776,6 +1776,10 @@ class HKStockEngine(BaseMarketEngine):
                 info[clean[0]] = clean[1]
                 info[clean[2]] = clean[3]
 
+        # 上游新浪页面把「证券代码」写成错字「证劵代码」，统一归一，避免下游按规范键名取值静默 None
+        if "证劵代码" in info:
+            info.setdefault("证券代码", info.pop("证劵代码"))
+
         # 修复 P3-2: 新浪页面无上市日期与每手股数，从东财专线及腾讯实时行情补齐核心字段
         em_profile = self._get_eastmoney_hk_company_profile(clean_code)
         zqzl = em_profile.get("zqzl") or {}
@@ -1915,14 +1919,31 @@ class HKStockEngine(BaseMarketEngine):
                 return en_name or zh_name
 
             unique_holders: dict[str, dict[str, Any]] = {}
+            dropped_zero = 0
+            dropped_nameless = 0
             for row in holders_data:
                 # 仅保留好仓(Long Position, L)，剔除淡仓(S)与可借出股份(P)以真实反映大股东多头持股
                 cat_type = str(row.get("目前类别", "")).strip().upper()
                 if cat_type not in ("L", "好仓", ""):
                     continue
                 h_key = _normalize_holder_name(row)
-                if h_key and h_key not in unique_holders:
+                if not h_key:
+                    dropped_nameless += 1
+                    continue
+                # 0 股申报行是受托人/上市公司自身的占位流水，不构成持股
+                raw_balance = row.get("目前结余(股)")
+                balance = None
+                if raw_balance is not None and str(raw_balance).strip():
+                    try:
+                        balance = float(str(raw_balance).replace(",", ""))
+                    except (TypeError, ValueError):
+                        balance = None
+                if balance is not None and balance <= 0:
+                    dropped_zero += 1
+                    continue
+                if h_key not in unique_holders:
                     row_copy = dict(row)
+                    row_copy["股东名称"] = str(row.get("持股人名字") or row.get("中文股东名称") or "").strip()
                     unique_holders[h_key] = row_copy
 
             top_list = list(unique_holders.values())
@@ -2002,6 +2023,17 @@ class HKStockEngine(BaseMarketEngine):
             if no_holder_desc:
                 # 修复 P3-2: 00883 空 top_holders 注入无记录说明，区分确无申报与未采集
                 resp_holders["无记录说明"] = no_holder_desc
+            if dropped_zero or dropped_nameless:
+                cleaned_parts = []
+                if dropped_zero:
+                    cleaned_parts.append(f"{dropped_zero} 条零持股(0 股)申报占位行")
+                if dropped_nameless:
+                    cleaned_parts.append(f"{dropped_nameless} 条无股东名称空行")
+                resp_holders["股东行清洗说明"] = (
+                    "已剔除 " + "、".join(cleaned_parts)
+                    + "；港交所权益申报在股东跨越整百分点或持股归零时都会触发流水，0 股行只代表申报事件不代表实际持股，"
+                    "参与持股合计或榜单排序会直接污染结果。"
+                )
             if req_limit is not None or req_periods is not None:
                 resp_holders["期次与截断说明"] = f"已按参数截取前 {len(final_top_list)} 位好仓主要股东申报流水。"
             return resp_holders
@@ -2625,6 +2657,7 @@ class HKStockEngine(BaseMarketEngine):
                 basic_table = [{
                     "公司名称(中文)": info.get("公司名称(中文)", ""),
                     "公司名称(英文)": info.get("公司名称(英文)", ""),
+                    "证券代码": clean_code,
                     "股份代码": clean_code,
                     "上市日期": info.get("上市日期", ""),
                     "注册地址": info.get("注册地址") or info.get("注册办事处", ""),
@@ -2681,6 +2714,9 @@ class HKStockEngine(BaseMarketEngine):
                         "【港股已发行股本统计与时滞说明（已修复 D6 与 P3-6）】：1. A+H两地上市标的本字段指在香港联交所实际流通的H股股数；"
                         "2. 非A+H标的本字段源自定期报告静态工商截面，与行情端每日根据期权行权/回购注销更新的实时股本存在 -6%~+5% 统计时滞。最新即时股本与市值请以 quotes 行情端为准。"
                     )
+                # 与 basic_info 对齐：两个键名同时可用，避免下游按任一键名取值静默 None
+                info.setdefault("证券代码", clean_code)
+                info["股份代码"] = clean_code
                 return {
                     "symbol": clean_code,
                     "market": "香港交易所 (HKEX)",
