@@ -4823,16 +4823,20 @@ class TestBatch13AfterCloseAndAHTwin(unittest.TestCase):
     def test_valuation_freshness_note_four_states(self) -> None:
         from mcp_gateway.finance import _valuation_freshness_note
 
-        self.assertIn("盘中请结合", _valuation_freshness_note("2026-10-23", {"is_trading_time": True}))
-        self.assertIn(
-            "盘后未批处理",
-            _valuation_freshness_note("2026-10-23", {"market_status": "closed_today", "reference_trading_date": "2026-10-26"}),
-        )
-        self.assertIn(
-            "已切换至当日",
-            _valuation_freshness_note("2026-10-26", {"market_status": "closed_today", "reference_trading_date": "2026-10-26"}),
-        )
-        self.assertIn("非交易时段", _valuation_freshness_note("2026-10-23", {"market_status": "holiday"}))
+        trading = _valuation_freshness_note("2026-10-23", {"is_trading_time": True})
+        pending = _valuation_freshness_note("2026-10-23", {"market_status": "closed_today", "reference_trading_date": "2026-10-26"})
+        switched = _valuation_freshness_note("2026-10-26", {"market_status": "closed_today", "reference_trading_date": "2026-10-26"})
+        idle = _valuation_freshness_note("2026-10-23", {"market_status": "holiday"})
+
+        # 逐字段分述：PB/总市值 走昨收清算价，PE 走 quotes 现价（昨收值另有专键）
+        for note in (trading, pending, switched, idle):
+            self.assertIn("总市值_元", note)
+            self.assertIn("滚动市盈率_PETTM_昨收口径", note)
+            self.assertNotIn("16:30", note, "不得再承诺上游切换时点")
+        self.assertIn("盘中请结合", trading)
+        self.assertIn("盘后未批处理", pending)
+        self.assertIn("已切换至当日", switched)
+        self.assertIn("非交易时段", idle)
 
     def test_ah_hint_requires_ashare_twin(self) -> None:
         from mcp_gateway.engines.hk_stock import HKStockEngine
