@@ -11,3 +11,6 @@ tests/snapshots/
 scripts/record_baseline_snapshots.py
 tests/snapshot_utils.py
 tests/test_snapshots.py
+
+# 结构指纹基线（本地迭代用，由 scripts/build_golden_fingerprints.py 生成，不入库）
+tests/golden/
