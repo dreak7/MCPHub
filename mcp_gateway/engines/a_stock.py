@@ -73,8 +73,9 @@ def _pb_snapshot_diff_note(pb_val: Any, pb_calc: Any, has_other_equity_tools: bo
         return ""
     pct_diff = round(abs(pb_val - pb_calc) / pb_calc * 100.0, 1)
     tail = (
-        f"真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，"
-        "与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
+        f"真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍"
+        "（= 现价 ÷ 普通股每股净资产_BPS_自算，分母采用扣除其他权益工具后的普通股净资产），"
+        "跨工具横比请优先使用该字段；注意 F10 table6 的【市净率_PB】为总归母 BPS 口径，两者数值不可直接比对）。"
     )
     if pb_val > pb_calc:
         return (
