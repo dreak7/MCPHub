@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
-[![Tests: 216 Passed](https://img.shields.io/badge/Tests-216%20Passed-success.svg)](tests/)
+[![Tests: 263 Passed](https://img.shields.io/badge/Tests-263%20Passed-success.svg)](tests/)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/MCP-Standard-purple.svg)](https://modelcontextprotocol.io/)
 
 </div>
@@ -22,7 +22,7 @@ MCPHub 统一服务网关 (12 大标准生产级 MCP 工具)
 │   └── fallback_web_extract   长文正文智能提取 (30分钟落盘缓存 + read_file 联动翻页)
 ├── 💻 开发者编程文档切片层 (Context7 官方权威 API 索引)
 │   └── code_docs_search       权威开源库与编程语言官方文档代码切片检索 (免 Key / 填 Key 双轨)
-└── 📈 专业证券与金融服务层 (A股通达信专线 + 港股腾讯/新浪/东财高可用矩阵，由 TDX-finance-mcp-plugin-v3 提供支持)
+└── 📈 专业证券与金融服务层 (A股通达信专线 + 港股三源矩阵：腾讯=行情 / 东财=三大表·日K主力 / 新浪=F10明细专线与三大表容灾备份，由 TDX-finance-mcp-plugin-v3 提供支持)
     ├── stock_lookup           股票名称/拼音代码语义智能检索 (纯数字正主首位置顶)
     ├── market_context         A股与港股交易日历感知与市场交易时钟判定
     ├── stock_quotes           实时行情与 Level-1 基础五档买卖委托盘口 (港股市值精准校准)
@@ -41,7 +41,7 @@ MCPHub 统一服务网关 (12 大标准生产级 MCP 工具)
 | :--- | :--- | :--- | :--- |
 | **L1 普通用户 / 极简主义者**<br>*(默认推荐，绝大多数用户)* | **核心极简高可用模式**<br>(Simple & Clean) | **完全不安装任何 Skill**<br>*(零文件复制)* | • **零记忆注入**：大模型上下文 100% 保持原生纯净；<br>• **零冗余耗时**：搜索直接发起，绝不执行外部探活脚本；<br>• **开箱即用**：自带毫秒级多源自动轮换与跨月解冻，金融专线直通。 |
 | **L2 进阶用户 / 开发者 / 运维排查**<br>*(可选外挂)* | **按需取证诊断模式**<br>(Advanced Diagnostics) | **选择性将 `mcphub-probe` 复制部署至 Hermes 的 `skills` 目录** | • **按需唤醒机制**：日常搜索 100% 静默免测，仅在显式诊断或多源连续失败时触发；<br>• **通道深度取证**：溯源单次检索的真实执行后端、耗时与返回体积。 |
-| **L3 证券金融 / 深度投资研报**<br>*(可选外挂)* | **专业证券专线 SOP 模式**<br>(Financial Specialist) | **选择性将 `mcphub-finance` 复制部署至 Hermes 的 `skills` 目录** | • **严格专线分工**：A 股直通通达信专线，港股走腾讯/新浪/东财高可用免 Key 矩阵；<br>• **防计算幻觉**：直接调用纯 Python 毫秒级指标，杜绝大模型心算幻觉；<br>• **全景研报闭环**：标准三张表 + 资金筹码 + 官方公告 + 交叉印证 SOP。 |
+| **L3 证券金融 / 深度投资研报**<br>*(可选外挂)* | **专业证券专线 SOP 模式**<br>(Financial Specialist) | **选择性将 `mcphub-finance` 复制部署至 Hermes 的 `skills` 目录** | • **严格专线分工**：A 股直通通达信专线；港股按能力分流——行情走腾讯、三大表与日K走东方财富（新浪仅容灾备份）、F10 明细走新浪；<br>• **防计算幻觉**：直接调用纯 Python 毫秒级指标，杜绝大模型心算幻觉；<br>• **全景研报闭环**：标准三张表 + 资金筹码 + 官方公告 + 交叉印证 SOP。 |
 
 ---
 
@@ -85,7 +85,7 @@ MCPHub/
 ## 🎨 可视化配置向导 (GUI Tool) 与扩展能力分类
 
 在控制台中选择 `[2]` 或执行 `python mcp_gateway/gui_add_provider.py`：
-- **加入已有分类**：向 `web_search` 或 `web_extract` 能力组（对应 MCP 工具 `fallback_web_search` / `fallback_web_extract`）扩展新增的备用搜索引擎；
+- **加入已有分类**：向 `web_search` 或 `web_extract` 扩展新增的备用搜索引擎；
 - **创建自定义能力**：输入分类名称（如 `academic_search`），自动生成配置文件并由网关通配挂载为独立的 MCP 工具；
 - **安全保障**：自动执行 HTTPS 端点安全校验，并双向同步更新至 `config/.env`。
 
@@ -216,13 +216,13 @@ MCPHub/
 | **`market_context`** | 证券金融 | `{}` (缺省) | 毫秒级识别盘前集合竞价、早盘/午后交易中、已收盘或非交易日节假日 |
 | **`stock_quotes`** | 证券金融 | `symbol`, `setcode` | 现价、涨跌幅、真 TTM 滚动市盈率、**港股市值严格校准**、Level-1 五档委托盘口（**无效代码显式拦截**） |
 | **`stock_kline`** | 证券金融 | `symbol`, `period`, `count` | 多周期行情，**服务端纯 Python 原生计算 MA/MACD/KDJ/BOLL/RSI**（杜绝心算幻觉）；**港股全面支持前复权与不复权** |
-| **`stock_financials`** | 证券金融 | `symbol`, `report_type` | 资产负债/利润/现金流三张表，**80列会计科目精准对齐，集团金融合并残差透明解析；港股新浪+东财双源支持，无效代码显式拦截** |
-| **`stock_f10`** | 证券金融 | `symbol`, `category`, `periods`, `limit` | 18大官方分类数据全覆盖，**两融/资金流向全汉化，重大事件倒序排列；亏损标的同比正负号精准解析；港股新浪+东财双源支持，无效代码显式拦截** |
+| **`stock_financials`** | 证券金融 | `symbol`, `report_type` | 资产负债/利润/现金流三张表，**80列会计科目精准对齐，集团金融合并残差透明解析；港股以东方财富为主力源、新浪为容灾备份源（主源无有效报表时自动切换），无效代码显式拦截** |
+| **`stock_f10`** | 证券金融 | `symbol`, `category`, `periods`, `limit` | 18大官方分类数据全覆盖，**两融/资金流向全汉化，重大事件倒序排列；亏损标的同比正负号精准解析；港股 F10 明细（大股东权益/回购/分红/事件/行业概念/工商）走新浪专线，指标宽表与 summary 走东方财富，无效代码显式拦截** |
 | **`stock_screener`** | 证券金融 | `message`, `limit`, `page`, `filter_st` | 中文自然语言条件选股，**自动清洗杂质表头并默认剔除 ST/\*ST 风险股，支持无缝分页拉取全名单** |
 | **`stock_news`** | 证券金融 | `symbol`, `limit` | 新浪财经主力 + 东财公告备份三轨引擎；**港股自动反查证券简称，彩票预测垃圾资讯与他股噪声严格过滤** |
 
 ### 核心架构亮点
-- **A股官方专线与港股免Key多源矩阵智能路由**：6 位 A 股直连通达信官方专线；5 位港股自动分流至**腾讯**（实时盘口与分钟K线）、**新浪**（F10深度大股东/回购/分红/资讯主力源）与**东方财富**（三大财报与日K线主力源）免 Key 矩阵；
+- **A股官方专线与港股免Key多源矩阵智能路由**：6 位 A 股直连通达信官方专线；5 位港股自动分流至三源免 Key 矩阵——**腾讯**＝行情（实时盘口与分钟K线，返回体 `tencent_free_hk_quote`）、**东方财富**＝三大财务报表与日/周/月K线主力源（`eastmoney_hk_f10`）、**新浪**＝三大表的**容灾备份源**（`sina_hk_f10`，仅东财无有效报表时切换）＋ F10 明细专线（大股东权益变动/回购/分红/事件/行业概念/工商，`sina_hk_rights` / `sina_hk_dividends` / `sina_hk_events`）。**主备关系写清**：三大表主力是东财、新浪只是备份；但 F10 明细类只有新浪这一路，不要当成备份源读；
 - **服务端纯 Python 防幻觉量化指标算法**：在 Python 进程内完成浮点数学计算，大模型专注趋势解读；
 - **全链路防御与安全加固**：SSRF 严格防护，`NoRedirectHandler` 阻断 302 凭据跨域窃取，无效代码显式拦截，新闻防污染过滤。
 
@@ -260,6 +260,13 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### 文档校正 2026-10-26 — 港股数据源分工按实测重述（不改代码）
+
+- **三大表主备关系写反了**：`stock_financials` 港股**主力源是东方财富**（`eastmoney_hk_f10`），**新浪（`sina_hk_f10`）只是容灾备份**（`hk_stock.py:1446→1452`：先东财，无有效报表才切新浪）。原文「港股新浪+东财双源支持」未体现主备，已改为明确主备。
+- **行情源单一化**：港股行情（`stock_quotes`）实测只走**腾讯**（`tencent_free_hk_quote`，活体 00700 验证），不是"新浪主力"。
+- **新浪真实角色**：F10 明细类（大股东权益变动 `sina_hk_rights`、回购、分红 `sina_hk_dividends`、事件 `sina_hk_events`、行业概念、工商）**只有新浪这一路**，不属备份；指标宽表与 `summary` 走东财。
+- 日/周/月 K 线走东财 `push2his`（`hk_stock.py:788`）。上述结论以 2026-10-26 代码与活体实调为准。
 
 ### v2.0.4 — 估值提示逐字段分述与跨市场同名键语义收口 (263项全绿)
 
@@ -765,7 +772,7 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
   - 双击即用，提供包含 Hermes 配置一键生成、GUI 向导唤起、密钥快捷编辑、全量自检与日志监控的傻瓜式全生命周期运维面板。
 - **零依赖原生 Tkinter 可视化配置向导（`mcp_gateway/gui_add_provider.py`）**：
   - Windows 原生图形界面，高分屏（High DPI）自适应清晰渲染；
-  - 双轨制架构：既支持向已有能力组（`web_search` / `web_extract`，即 MCP 工具 `fallback_web_search` / `fallback_web_extract`）无缝追加搜索引擎，又支持一键创建全新的自定义能力分类；
+  - 双轨制架构：既支持向已有分类（`web_search` / `web_extract`）无缝追加搜索引擎，又支持一键创建全新的自定义能力分类；
   - 自动完成安全端点校验、参数合法性检查，并自动双向同步更新 `.env` 密钥文件。
 - **动态自定义能力与扩展协议架构（Dynamic Custom Capabilities）**：
   - 网关 `server.py` 支持动态能力反射挂载：任何新创建的自定义能力配置文件（如 `academic_search.json`）均自动被扫描并作为独立工具注册暴露给 Hermes Desktop（如 `academic_search` 工具）；
