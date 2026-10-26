@@ -4370,6 +4370,69 @@ class TestAShareLhbAndCashflowOrderOffline(unittest.TestCase):
         self.assertEqual(res["同日多榜次说明"], "多榜次X")
 
 
+class TestHKQuoteWeiBiAndNewsOffline(unittest.TestCase):
+    """批次4：港股委比不可计算声明 + 新闻去重与相关度标签（全部离线）"""
+
+    def test_hk_quotes_declares_weibi_not_computable(self) -> None:
+        from mcp_gateway.engines import hk_stock as hk_module
+
+        engine = hk_module.HKStockEngine(timeout=1)
+        raw = 'v_r_hk00700="100~腾讯控股~00700~386.000~382.400";'
+        with unittest.mock.patch.object(
+            hk_module._SECURE_OPENER, "open", side_effect=lambda *a, **k: _FakeHKResponse(raw.encode("gb18030"))
+        ):
+            with unittest.mock.patch.object(engine, "_get_eastmoney_hk_financials", return_value=[]):
+                res = engine._get_hk_quotes("00700")
+        pc = res["盘口核心行情"]
+        self.assertEqual(pc["委差_手"], 0)
+        self.assertEqual(pc["委比_pct"], 0.0)
+        self.assertFalse(pc["委差_可计算"])
+        self.assertFalse(pc["委比_pct_可计算"])
+        self.assertIn("不可计算", pc["委比委差说明"])
+        self.assertIn("占位值", pc["委比委差说明"])
+
+    def test_news_dedupes_and_tags_relevance(self) -> None:
+        gw = FinanceGateway()
+        payload = json.dumps({
+            "data": {"list": [
+                {"title": "腾讯控股完成发行18亿美元及人民币260亿元票据", "intro": "腾讯控股公告...",
+                 "media": "新浪财经", "dataTime": "2026-10-23 10:00:00"},
+                {"title": "腾讯控股完成发行18亿美元及人民币260亿元票据 ", "intro": "转载稿...",
+                 "media": "证券时报", "dataTime": "2026-10-23 10:05:00"},
+                {"title": "港股23日涨0.69% 收报23093.37点", "intro": "……腾讯控股涨1.2%……",
+                 "media": "新浪财经", "dataTime": "2026-10-23 16:00:00"},
+                {"title": "阿里巴巴跌超6%", "intro": "恒生科技指数下挫，腾讯跟跌",
+                 "media": "财联社", "dataTime": "2026-10-22 15:00:00"},
+                {"title": "某公司完成回购注销", "intro": "与本标的无关",
+                 "media": "新浪财经", "dataTime": "2026-10-21 09:00:00"},
+            ]}
+        })
+
+        def fake_urlopen(req, *args, **kwargs):
+            m = unittest.mock.MagicMock()
+            m.read.return_value = payload.encode("utf-8")
+            m.__enter__.return_value = m
+            return m
+
+        entity = {"entity_code": "00700", "entity_name": "腾讯控股", "entity_type": "港股代码"}
+        with unittest.mock.patch.object(gw.tdx_client, "_resolve_exact_security_entity", return_value=entity):
+            with unittest.mock.patch("mcp_gateway.finance.urlopen", side_effect=fake_urlopen):
+                res = gw.stock_news({"symbol": "00700", "limit": 5})
+
+        news = res["news"]
+        self.assertEqual(len(news), 3, "重复标题未去重或无关稿未剔除")
+        self.assertEqual(news[0]["title"], "港股23日涨0.69% 收报23093.37点")
+        self.assertEqual(news[0]["相关度"], "摘要命中")
+        self.assertEqual(news[1]["相关度"], "标题命中")
+        self.assertEqual(news[2]["相关度"], "摘要命中")
+        self.assertEqual([n["title"] for n in news].count("腾讯控股完成发行18亿美元及人民币260亿元票据"), 1)
+        # 时间倒序契约不变
+        times = [n["time"] for n in news]
+        self.assertEqual(times, sorted(times, reverse=True))
+        self.assertIn("新闻相关度说明", res)
+        self.assertIn("标题命中", res["新闻相关度说明"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

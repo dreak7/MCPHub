@@ -673,17 +673,41 @@ class PublicFallbackClient:
             "排列三", "排列四", "排列五", "七星彩", "六合彩", "中奖", "彩票", "幸运飞艇",
         )
 
-        def _is_relevant(title_text: str, content_text: str) -> bool:
-            comb = (title_text + " " + content_text).lower()
-            if clean_code and clean_code in comb:
-                return True
+        def _relevance_tag(title_text: str, content_text: str) -> str:
+            """相关度判定：标题命中 > 摘要命中 > 空串（空串表示与标的无关，调用方直接丢弃）。"""
+            title_l = title_text.lower()
+            core_name = ""
             if entity_name:
-                core_name = re.sub(r"(股份|科技|集团|控股|发展|实业)$", "", entity_name).strip()
-                if (core_name and core_name.lower() in comb) or (entity_name.lower() in comb):
-                    return True
+                core_name = re.sub(r"(股份|科技|集团|控股|发展|实业)$", "", entity_name).strip().lower()
+            if (clean_code and clean_code in title_l) or (core_name and core_name in title_l) or (
+                entity_name and entity_name.lower() in title_l
+            ):
+                return "标题命中"
+            comb = (title_text + " " + content_text).lower()
+            if (clean_code and clean_code in comb) or (core_name and core_name in comb) or (
+                entity_name and entity_name.lower() in comb
+            ):
+                return "摘要命中"
             if not clean_code and not entity_name:
-                return True
-            return False
+                return "标题命中"
+            return ""
+
+        def _normalize_title(text: str) -> str:
+            # 去掉空白与标点后比对：同一条稿被不同源转载时常差一两个空格或标点
+            return re.sub(r"[\s\W_]+", "", text)
+
+        def _finalize_news(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            seen: set[str] = set()
+            uniq: list[dict[str, Any]] = []
+            for it in items:
+                key = _normalize_title(str(it.get("title") or ""))
+                if key and key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(it)
+            # 保留原有契约：严格按时间倒序；相关度只打标签，不改排序
+            uniq.sort(key=lambda x: str(x.get("time") or x.get("datetime") or ""), reverse=True)
+            return uniq
 
         # 1. 主力通道：新浪财经新闻搜索接口（风控宽松、响应极速、原生标准 JSON）
         try:
@@ -708,7 +732,8 @@ class PublicFallbackClient:
                         if any(k in title for k in lottery_noise):
                             continue
                         snippet = re.sub(r"<[^>]+>", "", item.get("intro", "")).strip()
-                        if not _is_relevant(title, snippet):
+                        rel = _relevance_tag(title, snippet)
+                        if not rel:
                             continue
                         # 过滤他股上市挂牌快讯（标题明确为其他个股 IPO，且标题未包含当前查询标的名称或代码时剔除）
                         ipo_keywords = ("登陆创业板", "挂牌创业板", "今日登陆", "正式挂牌", "今日上市", "敲钟上市", "今日申购", "上市首日")
@@ -733,14 +758,14 @@ class PublicFallbackClient:
                             "url": item.get("url", ""),
                             "snippet": snippet[:150] + "..." if len(snippet) > 150 else snippet,
                             "summary": snippet[:150] + "..." if len(snippet) > 150 else snippet,
+                            "相关度": rel,
                         }
                         if is_broker_pub:
                             item_obj["内容属性说明"] = "券商行业研报观点(标题格式为'券商名：观点'，系该券商研究团队对外发表的行业分析，非本公司自身日常经营公告)"
                         news_list.append(item_obj)
                     if news_list:
-                        # 严格按发布时间倒序排列，确保首条即为最新资讯 (修复 P3-1)
-                        news_list.sort(key=lambda x: str(x.get("time") or x.get("datetime") or ""), reverse=True)
-                        return news_list[:req_limit]
+                        # 去重后严格按发布时间倒序排列，确保首条即为最新资讯 (修复 P3-1)
+                        return _finalize_news(news_list)[:req_limit]
         except Exception:
             pass
 
@@ -774,7 +799,8 @@ class PublicFallbackClient:
                         if any(k in title for k in lottery_noise):
                             continue
                         snippet = re.sub(r"<[^>]+>", "", item.get("content", "")).strip()
-                        if not _is_relevant(title, snippet):
+                        rel = _relevance_tag(title, snippet)
+                        if not rel:
                             continue
                         media_name = item.get("mediaName", "").strip() or "东方财富"
                         norm_t = self._normalize_time_str(item.get("date", ""))
@@ -787,6 +813,7 @@ class PublicFallbackClient:
                             "url": item.get("url", ""),
                             "snippet": snippet[:150] + "..." if len(snippet) > 150 else snippet,
                             "summary": snippet[:150] + "..." if len(snippet) > 150 else snippet,
+                            "相关度": rel,
                         }
                         if is_broker_pub:
                             item_obj["内容属性说明"] = "券商行业研报观点(标题格式为'券商名：观点'，系该券商研究团队对外发表的行业分析，非本公司自身日常经营公告)"
@@ -794,9 +821,8 @@ class PublicFallbackClient:
                         if len(news_list) >= req_limit:
                             break
                     if news_list:
-                        # 严格按发布时间倒序排列 (修复 P3-1)
-                        news_list.sort(key=lambda x: str(x.get("time") or x.get("datetime") or ""), reverse=True)
-                        return news_list[:req_limit]
+                        # 去重后严格按发布时间倒序排列 (修复 P3-1)
+                        return _finalize_news(news_list)[:req_limit]
         except Exception:
             pass
 
@@ -827,6 +853,7 @@ class PublicFallbackClient:
                                 "url": ann_url_link,
                                 "snippet": f"【上市公司法定公告】{ann_title}",
                                 "summary": f"【上市公司法定公告】{ann_title}",
+                                "相关度": "上市公司公告",
                             })
                         if ann_list:
                             # 严格按公告时间倒序排列 (修复 P3-1)
@@ -2445,7 +2472,15 @@ class FinanceGateway:
         news = self.fallback_client.get_news(symbol=symbol, limit=limit, entity_name=entity_name)
         if news and isinstance(news, list):
             news.sort(key=lambda x: str(x.get("time") or x.get("datetime") or ""), reverse=True)
-        return {"symbol": symbol, "news_count": len(news), "news": news}
+        res: dict[str, Any] = {"symbol": symbol, "news_count": len(news), "news": news}
+        if news:
+            res["新闻相关度说明"] = (
+                "【个股新闻相关度口径】：每条资讯带【相关度】字段——"
+                "标题命中=标题直接点名该标的（代码或简称）；摘要命中=仅正文提及，可能是大盘/行业/他股综述里的顺带提及；"
+                "上市公司公告=交易所法定披露。结果按时间倒序返回，同一标题的重复稿已按标题去重；"
+                "需要严格个股资讯时只取【相关度=标题命中】与【上市公司公告】的条目。"
+            )
+        return res
 
     def market_context(self, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         """工具 8：A股交易日历与时钟状态感知"""
