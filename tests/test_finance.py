@@ -4612,6 +4612,30 @@ class TestHKV202BatchOffline(unittest.TestCase):
         self.assertEqual(calls["n"], 1, "二次调用未命中 10 分钟缓存")
 
 
+    def test_orderbook_level_contract_and_snapshot(self) -> None:
+        from mcp_gateway.engines.a_stock import (
+            ORDERBOOK_BUY_LEVELS,
+            ORDERBOOK_SELL_LEVELS,
+            _bsp_from_snapshot,
+            _calc_order_imbalance,
+        )
+
+        self.assertEqual(ORDERBOOK_BUY_LEVELS, ("买一", "买二", "买三", "买四", "买五"))
+        self.assertEqual(ORDERBOOK_SELL_LEVELS, ("卖一", "卖二", "卖三", "卖四", "卖五"))
+        snap: dict[str, object] = {}
+        for i in range(1, 6):
+            snap[f"BuyVol{i}"] = 2
+            snap[f"SellVol{i}"] = 1
+            snap[f"BuyPrice{i}"] = 10.0 - i * 0.1
+            snap[f"SellPrice{i}"] = 10.0 + i * 0.1
+        bsp = _bsp_from_snapshot(snap)
+        self.assertEqual(list(bsp.keys()), list(ORDERBOOK_BUY_LEVELS + ORDERBOOK_SELL_LEVELS))
+        buy, sell, diff, pct, ok = _calc_order_imbalance(bsp)
+        self.assertEqual((buy, sell, diff), (10, 5, 5))
+        self.assertAlmostEqual(pct, 33.33, places=2)
+        self.assertTrue(ok)
+
+
 if __name__ == "__main__":
     unittest.main()
 

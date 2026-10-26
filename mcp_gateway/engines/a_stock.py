@@ -55,9 +55,31 @@ def _order_by_canonical(keys: list[str], canonical: list[str]) -> list[str]:
 # - 功能：汇总五档委托量并计算委差与委比；键名必须用中文数字，f"买{i}" 永远匹配不到
 # - 输出：(委买手, 委卖手, 委差手, 委比%, 是否可计算)
 # =========================================================================
+# 五档档位契约（唯一事实源）：任何遍历/求和/标签生成都从这里取，
+# 防止再次出现 f"买{i}"（买1…买5）匹配不到中文档位的整类缺陷
+ORDERBOOK_BUY_LEVELS: tuple[str, ...] = ("买一", "买二", "买三", "买四", "买五")
+ORDERBOOK_SELL_LEVELS: tuple[str, ...] = ("卖一", "卖二", "卖三", "卖四", "卖五")
+
+
+def _bsp_from_snapshot(bsp_raw: dict[str, Any]) -> dict[str, Any]:
+    """通达信极速快照字典 → 中文档位五档盘口（键序与旧实现一致：先买五档、后卖五档）。"""
+    out: dict[str, Any] = {}
+    for i, b_name in enumerate(ORDERBOOK_BUY_LEVELS, 1):
+        out[b_name] = {
+            "价格": bsp_raw.get(f"BuyPrice{i}") or bsp_raw.get(f"BuyP{i}"),
+            "委托量_手": bsp_raw.get(f"BuyVol{i}") or bsp_raw.get(f"BuyV{i}"),
+        }
+    for i, s_name in enumerate(ORDERBOOK_SELL_LEVELS, 1):
+        out[s_name] = {
+            "价格": bsp_raw.get(f"SellPrice{i}") or bsp_raw.get(f"SellP{i}"),
+            "委托量_手": bsp_raw.get(f"SellVol{i}") or bsp_raw.get(f"SellV{i}"),
+        }
+    return out
+
+
 def _calc_order_imbalance(bsp_dict: dict[str, Any]) -> tuple[int, int, int, float, bool]:
-    buy_names = ("买一", "买二", "买三", "买四", "买五")
-    sell_names = ("卖一", "卖二", "卖三", "卖四", "卖五")
+    buy_names = ORDERBOOK_BUY_LEVELS
+    sell_names = ORDERBOOK_SELL_LEVELS
 
     def _vol(name: str) -> int:
         item = bsp_dict.get(name)
@@ -1076,12 +1098,10 @@ class AStockEngine(BaseMarketEngine):
         bsp_raw = raw.get("BspInfo", [])
         bsp_dict = {}
         if isinstance(bsp_raw, list) and bsp_raw:
-            buy_names = ["买一", "买二", "买三", "买四", "买五"]
-            sell_names = ["卖一", "卖二", "卖三", "卖四", "卖五"]
             for idx, item in enumerate(bsp_raw[:5]):
                 if isinstance(item, dict):
-                    b_label = buy_names[idx] if idx < len(buy_names) else f"买{idx+1}"
-                    s_label = sell_names[idx] if idx < len(sell_names) else f"卖{idx+1}"
+                    b_label = ORDERBOOK_BUY_LEVELS[idx]
+                    s_label = ORDERBOOK_SELL_LEVELS[idx]
                     b_price = item.get("BuyP")
                     s_price = item.get("SellP")
                     b_vol = item.get("BuyV")
@@ -1095,18 +1115,7 @@ class AStockEngine(BaseMarketEngine):
                         "委托量_手": int(s_vol) if (s_vol is not None and str(s_vol).isdigit()) else s_vol,
                     }
         elif isinstance(bsp_raw, dict) and bsp_raw:
-            bsp_dict = {
-                "买一": {"价格": bsp_raw.get("BuyPrice1") or bsp_raw.get("BuyP1"), "委托量_手": bsp_raw.get("BuyVol1") or bsp_raw.get("BuyV1")},
-                "买二": {"价格": bsp_raw.get("BuyPrice2") or bsp_raw.get("BuyP2"), "委托量_手": bsp_raw.get("BuyVol2") or bsp_raw.get("BuyV2")},
-                "买三": {"价格": bsp_raw.get("BuyPrice3") or bsp_raw.get("BuyP3"), "委托量_手": bsp_raw.get("BuyVol3") or bsp_raw.get("BuyV3")},
-                "买四": {"价格": bsp_raw.get("BuyPrice4") or bsp_raw.get("BuyP4"), "委托量_手": bsp_raw.get("BuyVol4") or bsp_raw.get("BuyV4")},
-                "买五": {"价格": bsp_raw.get("BuyPrice5") or bsp_raw.get("BuyP5"), "委托量_手": bsp_raw.get("BuyVol5") or bsp_raw.get("BuyV5")},
-                "卖一": {"价格": bsp_raw.get("SellPrice1") or bsp_raw.get("SellP1"), "委托量_手": bsp_raw.get("SellVol1") or bsp_raw.get("SellV1")},
-                "卖二": {"价格": bsp_raw.get("SellPrice2") or bsp_raw.get("SellP2"), "委托量_手": bsp_raw.get("SellVol2") or bsp_raw.get("SellV2")},
-                "卖三": {"价格": bsp_raw.get("SellPrice3") or bsp_raw.get("SellP3"), "委托量_手": bsp_raw.get("SellVol3") or bsp_raw.get("SellV3")},
-                "卖四": {"价格": bsp_raw.get("SellPrice4") or bsp_raw.get("SellP4"), "委托量_手": bsp_raw.get("SellVol4") or bsp_raw.get("SellV4")},
-                "卖五": {"价格": bsp_raw.get("SellPrice5") or bsp_raw.get("SellP5"), "委托量_手": bsp_raw.get("SellVol5") or bsp_raw.get("SellV5")},
-            }
+            bsp_dict = _bsp_from_snapshot(bsp_raw)
 
         # P3-4 修复：旧实现用 f"买{i}"（买1…买5）匹配中文档位 买一…买五，永远命中不到 → 四字段恒 0
         buy_total_hand, sell_total_hand, weicha_hand, weibi_pct, weibi_ok = _calc_order_imbalance(bsp_dict)
