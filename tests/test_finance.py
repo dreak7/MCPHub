@@ -3892,6 +3892,9 @@ class TestAShareNewRoundP2P3Convergence(unittest.TestCase):
         self.assertIn("2.8 v2.0.3 新增字段与口径变更清单", ref_text)
         self.assertIn("2.9 跨市场同名键语义差异", ref_text)
         self.assertIn("委买总委托量_手", ref_text)
+        # 搜索工具命名：文档必须用 MCP 工具名，避免与 Hermes 内置同名工具混淆
+        self.assertIn("`fallback_web_search` / `fallback_web_extract`", ref_text)
+        self.assertIn("命名对照", ref_text)
 
     def test_reference_29_cross_market_key_semantics(self):
         """reference 2.9 必须覆盖六个跨市场差异键，供通用解析器分支。"""

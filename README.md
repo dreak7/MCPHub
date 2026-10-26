@@ -85,7 +85,7 @@ MCPHub/
 ## 🎨 可视化配置向导 (GUI Tool) 与扩展能力分类
 
 在控制台中选择 `[2]` 或执行 `python mcp_gateway/gui_add_provider.py`：
-- **加入已有分类**：向 `web_search` 或 `web_extract` 扩展新增的备用搜索引擎；
+- **加入已有分类**：向 `web_search` 或 `web_extract` 能力组（对应 MCP 工具 `fallback_web_search` / `fallback_web_extract`）扩展新增的备用搜索引擎；
 - **创建自定义能力**：输入分类名称（如 `academic_search`），自动生成配置文件并由网关通配挂载为独立的 MCP 工具；
 - **安全保障**：自动执行 HTTPS 端点安全校验，并双向同步更新至 `config/.env`。
 
@@ -765,7 +765,7 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
   - 双击即用，提供包含 Hermes 配置一键生成、GUI 向导唤起、密钥快捷编辑、全量自检与日志监控的傻瓜式全生命周期运维面板。
 - **零依赖原生 Tkinter 可视化配置向导（`mcp_gateway/gui_add_provider.py`）**：
   - Windows 原生图形界面，高分屏（High DPI）自适应清晰渲染；
-  - 双轨制架构：既支持向已有分类（`web_search` / `web_extract`）无缝追加搜索引擎，又支持一键创建全新的自定义能力分类；
+  - 双轨制架构：既支持向已有能力组（`web_search` / `web_extract`，即 MCP 工具 `fallback_web_search` / `fallback_web_extract`）无缝追加搜索引擎，又支持一键创建全新的自定义能力分类；
   - 自动完成安全端点校验、参数合法性检查，并自动双向同步更新 `.env` 密钥文件。
 - **动态自定义能力与扩展协议架构（Dynamic Custom Capabilities）**：
   - 网关 `server.py` 支持动态能力反射挂载：任何新创建的自定义能力配置文件（如 `academic_search.json`）均自动被扫描并作为独立工具注册暴露给 Hermes Desktop（如 `academic_search` 工具）；
