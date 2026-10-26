@@ -50,6 +50,31 @@ def _order_by_canonical(keys: list[str], canonical: list[str]) -> list[str]:
 
 
 # =========================================================================
+# 【功能块 0.1：五档挂单委买/委卖/委差/委比真算】
+# - 输入：bsp_dict（键为中文数字档位 买一…买五 / 卖一…卖五）
+# - 功能：汇总五档委托量并计算委差与委比；键名必须用中文数字，f"买{i}" 永远匹配不到
+# - 输出：(委买手, 委卖手, 委差手, 委比%, 是否可计算)
+# =========================================================================
+def _calc_order_imbalance(bsp_dict: dict[str, Any]) -> tuple[int, int, int, float, bool]:
+    buy_names = ("买一", "买二", "买三", "买四", "买五")
+    sell_names = ("卖一", "卖二", "卖三", "卖四", "卖五")
+
+    def _vol(name: str) -> int:
+        item = bsp_dict.get(name)
+        if not isinstance(item, dict):
+            return 0
+        val = item.get("委托量_手")
+        return int(val) if isinstance(val, (int, float)) else 0
+
+    buy_total = sum(_vol(n) for n in buy_names)
+    sell_total = sum(_vol(n) for n in sell_names)
+    diff = buy_total - sell_total
+    total = buy_total + sell_total
+    pct = round((diff / total) * 100.0, 2) if total > 0 else 0.0
+    return buy_total, sell_total, diff, pct, total > 0
+
+
+# =========================================================================
 # 【第二道防翻车安全门：单一事实源 SSOT 架构治理公约 (AStockEngine)】
 # - 职责：一级数据净水厂。负责网络原水抽取、东财/新浪/通达信数据解包、
 #         万元与元量纲对齐 (如 LHB / 10000.0)、会计恒等式补齐推导 (如利润总额)、
@@ -257,55 +282,62 @@ class AStockEngine(BaseMarketEngine):
     def _get_ashare_dividends(self, clean_code: str) -> list[dict[str, Any]]:
         clean_code = re.sub(r"[^\d]", "", clean_code).zfill(6)
         url = f"http://vip.stock.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/stockid/{clean_code}.phtml"
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        try:
-            with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
-                raw_bytes = resp.read()
-                html = raw_bytes.decode("gbk", errors="ignore")
-        except Exception:
-            return []
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-        m = re.search(r'<table id="sharebonus_1"[^>]*>(.*?)</table>', html, re.S)
-        if not m:
-            return []
+        def _load_once() -> list[dict[str, Any]]:
+            try:
+                req = Request(url, headers=headers)
+                with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
+                    html = resp.read().decode("gbk", errors="ignore")
+            except Exception:
+                return []
+            m = re.search(r'<table id="sharebonus_1"[^>]*>(.*?)</table>', html, re.S)
+            if not m:
+                return []
+            rows = re.findall(r"<tr[^>]*>(.*?)</tr>", m.group(1), re.S)
+            loaded: list[dict[str, Any]] = []
+            for r in rows:
+                cells = [
+                    re.sub(r"<[^>]+>", "", c).strip()
+                    for c in re.findall(r"<t[dh][^>]*>(.*?)</(?:td|th)>", r, re.S)
+                ]
+                if len(cells) >= 8 and cells[0] not in ("公告日期", ""):
+                    def _parse_div_num(val_str: str) -> float:
+                        if not val_str or val_str.strip() in ("--", "-", "null", "None"):
+                            return 0.0
+                        try:
+                            return round(float(val_str.strip()), 4)
+                        except (ValueError, TypeError):
+                            return 0.0
 
-        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", m.group(1), re.S)
-        results = []
-        for r in rows:
-            cells = [
-                re.sub(r"<[^>]+>", "", c).strip()
-                for c in re.findall(r"<t[dh][^>]*>(.*?)</(?:td|th)>", r, re.S)
-            ]
-            if len(cells) >= 8 and cells[0] not in ("公告日期", ""):
-                def _parse_div_num(val_str: str) -> float:
-                    if not val_str or val_str.strip() in ("--", "-", "null", "None"):
-                        return 0.0
-                    try:
-                        return round(float(val_str.strip()), 4)
-                    except (ValueError, TypeError):
-                        return 0.0
+                    prog_str = cells[4].strip()
+                    ex_div = cells[5].strip()
+                    div_item = {
+                        "公告日期": cells[0],
+                        "送股_每10股": _parse_div_num(cells[1]),
+                        "转增_每10股": _parse_div_num(cells[2]),
+                        "派息_每10股_含税": _parse_div_num(cells[3]),
+                        "进度": prog_str,
+                        "除权除息日": ex_div,
+                        "股权登记日": cells[6].strip(),
+                        "红股上市日": cells[7].strip() if len(cells) > 7 else "--",
+                    }
+                    # 修复 D9: 区分除权除息日占位符 '--' 的具体业务含义 (不分配不适用 vs 预案待披露)
+                    if ex_div in ("--", "-", "", "None"):
+                        if "不分配" in prog_str:
+                            div_item["除权除息日说明"] = "该方案为不分配利润，不适用除权除息"
+                        elif any(kw in prog_str for kw in ("预案", "董事会", "股东大会")):
+                            div_item["除权除息日说明"] = "方案尚处预案/审议阶段，除权除息日待实施公告披露"
+                        else:
+                            div_item["除权除息日说明"] = "上游暂未收录具体除权除息日"
+                    loaded.append(div_item)
+            return loaded
 
-                prog_str = cells[4].strip()
-                ex_div = cells[5].strip()
-                div_item = {
-                    "公告日期": cells[0],
-                    "送股_每10股": _parse_div_num(cells[1]),
-                    "转增_每10股": _parse_div_num(cells[2]),
-                    "派息_每10股_含税": _parse_div_num(cells[3]),
-                    "进度": prog_str,
-                    "除权除息日": ex_div,
-                    "股权登记日": cells[6].strip(),
-                    "红股上市日": cells[7].strip() if len(cells) > 7 else "--",
-                }
-                # 修复 D9: 区分除权除息日占位符 '--' 的具体业务含义 (不分配不适用 vs 预案待披露)
-                if ex_div in ("--", "-", "", "None"):
-                    if "不分配" in prog_str:
-                        div_item["除权除息日说明"] = "该方案为不分配利润，不适用除权除息"
-                    elif any(kw in prog_str for kw in ("预案", "董事会", "股东大会")):
-                        div_item["除权除息日说明"] = "方案尚处预案/审议阶段，除权除息日待实施公告披露"
-                    else:
-                        div_item["除权除息日说明"] = "上游暂未收录具体除权除息日"
-                results.append(div_item)
+        results = _load_once()
+        if not results:
+            # 上游新浪分红页偶发空页/反爬：实测首查 0 行、复测 16 行，重试一次再判空
+            time.sleep(0.5)
+            results = _load_once()
         return results
 
     # =========================================================================
@@ -964,9 +996,28 @@ class AStockEngine(BaseMarketEngine):
                         pb_diff_warn = f"（注：行情市净率 {pb_val} 倍因BPS分母基于未扣除其他权益工具(永续债/优先股)的归母总权益计算而存在约 {pct_diff}% 的低估偏差；真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
                     else:
                         pb_diff_warn = f"（注：行情市净率 {pb_val} 倍与普通股真实市净率存在约 {pct_diff}% 的低估偏差，系行情 BPS 分母基数或口径差异所致；真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
+            # 修复 P2-5：BPS 隐含净资产与归母权益的差额给出量化自陈
+            # （002594 实测差额 208.44 亿恰等于外币报表折算差额，旧文案只按「送转→低估」单向解释）
+            try:
+                bps_up = mapped_ext.get("每股净资产_BPS")
+                shares_total = mapped_ext.get("总股本_股")
+                eq_parent = mapped_ext.get("普通股归母权益_元")
+                if bps_up and shares_total and eq_parent:
+                    implied_eq = float(bps_up) * float(shares_total)
+                    gap_pct = (implied_eq - float(eq_parent)) / float(eq_parent) * 100.0
+                    if abs(gap_pct) >= 1.0:
+                        mapped_ext["BPS隐含净资产差额说明"] = (
+                            f"上游 BPS({bps_up})×总股本({int(shares_total)}) = {implied_eq:,.2f} 元，"
+                            f"与普通股归母权益({float(eq_parent):,.2f} 元)相差 {gap_pct:+.2f}%；"
+                            "差额可能来自报告期股本时滞、外币报表折算差额或其他综合收益未计入 BPS，"
+                            "估值方向与幅度以【市净率_PB_自算_普通股】为准。"
+                        )
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
             pb_note = (
-                f"市净率_PB({pb_val}倍{pb_calc_str})由[现价÷每股净资产_BPS]派生；若标的近期发生送转增发导致总股本变动，"
-                "上游每股净资产若停留在报告期旧股本口径将导致PB低估。精确普通股PB建议结合资产负债表重算：普通工商业标的为[总市值 ÷ 归母所有者权益]；"
+                f"市净率_PB({pb_val}倍{pb_calc_str})由[现价÷每股净资产_BPS]派生；上游 BPS 与归母权益之间可能存在正向或负向偏差"
+                "（报告期旧股本、其他权益工具、外币报表折算差额等），方向与幅度以【市净率_PB_自算_普通股】为准，不得默认按低估处理。"
+                "精确普通股PB建议结合资产负债表重算：普通工商业标的为[总市值 ÷ 归母所有者权益]；"
                 "金融企业（券商/银行/保险）或发行了永续债/优先股的标的，分母必须扣除其他权益工具，即[总市值 ÷ (归母所有者权益 − 其他权益工具/优先股/永续债)]，"
                 f"严禁直接以归母总权益计算导致估值大幅低估（如中信证券会低估约16%，邮储银行会低估约13%）；{pb_diff_warn}"
             ) if pb_val is not None else ""
@@ -1057,26 +1108,21 @@ class AStockEngine(BaseMarketEngine):
                 "卖五": {"价格": bsp_raw.get("SellPrice5") or bsp_raw.get("SellP5"), "委托量_手": bsp_raw.get("SellVol5") or bsp_raw.get("SellV5")},
             }
 
-        # 修复 P3-4: 自动计算委买总委托量、委卖总委托量、委差与委比并注入【盘口核心行情】
-        buy_total_hand = sum(
-            int(bsp_dict[f"买{i}"]["委托量_手"])
-            for i in range(1, 6)
-            if f"买{i}" in bsp_dict and isinstance(bsp_dict[f"买{i}"].get("委托量_手"), (int, float))
-        )
-        sell_total_hand = sum(
-            int(bsp_dict[f"卖{i}"]["委托量_手"])
-            for i in range(1, 6)
-            if f"卖{i}" in bsp_dict and isinstance(bsp_dict[f"卖{i}"].get("委托量_手"), (int, float))
-        )
-        weicha_hand = buy_total_hand - sell_total_hand
-        total_entrust = buy_total_hand + sell_total_hand
-        weibi_pct = round((weicha_hand / total_entrust) * 100.0, 2) if total_entrust > 0 else 0.0
-
+        # P3-4 修复：旧实现用 f"买{i}"（买1…买5）匹配中文档位 买一…买五，永远命中不到 → 四字段恒 0
+        buy_total_hand, sell_total_hand, weicha_hand, weibi_pct, weibi_ok = _calc_order_imbalance(bsp_dict)
         if "盘口核心行情" in result:
-            result["盘口核心行情"]["委买总委托量_手"] = buy_total_hand
-            result["盘口核心行情"]["委卖总委托量_手"] = sell_total_hand
-            result["盘口核心行情"]["委差_手"] = weicha_hand
-            result["盘口核心行情"]["委比_pct"] = weibi_pct
+            hq_view = result["盘口核心行情"]
+            hq_view["委买总委托量_手"] = buy_total_hand
+            hq_view["委卖总委托量_手"] = sell_total_hand
+            hq_view["委差_手"] = weicha_hand
+            hq_view["委比_pct"] = weibi_pct
+            hq_view["委差_手_可计算"] = weibi_ok
+            hq_view["委比_pct_可计算"] = weibi_ok
+            if not weibi_ok:
+                hq_view["委比委差说明"] = (
+                    "当前五档买卖挂单量均为 0（停牌、盘前或集合竞价尚未形成挂单），委差与委比不可计算；"
+                    "表中 0 为占位值，勿解读为多空委托力量均衡。"
+                )
 
         if bsp_dict:
             result["五档深度盘口"] = bsp_dict
@@ -1678,6 +1724,41 @@ class AStockEngine(BaseMarketEngine):
                                             "上游通用工商科目未单独列示金融负项明细行，但官方流出小计与经营现金净额真实闭合，并无虚增。"
                                         )
 
+                            # 投资活动现金流入/流出不可加总差额自陈
+                            # （mango 实测 002594 2026-06-30 投资流入残差 0.42 亿、2025-12-31 0.67 亿，原先无自陈）
+                            def _sum_first_present(groups: list[tuple[str, ...]]) -> float:
+                                total = 0.0
+                                for names in groups:
+                                    for n in names:
+                                        v = period_dict.get(n)
+                                        if isinstance(v, (int, float)):
+                                            total += float(v)
+                                            break
+                                return round(total, 2)
+
+                            tz_in = period_dict.get("投资活动现金流入小计")
+                            if isinstance(tz_in, (int, float)):
+                                diff_tz_in = round(float(tz_in) - _sum_first_present([
+                                    ("收回投资收到的现金",),
+                                    ("取得投资收益收到的现金",),
+                                    ("处置固定资产无形资产收回的现金净额", "处置固定资产、无形资产和其他长期资产收回的现金净额"),
+                                    ("处置子公司及其他营业单位收到的现金净额",),
+                                    ("收到其他与投资活动有关的现金",),
+                                ]), 2)
+                                if abs(diff_tz_in) > 0.01:
+                                    period_dict["投资活动现金流入不可加总差额_工商细项缺项"] = diff_tz_in
+
+                            tz_out = period_dict.get("投资活动现金流出小计")
+                            if isinstance(tz_out, (int, float)):
+                                diff_tz_out = round(float(tz_out) - _sum_first_present([
+                                    ("购建固定资产无形资产支付的现金", "购建固定资产、无形资产和其他长期资产支付的现金"),
+                                    ("投资支付的现金",),
+                                    ("取得子公司及其他营业单位支付的现金净额",),
+                                    ("支付其他与投资活动有关的现金",),
+                                ]), 2)
+                                if abs(diff_tz_out) > 0.01:
+                                    period_dict["投资活动现金流出不可加总差额_工商细项缺项"] = diff_tz_out
+
                             # 筹资活动现金流入小计自动补全与说明 (修复 D7 静默缺列)
                             cz_in = period_dict.get("筹资活动现金流入小计")
                             cz_out = period_dict.get("筹资活动现金流出小计")
@@ -1741,10 +1822,12 @@ class AStockEngine(BaseMarketEngine):
                             "处置固定资产无形资产收回的现金净额", "处置固定资产、无形资产和其他长期资产收回的现金净额",
                             "处置子公司及其他营业单位收到的现金净额", "收到其他与投资活动有关的现金",
                             "投资活动现金流入小计", "投资活动现金流入不可加总差额_金融投资细项缺项",
+                            "投资活动现金流入不可加总差额_工商细项缺项",
                             "购建固定资产无形资产支付的现金", "购建固定资产、无形资产和其他长期资产支付的现金",
                             "投资支付的现金", "取得子公司及其他营业单位支付的现金净额", "质押贷款净增加额",
                             "支付其他与投资活动有关的现金",
                             "投资活动现金流出小计", "投资活动现金流出不可加总差额_金融投资细项缺项",
+                            "投资活动现金流出不可加总差额_工商细项缺项",
                             "投资活动现金流量净额",
                             "吸收投资收到的现金", "发行债券收到的现金", "取得借款收到的现金", "收到其他与筹资活动有关的现金",
                             "筹资活动现金流入小计", "筹资活动现金流入小计说明", "筹资活动现金流入不可加总差额_金融借款及发债细项等",
@@ -2271,6 +2354,8 @@ class AStockEngine(BaseMarketEngine):
         results: list[dict[str, Any]] = []
         headers: list[str] = []
         filtered_st_count = 0
+        seen_codes: set[str] = set()
+        page_dup_count = 0
         if isinstance(raw, list) and len(raw) >= 3:
             # 通达信 wendaQuery 原生二维数组结构说明：
             # - Row 0: 查询元信息 [0, '', 31, session_id, count]
@@ -2295,6 +2380,11 @@ class AStockEngine(BaseMarketEngine):
                 # 必须符合 6 位标准证券代码
                 if not re.match(r"^\d{6}$", sec_code):
                     continue
+                # 页内去重：上游同一页可能重复返回同一代码（实测 5 页里 600016 在 page4/page5 各出现一次）
+                if sec_code in seen_codes:
+                    page_dup_count += 1
+                    continue
+                seen_codes.add(sec_code)
 
                 is_st = ("ST" in sec_name.upper()) or ("退" in sec_name)
                 if filter_st and is_st:
@@ -2362,7 +2452,13 @@ class AStockEngine(BaseMarketEngine):
             "returned_count": len(results),
             "filtered_st_count": filtered_st_count,
             "filter_st_note": "默认已过滤 ST/*ST 股（若当页切片包含 ST 则过滤并记录 filtered_st_count）；若需获取全部股票（含风险警示股）请将 filter_st 设为 False。",
-            "分页与过滤说明": "网关分页机制与上游切片严格保持 1:1 对齐（第 p 页对应上游切片范围 [(p-1)*limit .. p*limit-1]），杜绝跨页遍历时偏移倍增与漏标的；开启 filter_st 时在该页切片内精准剔除 ST/*ST 标的并记录 filtered_st_count，逐页并集与剔除 ST 之和严格守恒等于 matched_count。",
+            "分页与过滤说明": (
+                "网关按上游切片 1:1 透传（第 p 页对应 [(p-1)*limit .. p*limit-1]），并在页内按证券代码去重；"
+                "filter_st 开启时在该页切片内剔除 ST/*ST 并记录 filtered_st_count。"
+                "【跨页一致性自陈】上游分页排序不保证稳定，跨页遍历可能出现重复或漏项（实测同一查询两次调用的并集不一致）；"
+                "如需严格全量，请把 limit 调到单页上限（<=100）一次取全，或收窄条件后分次查询。"
+            ),
+            "页内去重条数": page_dup_count,
             "market_scope": "A股 (中国大陆交易所：沪市/深市/北交所)",
             "is_hk_intent": is_hk_query,
             "stocks": results,

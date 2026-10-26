@@ -4506,6 +4506,72 @@ class TestHKCompanyInfoCacheOffline(unittest.TestCase):
         self.assertEqual(info["每手股数"], "500")
 
 
+class TestBatch6OfflineFixes(unittest.TestCase):
+    """批次6：A 股委比、screener 页内去重、A 股分红空页重试（离线）"""
+
+    def test_calc_order_imbalance(self) -> None:
+        from mcp_gateway.engines.a_stock import _calc_order_imbalance
+
+        bsp = {
+            "买一": {"价格": 10.0, "委托量_手": 38},
+            "买二": {"价格": 9.9, "委托量_手": 1},
+            "买三": {"价格": 9.8, "委托量_手": 1},
+            "买四": {"价格": 9.7, "委托量_手": 1},
+            "买五": {"价格": 9.6, "委托量_手": 1},
+            "卖一": {"价格": 10.1, "委托量_手": 5},
+            "卖二": {"价格": 10.2, "委托量_手": 5},
+            "卖三": {"价格": 10.3, "委托量_手": 5},
+            "卖四": {"价格": 10.4, "委托量_手": 5},
+            "卖五": {"价格": 10.5, "委托量_手": 5},
+        }
+        buy, sell, diff, pct, ok = _calc_order_imbalance(bsp)
+        self.assertEqual((buy, sell, diff), (42, 25, 17))
+        self.assertAlmostEqual(pct, 25.37, places=2)
+        self.assertTrue(ok)
+        self.assertEqual(_calc_order_imbalance({}), (0, 0, 0, 0.0, False))
+
+    def test_screener_page_dedup(self) -> None:
+        gw = FinanceGateway()
+        payload = [
+            [0, "", 3, "s", 3],
+            ["POS", "market", "sec_code", "sec_name", "now_price", "chg"],
+            ["", "", "", "", "", ""],
+            [1, "0", "002223", "博实股份", "25.15", "-1.5"],
+            [2, "0", "002223", "博实股份", "25.15", "-1.5"],
+            [3, "0", "002514", "宝馨科技", "5.10", "2.1"],
+        ]
+        with unittest.mock.patch.object(gw.tdx_client, "_post", return_value=payload):
+            res = gw.stock_screener({"message": "储能", "limit": 10})
+        self.assertEqual(res["returned_count"], 2)
+        self.assertEqual(res["页内去重条数"], 1)
+        self.assertEqual([s["code"] for s in res["stocks"]], ["002223", "002514"])
+        self.assertIn("跨页一致性自陈", res["分页与过滤说明"])
+
+    def test_ashare_dividends_retry_on_empty_page(self) -> None:
+        from mcp_gateway.engines import a_stock as a_module
+
+        empty = b"<html><body>no table</body></html>"
+        good = (
+            '<html><body><table id="sharebonus_1">'
+            "<tr><td>公告日期</td><td>送股</td><td>转增</td><td>派息</td><td>进度</td><td>除权除息日</td><td>股权登记日</td><td>红股上市日</td></tr>"
+            "<tr><td>2026-06-30</td><td>0</td><td>0</td><td>3.5</td><td>实施</td><td>2026-07-10</td><td>2026-07-09</td><td>--</td></tr>"
+            "</table></body></html>"
+        ).encode("gbk")
+        calls = {"n": 0}
+
+        def fake_open(req, timeout=None):
+            calls["n"] += 1
+            return _FakeHKResponse(empty if calls["n"] == 1 else good)
+
+        engine = a_module.AStockEngine(timeout=1)
+        with unittest.mock.patch.object(a_module._SECURE_OPENER, "open", side_effect=fake_open):
+            with unittest.mock.patch.object(a_module.time, "sleep", return_value=None):
+                rows = engine._get_ashare_dividends("600519")
+        self.assertEqual(calls["n"], 2, "空页未触发重试")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["派息_每10股_含税"], 3.5)
+
+
 if __name__ == "__main__":
     unittest.main()
 

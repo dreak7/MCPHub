@@ -1468,7 +1468,7 @@ class FinanceGateway:
         # A 股标的：若请求 dividends/bonus，路由至真实分红派息专线 (修复 Issue 4)
         if norm_cat == "dividends":
             div_rows = self.tdx_client._get_ashare_dividends(clean_code)
-            return _apply_limit_post({
+            div_res = {
                 "symbol": clean_code,
                 "category": "dividends",
                 "category_name": "A股历年分红派息与送转明细",
@@ -1478,7 +1478,13 @@ class FinanceGateway:
                 },
                 "data": div_rows if div_rows else {"status": "暂无分红派息记录"},
                 "分红说明": "A股历年权益分派方案、派息送股及除权除息日明细。",
-            })
+            }
+            if not div_rows:
+                div_res["无记录说明"] = (
+                    "新浪分红页两次抓取均未返回记录（网关已自动重试一次）：可能该标的从未分红，"
+                    "也可能是上游页面暂空或反爬；不等于「确认无分红」，请以公司公告为准。"
+                )
+            return _apply_limit_post(div_res)
 
         # 1. 首先尝试通达信官方专线获取（优先官方授权渠道）
         try:
@@ -2352,13 +2358,36 @@ class FinanceGateway:
                             if real_ttm is not None and str(real_ttm).strip() != "":
                                 real_ttm_val = round(float(real_ttm), 2)
                                 if abs(real_ttm_val - float(curr_pe_ttm)) > 0.05:
+                                    # v2.0.1 修复 P1-2：与 quotes 对齐的是【现价口径】PE，原值是【昨收清算价】口径，
+                                    # 两者差异主要来自价格基准（非净利润期次）；旧文案谎称"已自算校准为真实TTM"。
+                                    row["滚动市盈率_PETTM_昨收口径"] = round(float(curr_pe_ttm), 2)
                                     row["滚动市盈率_PETTM"] = real_ttm_val
                                     row["滚动市盈率_PE_TTM"] = real_ttm_val
                                     row.pop("动态市盈率_PE_TTM", None)
-                                    row["PE_TTM校准说明"] = (
-                                        f"上游F10估值快照期次入库滞后(原值{curr_pe_ttm})，"
-                                        f"已自动自算校准为最新{table4_bgq}期次真实TTM值({real_ttm_val}倍)。"
-                                    )
+                                    hq_view = q_info.get("盘口核心行情") or {}
+                                    implied_gap = None
+                                    try:
+                                        shares = (q_info.get("估值与基本盘面") or {}).get("总股本_股")
+                                        close_prev, now_p = hq_view.get("昨收"), hq_view.get("现价")
+                                        if shares and close_prev and now_p and float(curr_pe_ttm) > 0 and real_ttm_val > 0:
+                                            e_snap = float(close_prev) * float(shares) / float(curr_pe_ttm)
+                                            e_live = float(now_p) * float(shares) / real_ttm_val
+                                            if e_live:
+                                                implied_gap = abs(e_snap - e_live) / e_live * 100.0
+                                    except (TypeError, ValueError, ZeroDivisionError):
+                                        implied_gap = None
+                                    if implied_gap is not None and implied_gap > 2.0:
+                                        row["PE_TTM校准说明"] = (
+                                            f"F10 快照原值 {curr_pe_ttm} 为上一交易日清算价口径；与 quotes 现价 PE {real_ttm_val} "
+                                            f"之间隐含净利润相差 {implied_gap:.2f}%，疑似净利润期次或统计口径差异（非单纯价格变动），"
+                                            "本表已按现价口径对齐，估值横比请以 stock_financials 自算 TTM 复核。"
+                                        )
+                                    else:
+                                        row["PE_TTM校准说明"] = (
+                                            f"F10 快照原值 {curr_pe_ttm} 为上一交易日清算价口径（与【市净率_PB_昨收】同基准），"
+                                            f"quotes 现价 PE 为 {real_ttm_val}；两者差异来自价格基准（昨收 vs 现价），"
+                                            "并非净利润期次滞后。本表已按现价口径对齐，原值保留在【滚动市盈率_PETTM_昨收口径】。"
+                                        )
                                     if real_ttm_val < 0:
                                         row["市盈率可用状态"] = "亏损不可用"
                                         row["市盈率亏损标记"] = True
