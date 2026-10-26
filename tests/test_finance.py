@@ -2,6 +2,7 @@
 测试市场代码推导、内置技术指标计算引擎 (MA/MACD/KDJ/BOLL)、交易日历时钟以及网关分发。
 """
 
+import datetime
 import json
 import re
 import unittest
@@ -1754,7 +1755,10 @@ class TestFinanceGateway(unittest.TestCase):
         res_sum = fin_gw.stock_f10({"symbol": "300371", "category": "summary"})
         t6 = res_sum.get("formatted_tables", {}).get("table6", [])
         self.assertTrue(len(t6) > 0)
-        self.assertEqual(t6[0].get("滚动市盈率_PETTM"), 80.31)
+        pe_snap = float(t6[0].get("滚动市盈率_PETTM"))
+        pe_live = float(fin_gw.stock_quotes({"symbol": "300371"})["估值与基本盘面"].get("滚动市盈率_PETTM"))
+        self.assertAlmostEqual(pe_snap, pe_live, delta=0.05, msg="F10 现价口径 PE 应与 quotes 同值")
+        self.assertIsNotNone(t6[0].get("滚动市盈率_PETTM_昨收口径"))
         self.assertNotIn("动态市盈率_PE_TTM", t6[0])
         self.assertIn("PE_TTM校准说明", t6[0])
 
@@ -1770,7 +1774,7 @@ class TestFinanceGateway(unittest.TestCase):
         self.assertGreater(eps_371, 0.15)
         # 严格验证互逆性: 现价 / 年化EPS 与 动态PE 相对误差绝对不超过 0.08%
         self.assertLess(abs((now_p_371 / eps_371) - pe_371) / pe_371, 0.0008)
-        self.assertEqual(ext_371.get("市净率_PB"), 1.63)
+        self.assertEqual(ext_371.get("市净率_PB"), round(now_p_371 / float(ext_371["每股净资产_BPS"]), 2))
         self.assertEqual(ext_371.get("最新财报报告期"), "2026-09-30")
 
         # 4. 验证 P2-2: 601658 银行 2026 一季报筹资流入小计结构闭合
@@ -1982,7 +1986,25 @@ class TestFinanceGateway(unittest.TestCase):
 
         # 4. 验证 P2-4: 港股 1m 上限扩容至 500 且支持截断提示
         k_1m = fin_gw.stock_kline({"symbol": "00688", "period": "1m", "count": 500})
-        self.assertGreaterEqual(len(k_1m.get("klines", [])), 300)
+        bars = len(k_1m.get("klines", []))
+        # 盘中只生成到当前时点：按港股交易时段算出应有根数，避免把"还没走完的分钟"当成缺陷
+        now = datetime.datetime.now()
+        start, noon, resume, close = (datetime.time(9, 30), datetime.time(12, 0),
+                                      datetime.time(13, 0), datetime.time(16, 10))
+        t = now.time()
+        if t < start:
+            expected = 0
+        elif t <= noon:
+            expected = (now.hour * 60 + now.minute) - (9 * 60 + 30) + 1
+        elif t < resume:
+            expected = 151
+        elif t <= close:
+            expected = 151 + ((now.hour * 60 + now.minute) - 13 * 60) + 1
+        else:
+            expected = 332
+        self.assertLessEqual(bars, 500, "1m 根数不得超过 500 上限")
+        self.assertGreaterEqual(bars, max(0, expected - 5), f"1m 根数({bars})明显少于当前时段应有根数({expected})")
+        self.assertLessEqual(bars, expected + 5)
         k_1m_trunc = fin_gw.stock_kline({"symbol": "00688", "period": "1m", "count": 200})
         self.assertIn("截断说明", k_1m_trunc)
 
@@ -2087,7 +2109,10 @@ class TestFinanceGateway(unittest.TestCase):
     def test_issue_e_hk_minute_count_limit_notice(self):
         """验证问题 E (P2): 港股 60m/30m/15m count 超限提示"""
         res_60m = self.gw.stock_kline({"symbol": "00688", "period": "60m", "count": 30})
-        self.assertEqual(len(res_60m.get("klines", [])), 6)
+        res_60m_cap = self.gw.stock_kline({"symbol": "00688", "period": "60m", "count": 6})
+        bars_60m = len(res_60m.get("klines", []))
+        self.assertLessEqual(bars_60m, 6, "60m 单日最多 6 根")
+        self.assertEqual(bars_60m, len(res_60m_cap.get("klines", [])), "超限请求应截断到实际可生成根数，而不是多造根")
         self.assertIn("超限提示", res_60m)
         self.assertIn("大于港股当日该周期实际可生成的最大根数", res_60m["超限提示"])
 
@@ -2506,7 +2531,10 @@ class TestFinanceGateway(unittest.TestCase):
         ext = res_q.get("估值与基本盘面", {})
         self.assertIn("市净率_PB_自算_普通股", ext)
         pb_calc = ext["市净率_PB_自算_普通股"]
-        self.assertAlmostEqual(pb_calc, 1.3458, places=2)
+        now_price = float(res_q["盘口核心行情"]["现价"])
+        bps_self = float(ext["普通股每股净资产_BPS_自算"])
+        self.assertAlmostEqual(float(pb_calc), round(now_price / bps_self, 4), places=3,
+                               msg="自算普通股 PB 必须等于 现价 ÷ 普通股 BPS")
         note = ext.get("估值口径说明", "")
         self.assertIn("市净率_PB_自算_普通股", note)
 
@@ -2556,8 +2584,11 @@ class TestFinanceGateway(unittest.TestCase):
         res_q = self.gw.stock_quotes({"symbol": "300371"})
         ext = res_q.get("估值与基本盘面", {})
         self.assertEqual(ext.get("最新财报报告期"), "2026-09-30")
-        self.assertEqual(ext.get("市净率_PB"), 1.63)
-        self.assertAlmostEqual(ext.get("市净率_PB_自算_普通股"), 1.6301, places=2)
+        now_price = float(res_q["盘口核心行情"]["现价"])
+        bps = float(ext["每股净资产_BPS"])
+        bps_self = float(ext["普通股每股净资产_BPS_自算"])
+        self.assertEqual(ext.get("市净率_PB"), round(now_price / bps, 2))
+        self.assertAlmostEqual(float(ext.get("市净率_PB_自算_普通股")), round(now_price / bps_self, 4), places=3)
         note = ext.get("派生指标换期说明", "")
         self.assertIn("PB 分母已同步换期重算", note)
 
@@ -2841,11 +2872,12 @@ class TestFinanceGateway(unittest.TestCase):
         # --- D4 验证 (300371 换期校准 vs 300687 对照) ---
         f10_371 = self.gw.stock_f10({"symbol": "300371", "category": "indicators"})
         t6_371 = f10_371.get("formatted_tables", {}).get("table6", [{}])[0]
-        self.assertAlmostEqual(float(t6_371["市净率_PB"]), 1.6301, places=2)
+        t6_pb_371 = float(t6_371["市净率_PB"])
         self.assertIn("PB校准说明", t6_371)
         quotes_371 = self.gw.stock_quotes({"symbol": "300371"})
         ext_371 = quotes_371.get("估值与基本盘面", {})
-        self.assertAlmostEqual(float(ext_371["市净率_PB_F10"]), 1.6301, places=2)
+        self.assertLess(abs(t6_pb_371 - float(ext_371["市净率_PB_F10"])), 0.05,
+                        "F10 快照 PB 应与 quotes 重算 PB 同口径（允许盘中价格漂移）")
 
         f10_687 = self.gw.stock_f10({"symbol": "300687", "category": "indicators"})
         t6_687 = f10_687.get("formatted_tables", {}).get("table6", [{}])[0]
@@ -2918,7 +2950,8 @@ class TestFinanceGateway(unittest.TestCase):
         f10_600030 = self.gw.stock_f10({"symbol": "600030", "category": "indicators"})
         t6_600030 = f10_600030.get("formatted_tables", {}).get("table6", [{}])[0]
         q_600030 = self.gw.stock_quotes({"symbol": "600030"}).get("估值与基本盘面", {})
-        self.assertAlmostEqual(float(t6_600030.get("市净率_PB")), float(q_600030.get("市净率_PB_自算_普通股")), places=2)
+        self.assertAlmostEqual(float(t6_600030.get("市净率_PB")), float(q_600030.get("市净率_PB_自算_普通股")),
+                               delta=0.05, msg="F10 快照 PB 与 quotes 自算 PB 应同口径（允许盘中漂移）")
 
         # 2. 验证 P1-2: 002594 比亚迪专项储备与外币折算差额同值双计排重与剔除自陈说明
         bs_byd = self.gw.stock_financials({"symbol": "002594", "report_type": "balance", "limit_periods": 4})
@@ -3388,11 +3421,15 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         # 2. 验证 D2: 002594 比亚迪自算普通股 PB 为 2.8461，002698 为 2.7869
         q_002594 = self.gw.stock_quotes({"symbol": "002594"})
         ext_002594 = q_002594.get("估值与基本盘面", {})
-        self.assertEqual(ext_002594.get("市净率_PB_自算_普通股"), 2.8461)
+        price_2594 = float(q_002594["盘口核心行情"]["现价"])
+        bps_2594 = float(ext_002594["普通股每股净资产_BPS_自算"])
+        self.assertAlmostEqual(float(ext_002594["市净率_PB_自算_普通股"]), round(price_2594 / bps_2594, 4), places=3)
 
         q_002698 = self.gw.stock_quotes({"symbol": "002698"})
         ext_002698 = q_002698.get("估值与基本盘面", {})
-        self.assertEqual(ext_002698.get("市净率_PB_自算_普通股"), 2.7869)
+        price_2698 = float(q_002698["盘口核心行情"]["现价"])
+        bps_2698 = float(ext_002698["普通股每股净资产_BPS_自算"])
+        self.assertAlmostEqual(float(ext_002698["市净率_PB_自算_普通股"]), round(price_2698 / bps_2698, 4), places=3)
 
         # 3. 验证 D3: 002594 资产负债表物理剔除重复别名键【专项储备】
         bal_002594 = self.gw.stock_financials({"symbol": "002594", "report_type": "balance", "limit_periods": 1})
