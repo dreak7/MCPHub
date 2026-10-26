@@ -333,6 +333,8 @@ def main() -> None:
 
         if not tools:
             raise ConfigError("No runnable tools could be initialized from configured capabilities")
+        # 启动可见性：一行列出实际注册的工具名，排查「配置了但工具没出现」时先看这行
+        logger.info("MCP tools registered (%d): %s", len(tools), ", ".join(sorted(tools)))
 
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
