@@ -1147,6 +1147,98 @@ class Context7IntegrationTest(unittest.TestCase):
         self.assertIn("language", props)
 
 
+class MultiKeyRotationTest(unittest.TestCase):
+    """多 key 轮换：同一 provider 内 key1 冷却后 key2 接力，三链路一致（离线）"""
+
+    def _gateway(self, providers):
+        return SearchGateway(
+            {"cooldown_seconds": 60, "providers": providers},
+            Path(tempfile.mkdtemp()) / "state.json",
+            FakeLogger(),
+        )
+
+    @staticmethod
+    def _key_cid(cap: str, provider_id: str, key: str) -> str:
+        import hashlib
+
+        return f"{cap}:{provider_id}#{hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}"
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "k1", "TAVILY_API_KEY_2": "k2"}, clear=False)
+    def test_search_rotates_to_second_key_when_first_cooling(self):
+        gw = self._gateway([{
+            "id": "tavily-search", "type": "tavily-search", "enabled": True, "priority": 10,
+            "api_key_envs": ["TAVILY_API_KEY", "TAVILY_API_KEY_2"], "endpoint": "https://example.test/tavily",
+        }])
+        gw.cooldowns.set(self._key_cid("web_search", "tavily-search", "k1"), 3600, reason_type="quota", api_key="k1")
+        seen = []
+
+        def fake_call(provider, query, limit, arguments, api_key, timeout):
+            seen.append(api_key)
+            return [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]
+
+        with patch.object(gw, "_call", side_effect=fake_call):
+            result = gw.search({"query": "x"})
+        self.assertEqual(seen, ["k2"], "key1 冷却时应直接使用 key2")
+        self.assertEqual(result["provider"], "tavily-search")
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "k1", "TAVILY_API_KEY_2": "k2", "EXA_API_KEY": "e"}, clear=False)
+    def test_search_skips_provider_when_all_keys_cooling(self):
+        gw = self._gateway([
+            {"id": "tavily-search", "type": "tavily-search", "enabled": True, "priority": 10,
+             "api_key_envs": ["TAVILY_API_KEY", "TAVILY_API_KEY_2"], "endpoint": "https://example.test/tavily"},
+            {"id": "exa", "enabled": True, "priority": 20, "api_key_env": "EXA_API_KEY", "endpoint": "https://example.test/exa"},
+        ])
+        for key in ("k1", "k2"):
+            gw.cooldowns.set(self._key_cid("web_search", "tavily-search", key), 3600, reason_type="quota", api_key=key)
+        with patch.object(gw, "_call", return_value=[{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]):
+            result = gw.search({"query": "x"})
+        self.assertEqual(result["provider"], "exa")
+        self.assertIn("provider is in cooldown", [f["reason"] for f in result["provider_failures"]])
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "k1", "TAVILY_API_KEY_2": "k2"}, clear=False)
+    def test_multi_search_uses_only_one_key_per_provider(self):
+        gw = self._gateway([{
+            "id": "tavily-search", "type": "tavily-search", "enabled": True, "priority": 10,
+            "api_key_envs": ["TAVILY_API_KEY", "TAVILY_API_KEY_2"], "endpoint": "https://example.test/tavily",
+        }])
+        calls = []
+
+        def fake_call(provider, query, limit, arguments, api_key, timeout):
+            calls.append(api_key)
+            return [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]
+
+        with patch.object(gw, "_call", side_effect=fake_call):
+            gw.multi_search({"query": "x"})
+        self.assertEqual(calls, ["k1"], "multi_search 每个 provider 只能打一次，不能两把 key 同时扣额度")
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "k1", "TAVILY_API_KEY_2": "k2"}, clear=False)
+    def test_extract_rotates_key_on_quota(self):
+        gw = ExtractGateway(
+            {"cooldown_seconds": 60, "providers": [{
+                "id": "tavily-search", "type": "tavily-search", "enabled": True, "priority": 10,
+                "api_key_envs": ["TAVILY_API_KEY", "TAVILY_API_KEY_2"], "endpoint": "https://example.test/extract",
+            }]},
+            Path(tempfile.mkdtemp()) / "state.json",
+            FakeLogger(),
+        )
+        keys = []
+
+        def fake_extract(provider, urls, depth, max_characters, api_key, timeout):
+            keys.append(api_key)
+            if api_key == "k1":
+                raise SearchError("HTTP 432 quota exceeded", retryable=True, status=432)
+            return [{"url": urls[0], "title": "t", "content": "c", "raw_content": "c"}]
+
+        with patch.object(gw, "_extract", side_effect=fake_extract):
+            result = gw.extract({"urls": ["https://example.com/a"]})
+        self.assertEqual(keys, ["k1", "k2"])
+        self.assertEqual(result["results"][0]["provider"], "tavily-search")
+        self.assertTrue(
+            gw.cooldowns.is_available(self._key_cid("web_extract", "tavily-search", "k2")),
+            "第二把 key 成功后不应被冻结",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 

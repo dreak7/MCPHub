@@ -23,7 +23,7 @@
           "id": "tavily-search",
           "enabled": true,
           "priority": 30,
-          "api_key_env": "TAVILY_API_KEY",
+          "api_key_envs": ["TAVILY_API_KEY", "TAVILY_API_KEY_2"],
           "endpoint": "https://api.tavily.com/search"
         },
         {
@@ -66,7 +66,7 @@
           "id": "tavily-search",
           "enabled": true,
           "priority": 30,
-          "api_key_env": "TAVILY_API_KEY",
+          "api_key_envs": ["TAVILY_API_KEY", "TAVILY_API_KEY_2"],
           "endpoint": "https://api.tavily.com/extract"
         },
         {

@@ -225,6 +225,13 @@
 - 边界：只抓「改名 / 删字段」导致的文档漂移，**不校验数值与口径**；数值类回归仍以 `tests/` 用例与 golden 结构指纹为准；
 - 新增/改名对外字段时，同一提交里必须同步 `tests/field_contract.json`，否则 CI/全量套件会红。
 
+### 2.7 多 Key 轮换与故障转移 (Key Pool & Failover)
+
+- 配置：provider 用 `api_key_envs`（数组，顺序即优先级）声明多把 key，旧的 `api_key_env` 单值继续兼容；
+- 行为：同一 provider 同一时刻只用一把 key。当前 key 额度耗尽（HTTP 402/432）或限流冷却后，自动换下一把——`web_search` / `web_extract` 在同一次调用内完成接力，`multi_web_search` 每轮只打一把 key（避免两把同时扣额度），该轮失败后由后续查询换 key；
+- 冷却粒度：多 key provider 的冷却键为 `<capability>:<provider_id>#<keyhash8>`，每把 key 独立冷冻与跨月复活；单 key provider 沿用旧键，`provider-state.json` 无需迁移；
+- 匿名引擎（jina / anysearch）不受影响：没配 key 时仍走匿名配额。
+
 ---
 
 ## 三、 F10 核心分类 18 大枚举跨市场能力矩阵 (A/H Support Matrix)

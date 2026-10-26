@@ -31,6 +31,47 @@ class ProviderFailure:
     reason: str
 
 
+def resolve_provider_key(
+    provider: dict[str, Any],
+    cooldowns: "CooldownStore",
+    legacy_cooldown_id: str,
+    allow_anonymous: bool = False,
+) -> tuple[str | None, str, str | None]:
+    """按 provider 的 key 池顺序挑第一把未冷却的 key（所有引擎共用）。
+
+    - 配置：`api_key_envs`（数组，顺序即优先级），兼容旧的 `api_key_env` 单值
+    - 返回：(api_key, cooldown_id, reason)，reason ∈ {None, "not_configured", "cooldown"}
+    - 单 key provider 沿用旧 cooldown_id（既有 state 文件零迁移）
+    - 多 key provider 用 `<legacy_id>#<keyhash8>`，每把 key 独立冷冻/复活
+    - allow_anonymous=True 时（jina/anysearch 等），没配 key 也放行，但共享旧 cooldown_id
+    """
+    pid = str(provider.get("id", "unknown"))
+    envs = provider.get("api_key_envs")
+    env_names = [str(n) for n in envs if isinstance(n, str) and n.strip()] if isinstance(envs, list) else []
+    if not env_names:
+        single = provider.get("api_key_env")
+        env_names = [single] if isinstance(single, str) and single.strip() else []
+
+    keys = [(name, (os.getenv(name) or "").strip()) for name in env_names]
+    keys = [(name, key) for name, key in keys if key]
+
+    if not keys:
+        if not allow_anonymous:
+            return None, legacy_cooldown_id, "not_configured"
+        if cooldowns.is_available(legacy_cooldown_id):
+            return "", legacy_cooldown_id, None
+        return None, legacy_cooldown_id, "cooldown"
+
+    multi = len(keys) > 1
+    last_cid = legacy_cooldown_id
+    for _name, key in keys:
+        cid = f"{legacy_cooldown_id}#{hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}" if multi else legacy_cooldown_id
+        last_cid = cid
+        if cooldowns.is_available(cid, current_key=key):
+            return key, cid, None
+    return None, last_cid, "cooldown"
+
+
 # =========================================================================
 # 【功能块：安全 HTTP 传输层与重定向拦截处理器】
 # - 输入：HTTP 请求对象与重定向目标 URL
@@ -193,36 +234,56 @@ class SearchGateway:
             provider_id = provider.get("id", "unknown")
             if not provider.get("enabled", False):
                 continue
-            key_name = provider.get("api_key_env")
-            api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
             engine_type = provider.get("type") or provider_id
             # AnySearch, Jina AI, and Context7 explicitly support an anonymous quota; all others require a key.
-            if not api_key and engine_type not in ("anysearch", "jina", "context7"):
+            api_key, key_cd_id, key_reason = resolve_provider_key(
+                provider,
+                self.cooldowns,
+                self._cooldown_id(provider_id),
+                allow_anonymous=engine_type in ("anysearch", "jina", "context7"),
+            )
+            if key_reason == "not_configured":
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
-            if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
+            if key_reason == "cooldown":
                 failures.append(ProviderFailure(provider_id, "provider is in cooldown"))
                 continue
-            try:
-                result = self._call(provider, query.strip(), max_results, arguments, api_key, timeout)
-                response: dict[str, Any] = {
-                    "provider": provider_id,
-                    "query": query.strip(),
-                    "results": result,
-                    "provider_failures": [{"provider": item.provider, "reason": item.reason} for item in failures],
-                }
-                warning = self._format_warning(failures, all_exhausted=False)
-                if warning:
-                    response["warning"] = warning
-                return response
-            except SearchError as exc:
-                self.logger.warning("Provider %s failed: %s", provider_id, exc)
-                failures.append(ProviderFailure(provider_id, str(exc)))
-                if exc.retryable:
+            api_key = api_key or ""
+            result: list[dict[str, Any]] | None = None
+            while True:
+                try:
+                    result = self._call(provider, query.strip(), max_results, arguments, api_key, timeout)
+                    break
+                except SearchError as exc:
+                    self.logger.warning("Provider %s failed: %s", provider_id, exc)
+                    failures.append(ProviderFailure(provider_id, str(exc)))
+                    if not exc.retryable:
+                        break
                     is_quota = self._is_quota_exhausted(exc)
                     cd = quota_cooldown_seconds if is_quota else cooldown_seconds
                     reason_type = "quota" if is_quota else "rate_limit"
-                    self.cooldowns.set(self._cooldown_id(provider_id), cd, reason_type=reason_type, api_key=api_key)
+                    self.cooldowns.set(key_cd_id, cd, reason_type=reason_type, api_key=api_key)
+                    nxt_key, nxt_cd, nxt_reason = resolve_provider_key(
+                        provider,
+                        self.cooldowns,
+                        self._cooldown_id(provider_id),
+                        allow_anonymous=engine_type in ("anysearch", "jina", "context7"),
+                    )
+                    if nxt_reason is not None or not nxt_key:
+                        break
+                    api_key, key_cd_id = nxt_key, nxt_cd
+            if result is None:
+                continue
+            response: dict[str, Any] = {
+                "provider": provider_id,
+                "query": query.strip(),
+                "results": result,
+                "provider_failures": [{"provider": item.provider, "reason": item.reason} for item in failures],
+            }
+            warning = self._format_warning(failures, all_exhausted=False)
+            if warning:
+                response["warning"] = warning
+            return response
 
         detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "No provider enabled"
         all_quota = (len(failures) >= enabled_count and enabled_count > 0 and self._is_all_quota(failures))
@@ -269,22 +330,26 @@ class SearchGateway:
         timeout = self.definition.get("timeout_seconds", 25)
 
         failures: list[ProviderFailure] = []
-        ready_providers: list[tuple[dict[str, Any], str]] = []
+        ready_providers: list[tuple[dict[str, Any], str, str]] = []
 
         for provider in sorted(providers, key=lambda item: item.get("priority", 1000)):
             provider_id = provider.get("id", "unknown")
             if not provider.get("enabled", False):
                 continue
-            key_name = provider.get("api_key_env")
-            api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
             engine_type = provider.get("type") or provider_id
-            if not api_key and engine_type not in ("anysearch", "jina"):
+            api_key, key_cd_id, key_reason = resolve_provider_key(
+                provider,
+                self.cooldowns,
+                self._cooldown_id(provider_id),
+                allow_anonymous=engine_type in ("anysearch", "jina"),
+            )
+            if key_reason == "not_configured":
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
-            if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
+            if key_reason == "cooldown":
                 failures.append(ProviderFailure(provider_id, "provider is in cooldown"))
                 continue
-            ready_providers.append((provider, api_key))
+            ready_providers.append((provider, api_key or "", key_cd_id))
 
         if not ready_providers:
             detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "No provider enabled"
@@ -304,12 +369,12 @@ class SearchGateway:
                     arguments,
                     api_key,
                     timeout
-                ): (provider.get("id", "unknown"), api_key)
-                for provider, api_key in ready_providers
+                ): (provider.get("id", "unknown"), api_key, key_cd_id)
+                for provider, api_key, key_cd_id in ready_providers
             }
             try:
                 for future in concurrent.futures.as_completed(future_to_provider, timeout=float(timeout)):
-                    prov_id, prov_key = future_to_provider[future]
+                    prov_id, prov_key, prov_cd = future_to_provider[future]
                     try:
                         res = future.result()
                         if isinstance(res, list):
@@ -321,13 +386,13 @@ class SearchGateway:
                             is_quota = self._is_quota_exhausted(exc)
                             cd = quota_cooldown_seconds if is_quota else cooldown_seconds
                             reason_type = "quota" if is_quota else "rate_limit"
-                            self.cooldowns.set(self._cooldown_id(prov_id), cd, reason_type=reason_type, api_key=prov_key)
+                            self.cooldowns.set(prov_cd, cd, reason_type=reason_type, api_key=prov_key)
                     except Exception as exc:
                         self.logger.exception("Multi-search provider %s unexpected error: %s", prov_id, exc)
                         failures.append(ProviderFailure(prov_id, f"Unexpected error: {exc}"))
             except (concurrent.futures.TimeoutError, TimeoutError):
                 self.logger.warning("Multi-search exceeded global timeout of %ss; proceeding with partial results", timeout)
-                for future, (p_id, p_key) in future_to_provider.items():
+                for future, (p_id, p_key, _p_cd) in future_to_provider.items():
                     if not future.done():
                         future.cancel()
                         failures.append(ProviderFailure(p_id, f"Global timeout of {timeout}s exceeded"))
@@ -340,7 +405,7 @@ class SearchGateway:
             raise SearchError(f"No search provider succeeded ({detail}).{extra}", retryable=False)
 
         # 按引擎优先级对并发搜集到的结果集进行稳定排序（保持 Exa -> AnySearch -> Tavily -> Jina -> Bocha 优先级顺序）
-        provider_priority = {p.get("id"): p.get("priority", 1000) for p, _ in ready_providers}
+        provider_priority = {p.get("id"): p.get("priority", 1000) for p, _, _ in ready_providers}
         provider_results.sort(key=lambda item: provider_priority.get(item[0], 1000))
 
         contributed_providers = [p_id for p_id, items in provider_results if items]
@@ -1154,27 +1219,44 @@ class ExtractGateway(SearchGateway):
             provider_id = provider.get("id", "unknown")
             if not provider.get("enabled", False):
                 continue
-            key_name = provider.get("api_key_env")
-            api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
             engine_type = provider.get("type") or provider_id
-            if not api_key and engine_type not in ("anysearch", "jina"):
+            api_key, key_cd_id, key_reason = resolve_provider_key(
+                provider,
+                self.cooldowns,
+                self._cooldown_id(provider_id),
+                allow_anonymous=engine_type in ("anysearch", "jina"),
+            )
+            if key_reason == "not_configured":
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
-            if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
+            if key_reason == "cooldown":
                 failures.append(ProviderFailure(provider_id, "provider is in cooldown"))
                 continue
-            try:
-                results = self._extract(provider, list(pending), depth, max_characters, api_key, timeout)
-            except SearchError as exc:
-                self.logger.warning("Extract provider %s failed: %s", provider_id, exc)
-                failures.append(ProviderFailure(provider_id, str(exc)))
-                if exc.retryable:
+            api_key = api_key or ""
+            results = None
+            while True:
+                try:
+                    results = self._extract(provider, list(pending), depth, max_characters, api_key, timeout)
+                    break
+                except SearchError as exc:
+                    self.logger.warning("Extract provider %s failed: %s", provider_id, exc)
+                    failures.append(ProviderFailure(provider_id, str(exc)))
+                    if not exc.retryable:
+                        break
                     is_quota = self._is_quota_exhausted(exc)
                     cd = quota_cooldown_seconds if is_quota else cooldown_seconds
                     reason_type = "quota" if is_quota else "rate_limit"
-                    self.cooldowns.set(self._cooldown_id(provider_id), cd, reason_type=reason_type, api_key=api_key)
-                # Authentication, provider-side validation, and URL parsing failures
-                # are provider-specific: preserve the reason and try the next service.
+                    self.cooldowns.set(key_cd_id, cd, reason_type=reason_type, api_key=api_key)
+                    nxt_key, nxt_cd, nxt_reason = resolve_provider_key(
+                        provider,
+                        self.cooldowns,
+                        self._cooldown_id(provider_id),
+                        allow_anonymous=engine_type in ("anysearch", "jina"),
+                    )
+                    if nxt_reason is not None or not nxt_key:
+                        break
+                    api_key, key_cd_id = nxt_key, nxt_cd
+            if results is None:
                 continue
             returned_urls = set()
             for result in results:
