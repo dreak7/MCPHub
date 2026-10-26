@@ -151,7 +151,7 @@ def edit_env_keys(paths: dict[str, Path]) -> None:
 # =========================================================================
 # 【功能块：运行服务健康自检与全部测试套件】
 # - 输入：paths (dict[str, Path]): 项目关键路径字典
-# - 功能：调用 python -m unittest 执行全部 242 项单元测试，验证所有功能与算法健康状态
+# - 功能：调用 python -m unittest 执行全部 244 项单元测试，验证所有功能与算法健康状态
 # - 输出：测试控制台输出
 # =========================================================================
 def run_health_tests(paths: dict[str, Path]) -> None:
@@ -281,7 +281,7 @@ def main() -> None:
         print()
         print(f"{pad}  [3] 快捷配置/编辑 API 密钥 (.env)")
         print()
-        print(f"{pad}  [4] 运行服务健康检查与全部测试套件 (242 项)")
+        print(f"{pad}  [4] 运行服务健康检查与全部测试套件 (244 项)")
         print()
         print(f"{pad}  [5] 查看服务运行日志 (logs/gateway.log)")
         print()

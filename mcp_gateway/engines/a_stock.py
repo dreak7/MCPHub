@@ -60,6 +60,37 @@ def _order_by_canonical(keys: list[str], canonical: list[str]) -> list[str]:
 ORDERBOOK_BUY_LEVELS: tuple[str, ...] = ("买一", "买二", "买三", "买四", "买五")
 ORDERBOOK_SELL_LEVELS: tuple[str, ...] = ("卖一", "卖二", "卖三", "卖四", "卖五")
 
+# 估值口径阈值（A 股专用；港股有自己的口径，不共用）
+A_PB_SNAPSHOT_DIFF_THRESHOLD = 0.03        # 行情 PB 与自算普通股 PB 的绝对差（倍）
+A_BPS_EQUITY_GAP_THRESHOLD_PCT = 1.0       # BPS 隐含净资产与普通股归母权益的差（%）
+
+
+def _pb_snapshot_diff_note(pb_val: Any, pb_calc: Any, has_other_equity_tools: bool = False) -> str:
+    """行情 PB 与自算普通股 PB 的偏差提示（高估/低估/其他权益工具三种口径），偏差在阈值内返回空串。"""
+    if pb_val is None or pb_calc is None or not pb_calc:
+        return ""
+    if abs(pb_val - pb_calc) <= A_PB_SNAPSHOT_DIFF_THRESHOLD:
+        return ""
+    pct_diff = round(abs(pb_val - pb_calc) / pb_calc * 100.0, 1)
+    tail = (
+        f"真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，"
+        "与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
+    )
+    if pb_val > pb_calc:
+        return (
+            f"（注：行情市净率 {pb_val} 倍与普通股真实市净率存在约 {pct_diff}% 的高估偏差，"
+            f"系行情 BPS 分母仍基于报告期旧股本或上游净资产统计口径差异所致；{tail}"
+        )
+    if has_other_equity_tools:
+        return (
+            f"（注：行情市净率 {pb_val} 倍因BPS分母基于未扣除其他权益工具(永续债/优先股)的归母总权益计算"
+            f"而存在约 {pct_diff}% 的低估偏差；{tail}"
+        )
+    return (
+        f"（注：行情市净率 {pb_val} 倍与普通股真实市净率存在约 {pct_diff}% 的低估偏差，"
+        f"系行情 BPS 分母基数或口径差异所致；{tail}"
+    )
+
 
 def _bsp_from_snapshot(bsp_raw: dict[str, Any]) -> dict[str, Any]:
     """通达信极速快照字典 → 中文档位五档盘口（键序与旧实现一致：先买五档、后卖五档）。"""
@@ -1006,18 +1037,12 @@ class AStockEngine(BaseMarketEngine):
             pb_val = mapped_ext.get("市净率_PB")
             pb_calc = mapped_ext.get("市净率_PB_自算_普通股")
             pb_calc_str = f"，网关自算普通股市净率为 {pb_calc} 倍" if pb_calc is not None else ""
-            pb_diff_warn = ""
-            if pb_val is not None and pb_calc is not None and abs(pb_val - pb_calc) > 0.03:
-                pct_diff = round(abs(pb_val - pb_calc) / pb_calc * 100.0, 1)
-                if pb_val > pb_calc:
-                    # 行情市净率高于普通股自算市净率 (如 002594 比亚迪 3.09 vs 2.8461，高估 8.7%)
-                    pb_diff_warn = f"（注：行情市净率 {pb_val} 倍与普通股真实市净率存在约 {pct_diff}% 的高估偏差，系行情 BPS 分母仍基于报告期旧股本或上游净资产统计口径差异所致；真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
-                else:
-                    # 行情市净率低于普通股自算市净率 (低估偏差，如金融股含有永续债或股本扩增)
-                    if 'eq_info' in locals() and eq_info and (raw_gm - ptg_qy > 1000):
-                        pb_diff_warn = f"（注：行情市净率 {pb_val} 倍因BPS分母基于未扣除其他权益工具(永续债/优先股)的归母总权益计算而存在约 {pct_diff}% 的低估偏差；真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
-                    else:
-                        pb_diff_warn = f"（注：行情市净率 {pb_val} 倍与普通股真实市净率存在约 {pct_diff}% 的低估偏差，系行情 BPS 分母基数或口径差异所致；真实普通股PB已由网关自算生成【市净率_PB_自算_普通股】{pb_calc} 倍，与 F10 table6 普通股清算口径 100% 对齐，跨工具横比推荐优先使用【市净率_PB_自算_普通股】）。"
+            _scope = locals()
+            has_other_equity_tools = bool(
+                _scope.get("eq_info")
+                and (float(_scope.get("raw_gm") or 0.0) - float(_scope.get("ptg_qy") or 0.0) > 1000)
+            )
+            pb_diff_warn = _pb_snapshot_diff_note(pb_val, pb_calc, has_other_equity_tools)
             # 修复 P2-5：BPS 隐含净资产与归母权益的差额给出量化自陈
             # （002594 实测差额 208.44 亿恰等于外币报表折算差额，旧文案只按「送转→低估」单向解释）
             try:
@@ -1027,7 +1052,7 @@ class AStockEngine(BaseMarketEngine):
                 if bps_up and shares_total and eq_parent:
                     implied_eq = float(bps_up) * float(shares_total)
                     gap_pct = (implied_eq - float(eq_parent)) / float(eq_parent) * 100.0
-                    if abs(gap_pct) >= 1.0:
+                    if abs(gap_pct) >= A_BPS_EQUITY_GAP_THRESHOLD_PCT:
                         mapped_ext["BPS隐含净资产差额说明"] = (
                             f"上游 BPS({bps_up})×总股本({int(shares_total)}) = {implied_eq:,.2f} 元，"
                             f"与普通股归母权益({float(eq_parent):,.2f} 元)相差 {gap_pct:+.2f}%；"

@@ -4636,6 +4636,31 @@ class TestHKV202BatchOffline(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class TestValuationCaliberSSOT(unittest.TestCase):
+    """7.2：A 股估值口径阈值与 PB 偏差文案的单一事实源（离线）"""
+
+    def test_pb_diff_note_branches(self) -> None:
+        from mcp_gateway.engines.a_stock import (
+            A_PB_SNAPSHOT_DIFF_THRESHOLD,
+            _pb_snapshot_diff_note,
+        )
+
+        self.assertEqual(A_PB_SNAPSHOT_DIFF_THRESHOLD, 0.03)
+        self.assertEqual(_pb_snapshot_diff_note(1.00, 1.02), "", "阈值内不应出提示")
+        self.assertEqual(_pb_snapshot_diff_note(None, 1.0), "")
+        self.assertIn("高估", _pb_snapshot_diff_note(3.09, 2.8461))
+        self.assertIn("永续债", _pb_snapshot_diff_note(0.60, 0.70, True))
+        low = _pb_snapshot_diff_note(0.60, 0.70, False)
+        self.assertIn("低估", low)
+        self.assertNotIn("永续债", low)
+
+    def test_finance_pe_thresholds(self) -> None:
+        from mcp_gateway import finance
+
+        self.assertEqual(finance.A_PE_SNAPSHOT_ALIGN_ABS, 0.05)
+        self.assertEqual(finance.A_PE_IMPLIED_NETPROFIT_GAP_PCT, 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

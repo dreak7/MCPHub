@@ -53,6 +53,10 @@ from .core.indicators import calculate_indicators
 from .core.market_utils import get_market_context, infer_market_setcode
 from .invariants import verify_all_financial_invariants
 
+# A 股 F10 快照 PE 与 quotes 现价 PE 的对齐阈值（仅 A 股口径；港股估值口径各自独立，不共用）
+A_PE_SNAPSHOT_ALIGN_ABS = 0.05         # 两值绝对差（倍）超过即按现价口径对齐
+A_PE_IMPLIED_NETPROFIT_GAP_PCT = 2.0   # 两值隐含净利润差（%）超过才判为口径/期次差异而非价格基准差
+
 
 # =========================================================================
 # 【功能块 2.0：语义近邻相关度纯函数 (stock_lookup 专用)】
@@ -2357,7 +2361,7 @@ class FinanceGateway:
                                 real_ttm = q_info["ProInfo"].get("PETTM")
                             if real_ttm is not None and str(real_ttm).strip() != "":
                                 real_ttm_val = round(float(real_ttm), 2)
-                                if abs(real_ttm_val - float(curr_pe_ttm)) > 0.05:
+                                if abs(real_ttm_val - float(curr_pe_ttm)) > A_PE_SNAPSHOT_ALIGN_ABS:
                                     # v2.0.1 修复 P1-2：与 quotes 对齐的是【现价口径】PE，原值是【昨收清算价】口径，
                                     # 两者差异主要来自价格基准（非净利润期次）；旧文案谎称"已自算校准为真实TTM"。
                                     row["滚动市盈率_PETTM_昨收口径"] = round(float(curr_pe_ttm), 2)
@@ -2376,7 +2380,7 @@ class FinanceGateway:
                                                 implied_gap = abs(e_snap - e_live) / e_live * 100.0
                                     except (TypeError, ValueError, ZeroDivisionError):
                                         implied_gap = None
-                                    if implied_gap is not None and implied_gap > 2.0:
+                                    if implied_gap is not None and implied_gap > A_PE_IMPLIED_NETPROFIT_GAP_PCT:
                                         row["PE_TTM校准说明"] = (
                                             f"F10 快照原值 {curr_pe_ttm} 为上一交易日清算价口径；与 quotes 现价 PE {real_ttm_val} "
                                             f"之间隐含净利润相差 {implied_gap:.2f}%，疑似净利润期次或统计口径差异（非单纯价格变动），"
