@@ -4,6 +4,9 @@
 
 专用于处理港股一般工商业科技、电商、制造、消费类上市公司（执行 IFRS / HKFRS 准则）。
 承载：财年首季守护 (阿里等3月财年)、单季度前驱做差推算 (腾讯单季真实还原)、法定美元原币反解还原 (小马智行等)。
+
+注意：本包（mcp_gateway/handlers/）当前**未被引擎实例化**，属四象限处理器预留实现；
+修改其中文案不会影响线上响应，接入前必须重新验证。
 """
 
 from __future__ import annotations
@@ -45,7 +48,10 @@ class HKIFRSIndustrialHandler(BaseStatementHandler):
 
             # 工商业报表通用规范
             if rtype_lower in ("income", "income_statement", "lyb"):
-                p["工商业毛利说明"] = "港股工商业企业毛利 = 营业额 − 销售成本（或营运支出）。"
+                p["工商业毛利说明"] = (
+                    "港股工商业企业毛利一般按「营业额 − 销售成本（或营运支出）」列示，但上游毛利行可能已另扣「其他成本」"
+                    "（如 00753 中国国航：毛利 = 营业额 − 销售成本 − 其他成本），跨票比较毛利率前必须逐票核对公式与【其他成本】键，不可直比。"
+                )
 
             elif rtype_lower in ("cashflow", "cashflow_statement", "xjllb"):
                 p["工商业现金及等价物跨表勾稽说明"] = (

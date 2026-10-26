@@ -3286,6 +3286,9 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         val_desc = q_00700.get("估值与基本盘面", {}).get("估值口径说明", "")
         self.assertIn("quotes 与 f10 indicators 估值差自陈", val_desc)
         self.assertIn("PB 差可超 5%", val_desc)
+        self.assertIn("以 f10 indicators 为基准", val_desc)
+        self.assertNotIn("09988", val_desc, "文案不应再引用具体票号样例")
+        self.assertEqual(q_00700["估值与基本盘面"].get("估值差基准"), "f10_indicators")
 
         # 5. 验证 P2-3: 港股 dividends 包含每股派息 float 数值与分红数据提取说明
         div_00700 = self.gw.stock_f10({"symbol": "00700", "category": "dividends"})
@@ -4715,6 +4718,37 @@ class TestFieldDictionary74(unittest.TestCase):
         contract = mod.json.loads((mod.ROOT / "tests" / "field_contract.json").read_text(encoding="utf-8"))
         self.assertIn("a_share", contract, "A 股字典缺失")
         self.assertIn("hk", contract, "港股字典缺失")
+
+
+class TestBatch8DisclosureGrading(unittest.TestCase):
+    """批次8：自陈按分级——不串票、标基准、算不了给 null + 可算位（离线）"""
+
+    def test_ah_note_has_no_borrowed_numbers(self) -> None:
+        from mcp_gateway.engines.hk_stock import _ah_caliber_note
+
+        note = _ah_caliber_note(21689434304, 3377482000)
+        self.assertNotIn("01088", note, "通用提示不得引用具体票号")
+        self.assertNotIn("%", note, "通用提示不得带百分比样例")
+        self.assertIn("3,377,482,000", note)
+        self.assertIn("不代表差异为 0", note)
+
+    def test_hk_income_ah_flags_are_false(self) -> None:
+        """A_H 差异位必须是 null + false（本引擎无 A 腿），不能是 0。"""
+        import inspect
+
+        from mcp_gateway.engines import hk_stock as hk
+
+        src = inspect.getsource(hk)
+        self.assertIn('return_dict["A_H差异_pct"] = None', src)
+        self.assertIn('return_dict["A_H差异可算"] = False', src)
+
+    def test_handler_gross_profit_note_mentions_other_cost(self) -> None:
+        from mcp_gateway.handlers.hk_ifrs_industrial import HKIFRSIndustrialHandler
+
+        handler = HKIFRSIndustrialHandler()
+        rows = handler.process_statements([{"营业额": 100.0}], "income", "report", {"real_currency": "CNY"})
+        self.assertIn("其他成本", rows[0]["工商业毛利说明"])
+        self.assertIn("不可直比", rows[0]["工商业毛利说明"])
 
 
 if __name__ == "__main__":
