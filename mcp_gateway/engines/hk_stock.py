@@ -96,13 +96,14 @@ def _annotate_balance_template_gaps(statements: list[dict[str, Any]]) -> str | N
 class HKStockEngine(BaseMarketEngine):
     """港股领域独立处理引擎"""
 
-    def __init__(self, timeout: int = 15, logger: logging.Logger | None = None):
+    def __init__(self, timeout: int = 15, logger: logging.Logger | None = None, ashare_twin_check: Callable[[str], bool] | None = None):
         self.timeout = timeout
         self.logger = logger or logging.getLogger("mcp_gateway.finance.hk_engine")
         self._entity_cache: dict[str, dict[str, Any] | None] = {}
         self._hk_exists_cache: dict[str, bool] = {}
         self._company_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-        self._share_cache: dict[str, tuple[float, tuple[int, int]]] = {}
+        self._share_cache: dict[str, tuple[float, tuple[int, int, str]]] = {}
+        self._ashare_twin_check = ashare_twin_check
 
     def resolve_entity(self, clean_code: str) -> dict[str, Any] | None:
         """解析5位港股纯数字代码正主实体 (腾讯开放专线)"""
@@ -1776,8 +1777,8 @@ class HKStockEngine(BaseMarketEngine):
         if report_type == "income":
             # A+H 标的：港股按 IFRS 编报，股东应占溢利与 A 股 CAS 归母净利润存在口径差（01088 实测 +2.6%~+11.4%）
             struct = self._get_hk_share_structure(clean_code)
-            if struct and struct[1] < struct[0] * 0.98:
-                total_sh, h_sh = struct
+            if struct and self._should_emit_ah_hint(struct):
+                total_sh, h_sh, _name = struct
                 return_dict["A/H报表口径提示"] = _ah_caliber_note(total_sh, h_sh)
                 return_dict["A_H差异_pct"] = None
                 return_dict["A_H差异可算"] = False
@@ -1871,12 +1872,12 @@ class HKStockEngine(BaseMarketEngine):
                 return None
         return None
 
-    def _get_hk_share_structure(self, clean_code: str) -> tuple[int, int] | None:
-        """轻量取总股本/H股股数：只解析腾讯行情串 parts[69]/[70]，10 分钟内复用，不进完整行情链。"""
+    def _get_hk_share_structure(self, clean_code: str) -> tuple[int, int, str] | None:
+        """轻量取总股本/H股股数/简称：只解析腾讯行情串 parts[1]/[69]/[70]，10 分钟内复用，不进完整行情链。"""
         cached = self._share_cache.get(clean_code)
         if cached and (time.time() - cached[0]) < 600:
             return cached[1]
-        result: tuple[int, int] | None = None
+        result: tuple[int, int, str] | None = None
         try:
             url = f"https://qt.gtimg.cn/q=r_hk{clean_code}"
             req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
@@ -1887,12 +1888,18 @@ class HKStockEngine(BaseMarketEngine):
                 total = int(float(parts[69] or 0))
                 h_shares = int(float(parts[70] or 0))
                 if total > 0 and h_shares > 0:
-                    result = (total, h_shares)
+                    result = (total, h_shares, parts[1].strip())
         except Exception:
             result = None
         if result:
             self._share_cache[clean_code] = (time.time(), result)
         return result
+
+    def _should_emit_ah_hint(self, struct: tuple[int, int, str] | None) -> bool:
+        """H 股 < 全部股本只是必要条件；还须检出 A 股对腿，否则美股二次上市（如 02026）会被误标 A+H。"""
+        if not struct or struct[1] >= struct[0] * 0.98:
+            return False
+        return self._ashare_twin_check is None or bool(self._ashare_twin_check(struct[2]))
 
     def _get_sina_hk_company_info(self, clean_code: str) -> dict[str, Any] | None:
         # 公司概况是准静态资料（新浪页 + 东财 + 每手股数），10 分钟内复用，避免每次 summary 都重打三个站点

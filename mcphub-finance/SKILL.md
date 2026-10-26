@@ -1,7 +1,7 @@
 ---
 name: mcphub-finance
 description: "Official financial and securities analysis skill for MCPHub. Provides standard SOPs for A-share and HK-share market analysis, real-time Level-1 quotes, indicators, F10, financials, and multi-source cross-verification. MCPHub 股票与证券金融专属调用规程。"
-version: 2.0.2
+version: 2.0.3
 author: MCPHub
 license: MIT
 platforms: [windows, macos, linux]
@@ -416,6 +416,10 @@ metadata:
   9. **自陈分级铁律（v2.0.2 批次 8 起）**：①**通用模板禁止出现具体票号+数值**（01088 的区间曾发给 7/7 票，5 票实际 0.0%）；②任何百分比必须写清基准（分子/分母各是谁，如「以 f10 indicators 为基准」）；③能算的必须按票算，算不了就写 `null` + `可算=false` + 原因，**不许借别的票的实测值**；④单条自陈 >200 字应外置到 reference，响应里只留口径代码。
   10. **行情时间统一取 `行情datetime`（批次 9）**：A 股旧形态是 `行情日期=20261026` + `行情时间=131802`，港股是 `行情时间=2026/10/26 13:18:01`，同一工具两套格式；现在两侧都另发 ISO 形态 `行情datetime="2026-10-26 13:18:02"`，旧键保留不删；K 线早已是 ISO，勿再按市场分支解析 quotes 时间。
 - **陷阱 129（多 key 轮换，批次 10）**：一个 provider 可配 `api_key_envs: ["TAVILY_API_KEY","TAVILY_API_KEY_2"]`，同一时刻只用一把；额度耗尽（402/432）后同一次调用内自动接力（search/extract），multi 则下一轮换 key。冷却键为 `<capability>:<id>#<keyhash8>`，两把独立冷冻、跨月各自复活；**两把 key 必须来自不同账号**，同账号多 key 不增加月度额度；`multi_web_search` 每轮每个 provider 只打一把，配置两个同名 provider 条目才会双扣。**报错措辞**：额度耗尽统一显示为「额度耗尽」而非 HTTP 432；同轮已切换备用 key 时写「额度耗尽（已自动切换备用 Key）」且不再进 warning。exa/jina/bocha/anysearch/context7 均已预置双槽（`_2` 留空即停用）；可匿名引擎（jina/anysearch）没 key 时仍走匿名额度，401/403 也会换 key。
+- **陷阱 130（v2.0.3 批次 13：盘后时效与 A/H 归属）**：
+  1. **盘后 15:00–16:30 是 f10 快照空窗**：`估值时效提示` 已按四态动态生成（盘中 / 盘后未批处理 / 盘后已批处理 / 非交易时段）；盘后未批处理时 f10 总市值/PB/PE 仍是上一交易日清算价、quotes 已是当日收盘价，属上游批处理节奏而非缺陷，按提示用 quotes 重算；
+  2. **A/H 提示需 A 股对腿**：仅「H 股 < 全部股本」不够（02026 小马智行-W 系美股二次上市，H 股占 81% 也曾被误标）；纯 H / 美股二次上市标的**不再下发** `A/H报表口径提示` / `A_H差异_pct` / `A_H差异可算`，缺键＝非 A+H，不是丢字段；
+  3. **`委比委差说明` 是条件键**：仅五档买卖全 0 时下发（归因含「盘后已无残单」）；`None` 表示五档有量、可计算，不是缺陷；
 - **陷阱 127（v2.0.1 港股无效码/语义近邻/季报模板/美元派息与 A 股龙虎榜、现金流键序收敛律）**：
   1. **港股 F10 无效码闸门（P1 收敛）**：全分类在分发前统一校验，只有腾讯行情明确应答 `none_match` 才拒绝，网络异常与响应异常一律 fail-open 放行；确定结果缓存，同一代码重复调用不重复打行情。`88888` 等伪码现在全分类抛 `ValueError`，不再返回「港股_88888」伪数据；
   2. **语义近邻相关度（P2 收敛）**：数字码要求与候选代码公共前缀 ≥3；名称型要求 ≥2 个非停用汉字交集（查询自身只有 1 个有效汉字时才放宽为 1），或名称/别名为子串。「不存在的公司名XYZ」不再靠一个「在」字召回零在科技金融；被剔除条数见响应【近邻过滤说明】；

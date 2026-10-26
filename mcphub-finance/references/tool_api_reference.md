@@ -1,6 +1,6 @@
 # MCPHub 证券与金融专属工具集技术参考手册 (Securities & Finance Tools API Reference & Data Dictionary)
 
-> **版本**：v2.0.2  
+> **版本**：v2.0.3  
 > **受众**：人类软件工程师、量化策略分析师、或需要精确核对底层字段/Schema的大模型（按需渐进式调阅）。  
 > **定位**：静态技术基准参考库（API Reference）、参数约束边界矩阵与 80+ 财务科目官方数据字典（Data Dictionary）。  
 > **使用规程**：日常 Agent 推理行动请直接遵循 [mcphub-finance/SKILL.md](../SKILL.md)；本白皮书提供底层最详尽的技术规格、参数边界与数据字典映射。
@@ -232,6 +232,17 @@
 - 冷却粒度：多 key provider 的冷却键为 `<capability>:<provider_id>#<keyhash8>`，每把 key 独立冷冻与跨月复活；单 key provider 沿用旧键，`provider-state.json` 无需迁移；
 - 报错措辞：额度耗尽统一显示为「额度耗尽」，不把 HTTP 432 原始码抛给调用方；同一次调用内已切换到备用 key 时，`provider_failures` 记为「额度耗尽（已自动切换备用 Key）」并从 `warning` 中摘除（服务实际成功，不再误报配额告警）；
 - 匿名引擎（jina / anysearch）不受影响：没配 key 时仍走匿名配额。
+
+### 2.8 v2.0.3 新增字段与口径变更清单
+
+> 本节仅列 v2.0.3 相对 v2.0.2 的变化。
+
+| 位置 | 变更 | 说明 |
+|---|---|---|
+| `stock_f10` indicators.table6.`估值时效提示` | 文案四态化 | 依 `market_context` 与 f10 基准日 `gxrq` 输出「盘中 / 盘后未批处理 / 盘后已批处理 / 非交易时段」四种指引；盘后未批处理时明示上游通常 16:30 后切换 |
+| `stock_f10` indicators.table6.`市净率_PB_说明` | 措辞扩展 | 「盘中或盘后批处理完成前」均以 quotes 现价为实时口径 |
+| `stock_quotes`（A 股）`盘口核心行情.委比委差说明` | 归因补全 | 增加「盘后已无残单」，并注明本键为条件键（仅五档全 0 时下发） |
+| `stock_financials`（港股）`A/H报表口径提示` / `A_H差异_pct` / `A_H差异可算` | **下发条件收紧** | 除「H 股 < 全部股本 ×0.98」外，须检出 A 股对腿；美股二次上市（02026）不再下发这三键；缺键＝非 A+H |
 
 ---
 

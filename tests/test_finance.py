@@ -3851,14 +3851,15 @@ class TestAShareNewRoundP2P3Convergence(unittest.TestCase):
         self.assertEqual(hq_hk["委比_pct"], 0.0)
 
     def test_p3_5_version_consistency(self):
-        """验证版本全链路：README / SKILL.md / tool_api_reference.md 统一为 v2.0.2"""
+        """验证版本全链路：README / SKILL.md / tool_api_reference.md 统一为 v2.0.3"""
         import os
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         
         # README.md
         with open(os.path.join(base_dir, "README.md"), "r", encoding="utf-8") as f:
             readme_text = f.read()
-        self.assertIn("# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.2)", readme_text)
+        self.assertIn("# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.3)", readme_text)
+        self.assertIn("### v2.0.3 — 盘后时效四态、A+H 归属判定与文档对账收口", readme_text)
         self.assertIn("### v2.0.2 — 港股残留文案/结构对齐与 A 股委比、PE 口径、screener 分页收敛", readme_text)
         self.assertIn("### v2.0.1 — 港股 P1~P3 与 A 股 P2~P3 遗留缺陷收敛", readme_text)
         self.assertIn("### v2.0.0 — 实测 A 股 P2-1、P3-1~P3-5 缺陷全面收敛", readme_text)
@@ -3866,17 +3867,19 @@ class TestAShareNewRoundP2P3Convergence(unittest.TestCase):
         # SKILL.md
         with open(os.path.join(base_dir, "mcphub-finance", "SKILL.md"), "r", encoding="utf-8") as f:
             skill_text = f.read()
-        self.assertIn("version: 2.0.2", skill_text)
+        self.assertIn("version: 2.0.3", skill_text)
         self.assertIn("陷阱 125", skill_text)
         self.assertIn("陷阱 127", skill_text)
         self.assertIn("陷阱 128", skill_text)
+        self.assertIn("陷阱 130", skill_text)
 
         # tool_api_reference.md
         with open(os.path.join(base_dir, "mcphub-finance", "references", "tool_api_reference.md"), "r", encoding="utf-8") as f:
             ref_text = f.read()
-        self.assertIn("版本**：v2.0.2", ref_text)
+        self.assertIn("版本**：v2.0.3", ref_text)
         self.assertIn("2.4 v2.0.1 新增字段与口径变更清单", ref_text)
         self.assertIn("2.5 v2.0.2 新增字段与口径变更清单", ref_text)
+        self.assertIn("2.8 v2.0.3 新增字段与口径变更清单", ref_text)
         self.assertIn("委买总委托量_手", ref_text)
 
 
@@ -4635,6 +4638,7 @@ class TestHKV202BatchOffline(unittest.TestCase):
         from mcp_gateway.engines import hk_stock as hk
 
         parts = ["0"] * 71
+        parts[1] = "中国神华"
         parts[69] = "21689434304"
         parts[70] = "3377482000"
         raw = 'v_hk01088="' + "~".join(parts) + '";'
@@ -4648,7 +4652,7 @@ class TestHKV202BatchOffline(unittest.TestCase):
         with unittest.mock.patch.object(hk._SECURE_OPENER, "open", side_effect=fake_open):
             first = engine._get_hk_share_structure("01088")
             second = engine._get_hk_share_structure("01088")
-        self.assertEqual(first, (21689434304, 3377482000))
+        self.assertEqual(first, (21689434304, 3377482000, "中国神华"))
         self.assertEqual(second, first)
         self.assertEqual(calls["n"], 1, "二次调用未命中 10 分钟缓存")
 
@@ -4811,6 +4815,44 @@ class TestBatch9DatetimeNormalization(unittest.TestCase):
             hq = gw.stock_quotes({"symbol": code})["盘口核心行情"]
             value = hq.get("行情datetime")
             self.assertTrue(pat.match(str(value)), f"{code} 行情datetime 非 ISO: {value}")
+
+
+class TestBatch13AfterCloseAndAHTwin(unittest.TestCase):
+    """批次 13：盘后估值提示四态、A/H 归属判定、盘后委比归因。"""
+
+    def test_valuation_freshness_note_four_states(self) -> None:
+        from mcp_gateway.finance import _valuation_freshness_note
+
+        self.assertIn("盘中请结合", _valuation_freshness_note("2026-10-23", {"is_trading_time": True}))
+        self.assertIn(
+            "盘后未批处理",
+            _valuation_freshness_note("2026-10-23", {"market_status": "closed_today", "reference_trading_date": "2026-10-26"}),
+        )
+        self.assertIn(
+            "已切换至当日",
+            _valuation_freshness_note("2026-10-26", {"market_status": "closed_today", "reference_trading_date": "2026-10-26"}),
+        )
+        self.assertIn("非交易时段", _valuation_freshness_note("2026-10-23", {"market_status": "holiday"}))
+
+    def test_ah_hint_requires_ashare_twin(self) -> None:
+        from mcp_gateway.engines.hk_stock import HKStockEngine
+
+        eng = HKStockEngine(ashare_twin_check=lambda name: name == "中国神华")
+        self.assertTrue(eng._should_emit_ah_hint((21689434304, 3377482000, "中国神华")))
+        # 02026 小马智行-W：H 股占 81% 但无 A 股对腿，不得下发 A/H 提示
+        self.assertFalse(eng._should_emit_ah_hint((435184160, 354095390, "小马智行-W")))
+        # H 股 ≈ 全部股本：纯 H 股，本就不该下发
+        self.assertFalse(eng._should_emit_ah_hint((1000, 990, "中国神华")))
+        self.assertFalse(eng._should_emit_ah_hint(None))
+        # 未注入校验器时保持旧行为（向后兼容）
+        self.assertTrue(HKStockEngine()._should_emit_ah_hint((1000, 300, "任意")))
+
+    def test_after_close_wording_present(self) -> None:
+        import inspect
+
+        import mcp_gateway.engines.a_stock as a_stock
+
+        self.assertIn("盘后已无残单", inspect.getsource(a_stock))
 
 
 if __name__ == "__main__":

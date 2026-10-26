@@ -149,8 +149,28 @@ class TdxClient:
         self.logger = logger or logging.getLogger("mcp_gateway.finance")
         self._entity_cache: dict[str, dict[str, Any] | None] = {}
         self.last_lookup_pruned = 0
-        self.hk_engine = HKStockEngine(timeout=self.timeout, logger=self.logger)
         self.a_engine = AStockEngine(token=self.token, api_endpoint=self.api_endpoint, rag_endpoint=self.rag_endpoint, timeout=self.timeout, logger=self.logger, post_fn=lambda url, body: self._post(url, body))
+        self._ashare_twin_cache: dict[str, bool] = {}
+        self.hk_engine = HKStockEngine(timeout=self.timeout, logger=self.logger, ashare_twin_check=self._has_ashare_twin)
+
+    def _has_ashare_twin(self, hk_name: str) -> bool:
+        """港股是否真有 A 股对腿：查 A 股实体并要求 6 位代码 + 名称至少 3 字重合（H 股占比小只是必要条件，02026 这类美股二次上市会误判）。"""
+        key = (hk_name or "").strip()
+        if not key:
+            return False
+        if key not in self._ashare_twin_cache:
+            ok = False
+            try:
+                for ent in self.lookup_stock(query=key, market_range="AG") or []:
+                    code = str(ent.get("code") or ent.get("entity_code") or "")
+                    name = str(ent.get("name") or ent.get("entity_name") or "")
+                    if re.fullmatch(r"\d{6}", code) and len(set(key) & set(name)) >= 3:
+                        ok = True
+                        break
+            except Exception:
+                ok = False
+            self._ashare_twin_cache[key] = ok
+        return self._ashare_twin_cache[key]
 
     def _post(self, url: str, body: dict[str, Any] | list[Any]) -> Any:
         return self.a_engine._default_post(url, body)
@@ -1012,6 +1032,19 @@ class PublicFallbackClient:
 #         Token 掩码脱敏与大模型友好响应封装
 # - 输出：FinanceGateway 实例
 # =========================================================================
+# =========================================================================
+def _valuation_freshness_note(gxrq: str, ctx: dict[str, Any]) -> str:
+    """PB/PE 快照时效文案：按盘中 / 盘后未批处理 / 盘后已批处理 / 非交易四态给准确指引。"""
+    base = f"市净率(PB)/市盈率(PE)基于{gxrq or '上一交易日'}收盘清算口径"
+    if ctx.get("is_trading_time"):
+        return base + "；盘中请结合 stock_quotes 实时现价动态重算。"
+    if ctx.get("market_status") == "closed_today":
+        if gxrq and gxrq == str(ctx.get("reference_trading_date") or ""):
+            return base + "，已切换至当日收盘清算价，可直接与本日收盘行情比对。"
+        return base + "；当前为盘后未批处理态（上游通常 16:30 后切换当日清算价），实时估值请以 stock_quotes 当日收盘价重算。"
+    return base + "；当前为非交易时段，实时估值请以 stock_quotes 最新价重算。"
+
+
 class FinanceGateway:
     def __init__(
         self,
@@ -2325,7 +2358,7 @@ class FinanceGateway:
                 pb_yishou = row.get("市净率_PB_昨收")
                 if pb_yishou is not None:
                     row["市净率_PB"] = pb_yishou
-                    row["市净率_PB_说明"] = "基准为上一交易日收盘清算口径；实时盘中现价市净率请调用 stock_quotes 取【市净率_PB】或【市净率_PB_自算_普通股】。"
+                    row["市净率_PB_说明"] = "基准为上一交易日收盘清算口径；盘中或盘后批处理完成前，实时现价市净率请调用 stock_quotes 取【市净率_PB】或【市净率_PB_自算_普通股】。"
 
                 # 修复问题 2: 消除动态 PE 同名不同义与自相矛盾别名歧义
                 # F10 table6 中的 sylttm 为真实的 TTM 滚动市盈率，与 stock_quotes 中的【滚动市盈率_PETTM】同值同源
@@ -2431,7 +2464,7 @@ class FinanceGateway:
                     "与 stock_quotes 中的【滚动市盈率_PETTM】同值同口径；请勿将其与 quotes 中的【动态市盈率_PE】(单季年化口径) 直接横比；"
                     f"网关已彻底剔除自相矛盾的'动态市盈率_PE_TTM'旧别名以防误导。{loss_clause}"
                 )
-                row["估值时效提示"] = f"市净率(PB)/市盈率(PE)基于上一交易日清算日({gxrq or '前一交易日'})，盘中请结合 stock_quotes 实时现价动态重算。"
+                row["估值时效提示"] = _valuation_freshness_note(gxrq, get_market_context())
 
         # 3.5 增强 table8 (基础信息与行业分类汉化映射，修复 P3 杜绝裸英文字段外泄)
         if "table8" in formatted_tables:

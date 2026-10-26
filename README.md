@@ -1,6 +1,6 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.2)
+# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.3)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
@@ -56,7 +56,7 @@ MCPHub/
 ├── mcphub-finance/              # 【可选外挂】Hermes 专属证券金融分析规范 Skill
 ├── logs/                        # 运行日志目录 (gateway.log)
 ├── state/                       # 持久化状态目录 (provider-state.json 冷却状态与提取缓存)
-├── tests/                       # 259 项全量自动化单元测试套件 (100% 通过)
+├── tests/                       # 262 项全量自动化单元测试套件 (100% 通过)
 ├── MCPHub服务管理面板.bat          # Windows 双击即用一键管理控制台
 ├── README.md                    # 项目全景使用与配置说明文档
 └── LICENSE                      # MIT 开源许可证
@@ -260,6 +260,13 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### v2.0.3 — 盘后时效四态、A+H 归属判定与文档对账收口 (262项全绿)
+
+- **F10 估值时效提示四态（批次 13）**：按 `market_context` 与 f10 基准日 `gxrq` 区分「盘中 / 盘后未批处理 / 盘后已批处理 / 非交易时段」；盘后 15:00–16:30 不再误写「盘中请结合实时价」。600519 实测 15:20 输出「盘后未批处理态（上游通常 16:30 后切换当日清算价）」。
+- **A/H 归属判定（批次 13）**：港股 income 的【A/H报表口径提示】与 `A_H差异_pct` / `A_H差异可算` 由「H 股 < 全部股本」升级为「且检出 A 股对腿」；美股二次上市标的（02026 小马智行-W）不再被误标 A+H，01088/00939/00883 仍正常下发。
+- **盘后委比归因**：五档全 0 时【委比委差说明】补「盘后已无残单」，并明示本键为条件键（仅五档全 0 时下发，None ≠ 缺陷）。
+- **市净率_PB_说明**：「实时盘中现价」改为「盘中或盘后批处理完成前」，与四态提示口径一致。
 
 ### v2.0.2 — 港股残留文案/结构对齐与 A 股委比、PE 口径、screener 分页收敛 (241项全绿)
 
