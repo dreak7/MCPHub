@@ -4751,6 +4751,31 @@ class TestBatch8DisclosureGrading(unittest.TestCase):
         self.assertIn("不可直比", rows[0]["工商业毛利说明"])
 
 
+class TestBatch9DatetimeNormalization(unittest.TestCase):
+    """批次9：行情时间跨市场归一为 ISO（A 股紧凑格式 + 港股斜杠格式）"""
+
+    def test_normalize_two_source_formats(self) -> None:
+        from mcp_gateway.core.market_utils import normalize_datetime_iso as f
+
+        self.assertEqual(f("20261026", "131802"), "2026-10-26 13:18:02")
+        self.assertEqual(f("2026/10/26 13:18:01"), "2026-10-26 13:18:01")
+        self.assertEqual(f("2026-10-26 09:30"), "2026-10-26 09:30:00")
+        self.assertEqual(f("20261026"), "2026-10-26 00:00:00")
+        self.assertIsNone(f("", "131802"))
+        self.assertIsNone(f("bad"))
+        self.assertIsNone(f("20261026", "256199"), "非法时分秒应返回 None")
+
+    def test_quote_datetime_iso_cross_market(self) -> None:
+        import re
+
+        gw = FinanceGateway()
+        pat = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+        for code in ("600519", "00700"):
+            hq = gw.stock_quotes({"symbol": code})["盘口核心行情"]
+            value = hq.get("行情datetime")
+            self.assertTrue(pat.match(str(value)), f"{code} 行情datetime 非 ISO: {value}")
+
+
 if __name__ == "__main__":
     unittest.main()
 

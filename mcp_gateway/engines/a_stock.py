@@ -22,7 +22,7 @@ from urllib.request import Request
 
 from ..core.constants import *
 from ..core.indicators import calculate_indicators
-from ..core.market_utils import infer_market_setcode
+from ..core.market_utils import infer_market_setcode, normalize_datetime_iso
 from ..core.network import _SECURE_OPENER
 from .base import BaseMarketEngine
 
@@ -778,6 +778,10 @@ class AStockEngine(BaseMarketEngine):
                 mapped_hq["日内振幅_pct"] = amp_val
             if "行情时间" in mapped_hq:
                 mapped_hq["更新时间"] = mapped_hq["行情时间"]
+            # 跨市场统一时间形态：旧键（20261026/131802）保留，另发 ISO 形态供下游直接解析
+            iso_dt = normalize_datetime_iso(mapped_hq.get("行情日期"), mapped_hq.get("行情时间"))
+            if iso_dt:
+                mapped_hq["行情datetime"] = iso_dt
             # 彻底切除行内同值镜像别名【最高】、【最低】、【涨跌额】与【振幅_pct】，收敛为唯一规范键【最高价】、【最低价】、【涨跌额_元】与【日内振幅_pct】以防整表遍历求和双计
             mapped_hq.pop("最高", None)
             mapped_hq.pop("最低", None)

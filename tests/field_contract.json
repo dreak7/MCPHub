@@ -4,6 +4,7 @@
     "mcp_gateway/engines/a_stock.py": [
       "委买总委托量_手",
       "委卖总委托量_手",
+      "行情datetime",
       "委差_手",
       "委比_pct",
       "委差_手_可计算",
@@ -30,6 +31,7 @@
   "hk": {
     "mcp_gateway/engines/hk_stock.py": [
       "已发行H股股数_股",
+      "行情datetime",
       "全部已发行总股本_股",
       "表别名兼容说明",
       "表关系说明",

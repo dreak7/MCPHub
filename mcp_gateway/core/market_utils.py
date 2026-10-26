@@ -6,7 +6,44 @@
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Any
+
+
+def normalize_datetime_iso(value: str | None = None, time_part: str | None = None) -> str | None:
+    """行情时间归一为 'YYYY-MM-DD HH:MM:SS'（跨市场唯一可解析形态）。
+
+    支持两种来源：
+    - A 股：value='20261026', time_part='131802'
+    - 港股：value='2026/10/26 13:18:01'（也接受 '-')
+    解析失败一律返回 None，不抛错。
+    """
+    raw = str(value or "").strip()
+    tpart = str(time_part or "").strip()
+    if not raw:
+        return None
+    date_str, time_str = raw, tpart
+    if tpart and raw.isdigit() and len(raw) == 8:
+        date_str, time_str = raw, tpart
+    else:
+        parts = raw.replace("/", "-").split()
+        if len(parts) == 2:
+            date_str, time_str = parts[0], parts[1]
+        elif len(parts) == 1 and re.fullmatch(r"\d{8}", parts[0]):
+            date_str, time_str = parts[0], "000000"
+        else:
+            return None
+    date_str = date_str.replace("-", "")
+    if not re.fullmatch(r"\d{8}", date_str):
+        return None
+    time_digits = time_str.replace(":", "")
+    if not time_digits.isdigit():
+        return None
+    time_digits = time_digits.ljust(6, "0")[:6]
+    hh, mm, ss = int(time_digits[:2]), int(time_digits[2:4]), int(time_digits[4:6])
+    if not (0 <= hh < 24 and 0 <= mm < 60 and 0 <= ss < 60):
+        return None
+    return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} {hh:02d}:{mm:02d}:{ss:02d}"
 
 # =========================================================================
 # 【功能块 3：证券交易所与市场代码智能推导器】

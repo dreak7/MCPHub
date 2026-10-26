@@ -23,6 +23,7 @@ from urllib.request import Request
 
 from ..core.constants import HK_MAININDICATOR_MAP
 from ..core.indicators import calculate_indicators
+from ..core.market_utils import normalize_datetime_iso
 from ..core.network import _SECURE_OPENER
 from ..core.normalizer import (
     strip_internal_codes,
@@ -409,6 +410,7 @@ class HKStockEngine(BaseMarketEngine):
                 "日内振幅_pct": _safe_float(parts[43] if len(parts) > 43 else 0),
                 "换手率_pct": hsl_val,
                 "行情时间": parts[30] if len(parts) > 30 else "",
+                "行情datetime": normalize_datetime_iso(parts[30] if len(parts) > 30 else ""),
                 "更新时间": parts[30] if len(parts) > 30 else "",
                 "结算货币": curr_val,
                 "每手股数": int(_safe_float(parts[60])) if len(parts) > 60 and parts[60] and _safe_float(parts[60]) > 0 else None,
