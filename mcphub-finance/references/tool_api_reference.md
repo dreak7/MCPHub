@@ -217,6 +217,13 @@
 | `stock_kline`（港股日/周/月） | 每根 bar 新增 `datetime` | 与 A 股结构对齐，值同 `time`（`time` 保留不删） |
 | `stock_financials`（港股利润表） | `A/H报表口径提示` | A+H 标的（H 股 < 全部股本 98%）追加 IFRS【股东应占溢利】与 CAS【归母净利润】口径差提示（01088 实测 +2.6%~+11.4%），只披露不调平 |
 
+### 2.6 字段字典按市场分表与漂移校验 (Field Dictionary & Drift Check)
+
+- `tests/field_contract.json`：字段清单按市场分两份——`a_share`（A 股引擎/网关）与 `hk`（港股引擎/归一化），互不覆盖；
+- 校验命令：`python scripts/check_field_dictionary.py`，逐条检查清单字段是否仍以字面量出现在对应源文件，缺失即退出码 1；
+- 边界：只抓「改名 / 删字段」导致的文档漂移，**不校验数值与口径**；数值类回归仍以 `tests/` 用例与 golden 结构指纹为准；
+- 新增/改名对外字段时，同一提交里必须同步 `tests/field_contract.json`，否则 CI/全量套件会红。
+
 ---
 
 ## 三、 F10 核心分类 18 大枚举跨市场能力矩阵 (A/H Support Matrix)

@@ -4549,7 +4549,8 @@ class TestBatch6OfflineFixes(unittest.TestCase):
         self.assertEqual(res["returned_count"], 2)
         self.assertEqual(res["页内去重条数"], 1)
         self.assertEqual([s["code"] for s in res["stocks"]], ["002223", "002514"])
-        self.assertIn("跨页一致性自陈", res["分页与过滤说明"])
+        self.assertIn("页间不重不漏", res["分页与过滤说明"])
+        self.assertIn("TTL 60 秒", res["分页快照说明"])
 
     def test_ashare_dividends_retry_on_empty_page(self) -> None:
         from mcp_gateway.engines import a_stock as a_module
@@ -4659,6 +4660,61 @@ class TestValuationCaliberSSOT(unittest.TestCase):
 
         self.assertEqual(finance.A_PE_SNAPSHOT_ALIGN_ABS, 0.05)
         self.assertEqual(finance.A_PE_IMPLIED_NETPROFIT_GAP_PCT, 2.0)
+
+
+class TestScreenerSnapshot73(unittest.TestCase):
+    """7.3：同一查询 60 秒快照，跨页从同一数组切片（离线，模拟上游排序漂移）"""
+
+    def test_cross_page_consistency_and_ttl(self) -> None:
+        gw = FinanceGateway()
+        base_rows = [[i, "0", f"{600000 + i:06d}", f"股票{i}", "10.0", "1.0"] for i in range(1, 21)]
+        header = [0, "", 40, "s", 20]
+        cols = ["POS", "market", "sec_code", "sec_name", "now_price", "chg"]
+        types_row = ["", "", "", "", "", ""]
+        calls = {"n": 0}
+
+        def fake_post(url, body):
+            calls["n"] += 1
+            rows = base_rows if calls["n"] == 1 else list(reversed(base_rows))
+            return [header, cols, types_row] + rows
+
+        with unittest.mock.patch.object(gw.tdx_client, "_post", side_effect=fake_post):
+            p1 = gw.stock_screener({"message": "储能", "limit": 10, "page": 1})
+            p2 = gw.stock_screener({"message": "储能", "limit": 10, "page": 2})
+
+        c1 = [s["code"] for s in p1["stocks"]]
+        c2 = [s["code"] for s in p2["stocks"]]
+        self.assertEqual(len(c1), 10)
+        self.assertEqual(len(c2), 10)
+        self.assertEqual(set(c1) & set(c2), set(), "跨页出现重复标的")
+        self.assertEqual(calls["n"], 1, "TTL 内应复用同一份快照")
+        self.assertEqual(p1["matched_count"], 40)
+        self.assertEqual(p1["快照累计行数"], 20)
+
+        # 快照过期后重新取数（上游排序漂移不影响单次快照内部一致性）
+        gw.tdx_client.a_engine._screener_cache["储能"]["ts"] -= 61
+        with unittest.mock.patch.object(gw.tdx_client, "_post", side_effect=fake_post):
+            p3 = gw.stock_screener({"message": "储能", "limit": 10, "page": 1})
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(len(p3["stocks"]), 10)
+
+
+class TestFieldDictionary74(unittest.TestCase):
+    """7.4：字段字典按市场分表，清单字段必须仍存在于对应源码（离线）"""
+
+    def test_contract_fields_present(self) -> None:
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parent.parent / "scripts" / "check_field_dictionary.py"
+        spec = importlib.util.spec_from_file_location("check_field_dictionary", path)
+        self.assertIsNotNone(spec.loader)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.check(), [], "字段字典与源码不一致")
+        contract = mod.json.loads((mod.ROOT / "tests" / "field_contract.json").read_text(encoding="utf-8"))
+        self.assertIn("a_share", contract, "A 股字典缺失")
+        self.assertIn("hk", contract, "港股字典缺失")
 
 
 if __name__ == "__main__":

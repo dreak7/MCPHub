@@ -154,6 +154,8 @@ class AStockEngine(BaseMarketEngine):
         self._entity_cache: dict[str, dict[str, Any] | None] = {}
         # 缓存标的最新普通股归母权益信息 (clean_code -> (普通股归母权益, 原始归母合计, 报告期, 缓存时间戳))
         self._equity_cache: dict[str, tuple[float, float, str, float]] = {}
+        # 自然语言选股分页快照（7.3）：key=查询串，60 秒内跨页共用，避免上游分页排序漂移
+        self._screener_cache: dict[str, dict[str, Any]] = {}
         self._post_fn = post_fn
 
     # =========================================================================
@@ -2337,6 +2339,128 @@ class AStockEngine(BaseMarketEngine):
             "data": raw,
         }
 
+    # =========================================================================
+    # 【功能块 7.3：自然语言选股分页快照（跨页一致性）】
+    # - 问题：上游 wendaQuery 每次按 pageNo 重算切片，排序不稳定 → 跨页并集重复或漏项
+    # - 方案：同一查询 60 秒内共用一份快照，固定 pageSize=100 顺序取页、按代码全局去重；
+    #         所有分页从同一数组切片，页间天然不重不漏；上限 2000 行 / 20 页
+    # =========================================================================
+    def _fetch_screener_page(self, message: str, page_no: int, page_size: int = 100) -> Any:
+        body = [{
+            "message": message.strip(),
+            "rang": "AG",
+            "pageNo": str(page_no),
+            "pageSize": str(page_size),
+        }]
+        url = f"{self.api_endpoint}?Entry=JNLPSE:wendaQuery"
+        raw = self._post(url, body)
+        if isinstance(raw, dict) and raw.get("ErrorCode") in (-7405, -7404):
+            time.sleep(0.6)
+            raw = self._post(url, body)
+        return raw
+
+    @staticmethod
+    def _parse_screener_payload(raw: Any) -> tuple[list[dict[str, Any]], int, list[Any] | None]:
+        """上游二维数组 → (行, 全量命中数, 元信息)；不做 ST 过滤、不做分页截断。"""
+        rows: list[dict[str, Any]] = []
+        if not (isinstance(raw, list) and len(raw) >= 3):
+            return rows, 0, None
+        raw_headers = raw[1] if isinstance(raw[1], list) else []
+        headers = [str(h).strip() for h in raw_headers]
+        meta = raw[0] if isinstance(raw[0], list) else None
+        total_hits = 0
+        if meta and len(meta) > 2:
+            try:
+                total_hits = int(meta[2])
+            except (ValueError, TypeError):
+                total_hits = 0
+
+        for item in raw[3:]:
+            if not isinstance(item, list) or len(item) < 4:
+                continue
+            # 剔除表头行残留或空行
+            if str(item[0]).strip().upper() in ("POS", ""):
+                continue
+
+            market_val = str(item[1]).strip()
+            sec_code = str(item[2]).strip()
+            sec_name = str(item[3]).strip()
+
+            # 必须符合 6 位标准证券代码
+            if not re.match(r"^\d{6}$", sec_code):
+                continue
+
+            is_st = ("ST" in sec_name.upper()) or ("退" in sec_name)
+            now_price = None
+            try:
+                now_price = round(float(item[4]), 2) if len(item) > 4 and str(item[4]).strip() != "" else None
+            except (ValueError, TypeError):
+                pass
+
+            chg_pct = None
+            try:
+                chg_pct = round(float(item[5]), 2) if len(item) > 5 and str(item[5]).strip() != "" else None
+            except (ValueError, TypeError):
+                pass
+
+            # 动态提取后续业务指标列（如 ROE、流通市值、概念匹配等）
+            dynamic_indicators: dict[str, Any] = {}
+            for col_idx in range(6, len(item)):
+                col_name = headers[col_idx] if col_idx < len(headers) else f"指标_{col_idx}"
+                clean_col_name = re.sub(r"[0-9#|]+$", "", col_name).strip()
+                val_str = str(item[col_idx]).strip()
+                try:
+                    dynamic_indicators[clean_col_name] = round(float(val_str), 4) if "." in val_str else (int(val_str) if val_str.isdigit() else val_str)
+                except Exception:
+                    dynamic_indicators[clean_col_name] = val_str
+
+            market_name = "深市" if market_val == "0" else ("沪市" if market_val == "1" else ("北交所" if market_val == "2" else market_val))
+
+            rows.append({
+                "code": sec_code,
+                "symbol": sec_code,
+                "name": sec_name,
+                "market": market_name,
+                "price": now_price,
+                "change_pct": chg_pct,
+                "is_st": is_st,
+                "indicators": dynamic_indicators,
+                "matched_indicators": dynamic_indicators,
+            })
+        return rows, total_hits, meta
+
+    def _screener_snapshot(self, message: str, min_rows: int) -> tuple[list[dict[str, Any]] | None, int, int, list[Any] | None]:
+        """取（或续取）同一查询的分页快照；返回 (行, 命中总数, 去重条数, 元信息)；上游过载返回 None。"""
+        key = message.strip()
+        now = time.time()
+        state = self._screener_cache.get(key)
+        if not state or (now - float(state["ts"])) >= 60.0:
+            if len(self._screener_cache) >= 16:
+                self._screener_cache.pop(next(iter(self._screener_cache)))
+            state = {"ts": now, "rows": [], "seen": set(), "matched": 0, "dup": 0, "next_page": 1, "done": False, "meta": None}
+            self._screener_cache[key] = state
+
+        need = min(max(1, int(min_rows)), 2000)
+        while len(state["rows"]) < need and not state["done"] and state["next_page"] <= 20:
+            raw = self._fetch_screener_page(message, state["next_page"], 100)
+            if isinstance(raw, dict) and raw.get("ErrorCode") in (-7405, -7404):
+                return None, 0, int(state["dup"]), state["meta"]
+            rows, matched, meta = self._parse_screener_payload(raw)
+            if matched:
+                state["matched"] = matched
+            if meta:
+                state["meta"] = meta
+            for row in rows:
+                if row["code"] in state["seen"]:
+                    state["dup"] += 1
+                    continue
+                state["seen"].add(row["code"])
+                state["rows"].append(row)
+            state["next_page"] += 1
+            if len(rows) < 100:
+                state["done"] = True
+        return state["rows"], int(state["matched"] or len(state["rows"])), int(state["dup"]), state["meta"]
+
     def screener(self, message: str, limit: int = 10, page: int = 1, filter_st: bool = True, query: str | None = None, condition: str | None = None, **kwargs: Any) -> dict[str, Any]:
         """通达信自然语言智能选股 (输入中文自然语言条件，如'主板 绩优 储能 连板')"""
         # 严格校验选股 limit 与 page 参数范围 (修复 P3-1: 杜绝 page=21 等越界返回看似成功的值或空表)
@@ -2356,147 +2480,64 @@ class AStockEngine(BaseMarketEngine):
 
         # 修复 Issue 8: 识别查询条件中的港股/香港意图 (包含常见知名港股巨头与港股关键词)
         is_hk_query = bool(re.search(r"港股|香港|HKEX|\bHK\b|恒生|H股|腾讯|美团|阿里|中芯国际港股|小米", message, re.I))
-        # 修复 P1: 分页请求与上游切片严格保持 1:1 对齐 (pageSize = limit)
-        # 严禁人为虚增 pageSize，避免上游以 (pageNo - 1) * pageSize 计算偏移量时产生翻倍偏移、跳过整页标的
-        fetch_size = n_limit
-        req_body = [{
-            "message": message.strip(),
-            "rang": "AG",
-            "pageNo": str(n_page),
-            "pageSize": str(fetch_size),
-        }]
-        url = f"{self.api_endpoint}?Entry=JNLPSE:wendaQuery"
-        raw = self._post(url, req_body)
-        if isinstance(raw, dict) and raw.get("ErrorCode") in (-7405, -7404):
-            time.sleep(0.6)
-            raw = self._post(url, req_body)
 
-        if isinstance(raw, dict) and raw.get("ErrorCode") in (-7405, -7404):
+        offset = (n_page - 1) * n_limit
+        rows, total_hits, dedup_dropped, meta = self._screener_snapshot(message, offset + n_limit)
+        if rows is None:
             return {
                 "message": message,
                 "matched_count": 0,
                 "returned_count": 0,
                 "page": page,
-                "pageSize": fetch_size,
+                "pageSize": n_limit,
                 "filter_st": filter_st,
                 "filtered_st_count": 0,
                 "headers": [],
                 "results": [],
-                "上游状态说明": f"通达信自然语言选股服务瞬时会话过载 (RPC ErrorCode {raw.get('ErrorCode')})，此为网络会话瞬时抖动，已自动执行重试仍未恢复，建议间隔 1-2 秒后重试。",
+                "上游状态说明": "通达信自然语言选股服务瞬时会话过载 (RPC ErrorCode -7405)，此为网络会话瞬时抖动，已自动执行重试仍未恢复，建议间隔 1-2 秒后重试。",
             }
 
+        window = rows[offset: offset + n_limit]
         results: list[dict[str, Any]] = []
-        headers: list[str] = []
         filtered_st_count = 0
-        seen_codes: set[str] = set()
-        page_dup_count = 0
-        if isinstance(raw, list) and len(raw) >= 3:
-            # 通达信 wendaQuery 原生二维数组结构说明：
-            # - Row 0: 查询元信息 [0, '', 31, session_id, count]
-            # - Row 1: 列标题表头 ['POS', 'market', 'sec_code', 'sec_name', 'now_price', 'chg', ...]
-            # - Row 2: 数据类型行 ['', '', '', '', '2|0|0', ...]
-            # - Row 3 起: 真实股票数据行 [序号, 市场代码, 股票代码, 股票名称, 现价, 涨跌幅, 业务指标...]
-            raw_headers = raw[1] if isinstance(raw[1], list) else []
-            headers = [str(h).strip() for h in raw_headers]
+        for row in window:
+            if filter_st and row.get("is_st"):
+                filtered_st_count += 1
+                continue
+            # 快照对象可能被多页复用，返回副本避免下游修改污染缓存
+            results.append({
+                **row,
+                "indicators": dict(row.get("indicators") or {}),
+                "matched_indicators": dict(row.get("indicators") or {}),
+            })
 
-            data_rows = raw[3:] if len(raw) > 3 else []
-            for item in data_rows:
-                if not isinstance(item, list) or len(item) < 4:
-                    continue
-                # 剔除表头行残留或空行
-                if str(item[0]).strip().upper() in ("POS", ""):
-                    continue
-
-                market_val = str(item[1]).strip()
-                sec_code = str(item[2]).strip()
-                sec_name = str(item[3]).strip()
-
-                # 必须符合 6 位标准证券代码
-                if not re.match(r"^\d{6}$", sec_code):
-                    continue
-                # 页内去重：上游同一页可能重复返回同一代码（实测 5 页里 600016 在 page4/page5 各出现一次）
-                if sec_code in seen_codes:
-                    page_dup_count += 1
-                    continue
-                seen_codes.add(sec_code)
-
-                is_st = ("ST" in sec_name.upper()) or ("退" in sec_name)
-                if filter_st and is_st:
-                    filtered_st_count += 1
-                    continue
-
-                now_price = None
-                try:
-                    now_price = round(float(item[4]), 2) if len(item) > 4 and str(item[4]).strip() != "" else None
-                except (ValueError, TypeError):
-                    pass
-
-                chg_pct = None
-                try:
-                    chg_pct = round(float(item[5]), 2) if len(item) > 5 and str(item[5]).strip() != "" else None
-                except (ValueError, TypeError):
-                    pass
-
-                # 动态提取后续业务指标列（如 ROE、流通市值、概念匹配等）
-                dynamic_indicators: dict[str, Any] = {}
-                for col_idx in range(6, len(item)):
-                    col_name = headers[col_idx] if col_idx < len(headers) else f"指标_{col_idx}"
-                    clean_col_name = re.sub(r"[0-9#|]+$", "", col_name).strip()
-                    val_str = str(item[col_idx]).strip()
-                    try:
-                        dynamic_indicators[clean_col_name] = round(float(val_str), 4) if "." in val_str else (int(val_str) if val_str.isdigit() else val_str)
-                    except Exception:
-                        dynamic_indicators[clean_col_name] = val_str
-
-                market_name = "深市" if market_val == "0" else ("沪市" if market_val == "1" else ("北交所" if market_val == "2" else market_val))
-
-                results.append({
-                    "code": sec_code,
-                    "symbol": sec_code,
-                    "name": sec_name,
-                    "market": market_name,
-                    "price": now_price,
-                    "change_pct": chg_pct,
-                    "is_st": is_st,
-                    "indicators": dynamic_indicators,
-                    "matched_indicators": dynamic_indicators,
-                })
-
-                if len(results) >= limit:
-                    break
-
-        # 从 Row 0 元信息 [0, '', 命中总数, session_id, count] 中精确提取全量命中总数（非单页返回数）
-        total_hits = len(results)
-        if isinstance(raw, list) and raw and isinstance(raw[0], list) and len(raw[0]) > 2:
-            try:
-                total_hits = int(raw[0][2])
-            except (ValueError, TypeError):
-                total_hits = len(results)
-
-        total_pages = math.ceil(total_hits / limit) if limit > 0 else 1
+        total_pages = math.ceil(total_hits / n_limit) if n_limit > 0 else 1
 
         res_dict = {
             "query": message,
             "message": message,
             "page": page,
-            "limit": limit,
+            "limit": n_limit,
             "total_pages": total_pages,
             "filter_st": filter_st,
             "matched_count": total_hits,
             "returned_count": len(results),
             "filtered_st_count": filtered_st_count,
-            "filter_st_note": "默认已过滤 ST/*ST 股（若当页切片包含 ST 则过滤并记录 filtered_st_count）；若需获取全部股票（含风险警示股）请将 filter_st 设为 False。",
+            "filter_st_note": "默认已过滤 ST/*ST 股（在页切片内剔除并记录 filtered_st_count）；若需获取全部股票（含风险警示股）请将 filter_st 设为 False。",
             "分页与过滤说明": (
-                "网关按上游切片 1:1 透传（第 p 页对应 [(p-1)*limit .. p*limit-1]），并在页内按证券代码去重；"
-                "filter_st 开启时在该页切片内剔除 ST/*ST 并记录 filtered_st_count。"
-                "【跨页一致性自陈】上游分页排序不保证稳定，跨页遍历可能出现重复或漏项（实测同一查询两次调用的并集不一致）；"
-                "如需严格全量，请把 limit 调到单页上限（<=100）一次取全，或收窄条件后分次查询。"
+                "同一查询在 60 秒内共用一份分页快照：网关按 pageSize=100 顺序取页、按证券代码全局去重后落成单一数组，"
+                "所有 page 都从该数组切片，因此【页间不重不漏】；快照最多累计 2000 行，超出上限的部分需重新查询。"
+                "filter_st 只在返回切片时剔除 ST/*ST，不影响快照本身与 matched_count（后者为上游全量命中数）。"
             ),
-            "页内去重条数": page_dup_count,
+            "分页快照说明": f"本次查询快照累计 {len(rows)} 行，跨页去重 {dedup_dropped} 条，TTL 60 秒；期间重复翻页结果一致，命中总数变化需等快照过期后重新查询。",
+            "快照累计行数": len(rows),
+            "快照跨页去重条数": dedup_dropped,
+            "快照TTL秒": 60,
+            "页内去重条数": dedup_dropped,
             "market_scope": "A股 (中国大陆交易所：沪市/深市/北交所)",
             "is_hk_intent": is_hk_query,
             "stocks": results,
-            "raw_summary": raw[0] if (isinstance(raw, list) and raw) else None,
+            "raw_summary": meta,
         }
         if is_hk_query:
             res_dict["warning"] = (
@@ -2505,4 +2546,3 @@ class AStockEngine(BaseMarketEngine):
                 "如需查询具体港股（如腾讯 00700、美团 03690），请直接使用 stock_lookup 查找代码后调用 stock_quotes/stock_financials/stock_f10。"
             )
         return res_dict
-
