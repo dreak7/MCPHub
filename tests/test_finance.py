@@ -3810,26 +3810,29 @@ class TestAShareNewRoundP2P3Convergence(unittest.TestCase):
         self.assertEqual(hq_hk["委比_pct"], 0.0)
 
     def test_p3_5_version_consistency(self):
-        """验证 P3-5: README, SKILL.md, tool_api_reference.md 全链路统一为 v2.0.0"""
+        """验证版本全链路：README / SKILL.md / tool_api_reference.md 统一为 v2.0.1"""
         import os
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         
         # README.md
         with open(os.path.join(base_dir, "README.md"), "r", encoding="utf-8") as f:
             readme_text = f.read()
-        self.assertIn("# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.0)", readme_text)
+        self.assertIn("# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.1)", readme_text)
+        self.assertIn("### v2.0.1 — 港股 P1~P3 与 A 股 P2~P3 遗留缺陷收敛", readme_text)
         self.assertIn("### v2.0.0 — 实测 A 股 P2-1、P3-1~P3-5 缺陷全面收敛", readme_text)
 
         # SKILL.md
         with open(os.path.join(base_dir, "mcphub-finance", "SKILL.md"), "r", encoding="utf-8") as f:
             skill_text = f.read()
-        self.assertIn("version: 2.0.0", skill_text)
+        self.assertIn("version: 2.0.1", skill_text)
         self.assertIn("陷阱 125", skill_text)
+        self.assertIn("陷阱 127", skill_text)
 
         # tool_api_reference.md
         with open(os.path.join(base_dir, "mcphub-finance", "references", "tool_api_reference.md"), "r", encoding="utf-8") as f:
             ref_text = f.read()
-        self.assertIn("版本**：v2.0.0", ref_text)
+        self.assertIn("版本**：v2.0.1", ref_text)
+        self.assertIn("2.4 v2.0.1 新增字段与口径变更清单", ref_text)
         self.assertIn("委买总委托量_手", ref_text)
 
 
