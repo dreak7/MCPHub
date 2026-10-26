@@ -1,7 +1,7 @@
 ---
 name: mcphub-finance
 description: "Official financial and securities analysis skill for MCPHub. Provides standard SOPs for A-share and HK-share market analysis, real-time Level-1 quotes, indicators, F10, financials, and multi-source cross-verification. MCPHub 股票与证券金融专属调用规程。"
-version: 2.0.3
+version: 2.0.4
 author: MCPHub
 license: MIT
 platforms: [windows, macos, linux]
@@ -420,6 +420,7 @@ metadata:
   1. **盘后 15:00–16:30 是 f10 快照空窗**：`估值时效提示` 已按四态动态生成（盘中 / 盘后未批处理 / 盘后已批处理 / 非交易时段）；盘后未批处理时 f10 总市值/PB/PE 仍是上一交易日清算价、quotes 已是当日收盘价，属上游批处理节奏而非缺陷，按提示用 quotes 重算；
   2. **A/H 提示需 A 股对腿**：仅「H 股 < 全部股本」不够（02026 小马智行-W 系美股二次上市，H 股占 81% 也曾被误标）；纯 H / 美股二次上市标的**不再下发** `A/H报表口径提示` / `A_H差异_pct` / `A_H差异可算`，缺键＝非 A+H，不是丢字段；
   3. **`委比委差说明` 是条件键**：仅五档买卖全 0 时下发（归因含「盘后已无残单」）；`None` 表示五档有量、可计算，不是缺陷；
+  4. **跨市场同名键必须分支**（详见 reference 2.9）：`委比委差说明` A 股条件键 / 港股常量键；F10 估值时效 A 股四态 / 港股静态三段（无「当日批处理」态）；`summary`≡`company_profile` 仅港股；`A_H差异_*` 仅真 A+H；`行情datetime` 两侧同形可共用；
 - **陷阱 127（v2.0.1 港股无效码/语义近邻/季报模板/美元派息与 A 股龙虎榜、现金流键序收敛律）**：
   1. **港股 F10 无效码闸门（P1 收敛）**：全分类在分发前统一校验，只有腾讯行情明确应答 `none_match` 才拒绝，网络异常与响应异常一律 fail-open 放行；确定结果缓存，同一代码重复调用不重复打行情。`88888` 等伪码现在全分类抛 `ValueError`，不再返回「港股_88888」伪数据；
   2. **语义近邻相关度（P2 收敛）**：数字码要求与候选代码公共前缀 ≥3；名称型要求 ≥2 个非停用汉字交集（查询自身只有 1 个有效汉字时才放宽为 1），或名称/别名为子串。「不存在的公司名XYZ」不再靠一个「在」字召回零在科技金融；被剔除条数见响应【近邻过滤说明】；

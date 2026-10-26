@@ -1037,7 +1037,7 @@ def _valuation_freshness_note(gxrq: str, ctx: dict[str, Any]) -> str:
     """PB/总市值 与 PE 的基准不同，必须逐字段分述；再按盘中 / 盘后未批处理 / 盘后已批处理 / 非交易补状态句。"""
     base = (
         f"市净率_PB 与 总市值_元 基于{gxrq or '上一交易日'}收盘清算价；"
-        "滚动市盈率_PETTM 已按 stock_quotes 现价对齐（昨收口径值见【滚动市盈率_PETTM_昨收口径】）"
+        "滚动市盈率_PETTM 已按 stock_quotes 现价对齐（与快照基准不同时，昨收口径值见【滚动市盈率_PETTM_昨收口径】）"
     )
     if ctx.get("is_trading_time"):
         return base + "；盘中请结合 stock_quotes 实时现价动态重算。"

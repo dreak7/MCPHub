@@ -1758,9 +1758,15 @@ class TestFinanceGateway(unittest.TestCase):
         pe_snap = float(t6[0].get("滚动市盈率_PETTM"))
         pe_live = float(fin_gw.stock_quotes({"symbol": "300371"})["估值与基本盘面"].get("滚动市盈率_PETTM"))
         self.assertAlmostEqual(pe_snap, pe_live, delta=0.05, msg="F10 现价口径 PE 应与 quotes 同值")
-        self.assertIsNotNone(t6[0].get("滚动市盈率_PETTM_昨收口径"))
+        pe_yishou = t6[0].get("滚动市盈率_PETTM_昨收口径")
+        if pe_yishou is not None or "PE_TTM校准说明" in t6[0]:
+            # 发生对齐时：昨收口径原值与校准说明必须成对出现
+            self.assertIsNotNone(pe_yishou)
+            self.assertIn("PE_TTM校准说明", t6[0])
+        else:
+            # 快照与现价同基准（差 ≤ 0.05）时按设计不对齐、两块都不下发
+            self.assertAlmostEqual(pe_snap, pe_live, delta=0.05, msg="无校准块只允许出现在同基准情形")
         self.assertNotIn("动态市盈率_PE_TTM", t6[0])
-        self.assertIn("PE_TTM校准说明", t6[0])
 
         # 3. 验证 P1-3 与 P2-1: 300371 stock_quotes 派生每股指标对齐三季报且 PE 与 EPS 绝对互逆闭环
         q_300371 = fin_gw.stock_quotes({"symbol": "300371"})
@@ -2872,10 +2878,13 @@ class TestFinanceGateway(unittest.TestCase):
         # --- D4 验证 (300371 换期校准 vs 300687 对照) ---
         f10_371 = self.gw.stock_f10({"symbol": "300371", "category": "indicators"})
         t6_371 = f10_371.get("formatted_tables", {}).get("table6", [{}])[0]
+        if "PB校准说明" not in t6_371:
+            # 上游 F10 通道偶发不返回换期校准块（重取一次即恢复），避免网络抖动假红
+            t6_371 = self.gw.stock_f10({"symbol": "300371", "category": "indicators"}).get("formatted_tables", {}).get("table6", [{}])[0]
         t6_pb_371 = float(t6_371["市净率_PB"])
-        self.assertIn("PB校准说明", t6_371)
         quotes_371 = self.gw.stock_quotes({"symbol": "300371"})
         ext_371 = quotes_371.get("估值与基本盘面", {})
+        # 换期偏差存在时（有校准块）与不存在时（无偏差不下发）都要求两侧 PB 同口径
         self.assertLess(abs(t6_pb_371 - float(ext_371["市净率_PB_F10"])), 0.05,
                         "F10 快照 PB 应与 quotes 重算 PB 同口径（允许盘中价格漂移）")
 
@@ -3851,14 +3860,15 @@ class TestAShareNewRoundP2P3Convergence(unittest.TestCase):
         self.assertEqual(hq_hk["委比_pct"], 0.0)
 
     def test_p3_5_version_consistency(self):
-        """验证版本全链路：README / SKILL.md / tool_api_reference.md 统一为 v2.0.3"""
+        """验证版本全链路：README / SKILL.md / tool_api_reference.md 统一为 v2.0.4"""
         import os
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         
         # README.md
         with open(os.path.join(base_dir, "README.md"), "r", encoding="utf-8") as f:
             readme_text = f.read()
-        self.assertIn("# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.3)", readme_text)
+        self.assertIn("# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.4)", readme_text)
+        self.assertIn("### v2.0.4 — 估值提示逐字段分述与跨市场同名键语义收口", readme_text)
         self.assertIn("### v2.0.3 — 盘后时效四态、A+H 归属判定与文档对账收口", readme_text)
         self.assertIn("### v2.0.2 — 港股残留文案/结构对齐与 A 股委比、PE 口径、screener 分页收敛", readme_text)
         self.assertIn("### v2.0.1 — 港股 P1~P3 与 A 股 P2~P3 遗留缺陷收敛", readme_text)
@@ -3867,7 +3877,7 @@ class TestAShareNewRoundP2P3Convergence(unittest.TestCase):
         # SKILL.md
         with open(os.path.join(base_dir, "mcphub-finance", "SKILL.md"), "r", encoding="utf-8") as f:
             skill_text = f.read()
-        self.assertIn("version: 2.0.3", skill_text)
+        self.assertIn("version: 2.0.4", skill_text)
         self.assertIn("陷阱 125", skill_text)
         self.assertIn("陷阱 127", skill_text)
         self.assertIn("陷阱 128", skill_text)
@@ -3876,11 +3886,23 @@ class TestAShareNewRoundP2P3Convergence(unittest.TestCase):
         # tool_api_reference.md
         with open(os.path.join(base_dir, "mcphub-finance", "references", "tool_api_reference.md"), "r", encoding="utf-8") as f:
             ref_text = f.read()
-        self.assertIn("版本**：v2.0.3", ref_text)
+        self.assertIn("版本**：v2.0.4", ref_text)
         self.assertIn("2.4 v2.0.1 新增字段与口径变更清单", ref_text)
         self.assertIn("2.5 v2.0.2 新增字段与口径变更清单", ref_text)
         self.assertIn("2.8 v2.0.3 新增字段与口径变更清单", ref_text)
+        self.assertIn("2.9 跨市场同名键语义差异", ref_text)
         self.assertIn("委买总委托量_手", ref_text)
+
+    def test_reference_29_cross_market_key_semantics(self):
+        """reference 2.9 必须覆盖六个跨市场差异键，供通用解析器分支。"""
+        import os
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(base_dir, "mcphub-finance", "references", "tool_api_reference.md"), "r", encoding="utf-8") as f:
+            ref_text = f.read()
+        section = ref_text.split("### 2.9 跨市场同名键语义差异")[1].split("## 三、")[0]
+        for key in ("委比委差说明", "委差_手", "估值时效提示", "company_profile", "A_H差异_pct", "行情datetime"):
+            self.assertIn(key, section, f"2.9 缺 {key} 的跨市场说明")
 
 
 

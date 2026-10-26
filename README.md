@@ -1,6 +1,6 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.3)
+# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.4)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
@@ -56,7 +56,7 @@ MCPHub/
 ├── mcphub-finance/              # 【可选外挂】Hermes 专属证券金融分析规范 Skill
 ├── logs/                        # 运行日志目录 (gateway.log)
 ├── state/                       # 持久化状态目录 (provider-state.json 冷却状态与提取缓存)
-├── tests/                       # 262 项全量自动化单元测试套件 (100% 通过)
+├── tests/                       # 263 项全量自动化单元测试套件 (100% 通过)
 ├── MCPHub服务管理面板.bat          # Windows 双击即用一键管理控制台
 ├── README.md                    # 项目全景使用与配置说明文档
 └── LICENSE                      # MIT 开源许可证
@@ -260,6 +260,11 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### v2.0.4 — 估值提示逐字段分述与跨市场同名键语义收口 (263项全绿)
+
+- **估值时效提示逐字段分述（批次 14）**：`市净率_PB 与 总市值_元` 标注昨收清算基准，`滚动市盈率_PETTM` 标注已按 quotes 现价对齐并指向 `滚动市盈率_PETTM_昨收口径`；删除「上游通常 16:30 后切换」时点承诺（16:04 / 16:50 实测均未切换），改为「上游当日批处理尚未完成」。600519 实测反算口径差 1.1%（805.43 亿 vs 814.47 亿）由此可知来源。
+- **跨市场同名键语义表（reference 2.9）**：`委比委差说明`（A 条件键 / HK 常量键）、F10 估值时效（A 四态 / HK 静态三段、无「当日批处理」态）、`summary`≡`company_profile`（仅 HK）、`A_H差异_*`（仅真 A+H）、`行情datetime`（两侧同形）逐条列明，供跨市场通用解析器分支。
 
 ### v2.0.3 — 盘后时效四态、A+H 归属判定与文档对账收口 (262项全绿)
 
