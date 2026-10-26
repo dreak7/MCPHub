@@ -1350,6 +1350,10 @@ class FinanceGateway:
                     "（如非ST主板单日偏离值达7%、换手率达20%等；可结合 limit_up 工具交叉核验涨跌停及异动池）。"
                 ),
             }
+            # 引擎层的去重/多榜次/覆盖说明必须透传，否则下游只能看到已合并的行却不知道口径
+            for k in ("席位去重口径说明", "同日多榜次说明", "席位覆盖说明", "数据完整性说明"):
+                if lhb_data.get(k):
+                    res_obj[k] = lhb_data[k]
             if not has_records:
                 res_obj["无记录说明"] = f"标的 {symbol} 近期无公开披露的龙虎榜异动登榜记录（低波动或未触发交易所异动披露机制）。"
             return _apply_limit_post(res_obj)

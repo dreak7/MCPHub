@@ -4269,6 +4269,107 @@ class TestHKFinancialTemplateAndDividendsOffline(unittest.TestCase):
         self.assertEqual(divs[3]["派息_计量币种"], "CNY")
 
 
+class TestAShareLhbAndCashflowOrderOffline(unittest.TestCase):
+    """批次3：龙虎榜买卖双向去重/同日多榜次 + 现金流未知键继承锚点（全部离线）"""
+
+    def test_order_by_canonical_keeps_broker_key_before_subtotal(self) -> None:
+        from mcp_gateway.engines.a_stock import _order_by_canonical
+
+        canonical = ["流入小计", "券商科目", "流出小计", "期末现金", "说明"]
+        keys = ["说明", "期末现金", "流出小计", "流入小计", "券商科目"]  # 上游把券商科目排在最后
+        ordered = _order_by_canonical(keys, canonical)
+        self.assertLess(ordered.index("券商科目"), ordered.index("流出小计"))
+        self.assertLess(ordered.index("流出小计"), ordered.index("期末现金"))
+
+    def test_order_by_canonical_unknown_key_inherits_anchor(self) -> None:
+        from mcp_gateway.engines.a_stock import _order_by_canonical
+
+        canonical = ["A", "B", "C"]
+        ordered = _order_by_canonical(["A", "X未知科目", "B"], canonical)
+        self.assertEqual(ordered, ["A", "X未知科目", "B"])
+
+    def test_lhb_merges_two_way_seat_and_labels_batch(self) -> None:
+        from mcp_gateway.engines import a_stock as a_module
+
+        def row(date: str, reason: str, seat: str, buy: float, sell: float, ratio: float) -> dict:
+            return {
+                "TRADE_DATE": f"{date} 00:00:00",
+                "OPERATEDEPT_NAME": seat,
+                "BUY": buy,
+                "SELL": sell,
+                "NET": buy - sell,
+                "TOTAL_BUYRIO": ratio,
+                "TOTAL_SELLRIO": ratio,
+                "EXPLANATION": reason,
+            }
+
+        reason_a = "日涨幅达到15%的前5只证券"
+        reason_b = "日换手率达到30%的前5只证券"
+        board = {"result": {"data": [
+            {"TRADE_DATE": "2025-03-31 00:00:00", "CLOSE_PRICE": 12.3, "CHANGE_RATE": 15.0,
+             "BILLBOARD_BUY_AMT": 301105000.0, "BILLBOARD_SELL_AMT": 173553000.0,
+             "BILLBOARD_NET_AMT": 127552000.0, "ACCUM_AMOUNT": 2000000000.0, "EXPLANATION": reason_a},
+            {"TRADE_DATE": "2025-03-31 00:00:00", "CLOSE_PRICE": 12.3, "CHANGE_RATE": 15.0,
+             "BILLBOARD_BUY_AMT": 99000000.0, "BILLBOARD_SELL_AMT": 5000000.0,
+             "BILLBOARD_NET_AMT": 94000000.0, "ACCUM_AMOUNT": 2000000000.0, "EXPLANATION": reason_b},
+        ]}}
+        buy = {"result": {"data": [
+            row("2025-03-31", reason_a, "机构专用", 200000000.0, 50000000.0, 0.10),
+            row("2025-03-31", reason_a, "深股通专用", 101105000.0, 0.0, 0.05),
+        ]}}
+        sell = {"result": {"data": [
+            row("2025-03-31", reason_a, "机构专用", 200000000.0, 50000000.0, 0.10),
+        ]}}
+
+        def fake_open(req, timeout=None):
+            url = getattr(req, "full_url", "")
+            if "RPT_DAILYBILLBOARD_DETAILS" in url:
+                payload = board
+            elif "RPT_BILLBOARD_DAILYDETAILSBUY" in url:
+                payload = buy
+            else:
+                payload = sell
+            return _FakeHKResponse(json.dumps(payload).encode("utf-8"))
+
+        engine = a_module.AStockEngine(timeout=1)
+        with unittest.mock.patch.object(a_module._SECURE_OPENER, "open", side_effect=fake_open):
+            res = engine._get_ashare_lhb("300687")
+
+        seats = res["formatted_tables"]["seat_details"]
+        self.assertEqual(len(seats), 2, "买卖两侧同一席位未合并")
+        two_way = [s for s in seats if s["营业部席位名称"] == "机构专用"][0]
+        self.assertEqual(two_way["席位类型"], "买卖前五双向席位")
+        self.assertIn("占总成交比例_pct_买", two_way)
+        self.assertIn("占总成交比例_pct_卖", two_way)
+
+        reason_a_seats = [s for s in seats if s["上榜异动说明"] == reason_a]
+        self.assertAlmostEqual(sum(s["买入金额_万元"] for s in reason_a_seats), 30110.5, places=2)
+
+        boards = res["formatted_tables"]["billboard_records"]
+        self.assertEqual([b["榜单批次"] for b in boards], ["2025-03-31-1", "2025-03-31-2"])
+        self.assertIn("同日多榜次说明", boards[0])
+        self.assertIn("同日多榜次说明", res)
+        self.assertIn("席位去重口径说明", res)
+        self.assertIn("本次折叠 1 条", res["席位去重口径说明"])
+        self.assertEqual({s["榜单批次"] for s in reason_a_seats}, {"2025-03-31-1"})
+
+
+    def test_gateway_passes_through_lhb_notes(self) -> None:
+        gw = FinanceGateway()
+        fake = {
+            "formatted_tables": {"billboard_records": [{"交易日期": "2025-03-31"}], "seat_details": []},
+            "席位去重口径说明": "去重说明X",
+            "同日多榜次说明": "多榜次X",
+        }
+        with unittest.mock.patch.object(gw.tdx_client, "_get_ashare_lhb", return_value=fake):
+            with unittest.mock.patch.object(
+                gw.tdx_client, "_resolve_exact_security_entity", return_value={"entity_code": "300687", "entity_name": "赛意信息", "entity_type": "A股"}
+            ):
+                res = gw.stock_f10({"symbol": "300687", "category": "lhb"})
+        self.assertEqual(res["席位去重口径说明"], "去重说明X")
+        self.assertEqual(res["同日多榜次说明"], "多榜次X")
+
+
 if __name__ == "__main__":
     unittest.main()
 

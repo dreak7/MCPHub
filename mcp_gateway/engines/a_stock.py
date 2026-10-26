@@ -28,6 +28,28 @@ from .base import BaseMarketEngine
 
 
 # =========================================================================
+# 【功能块 0：法定会计键序重排】
+# - 输入：待排序键、法定键序表
+# - 功能：已知键按法定顺序；未知键继承前一个已知键的位置，绝不被统一甩到表尾
+#         （落在「期末现金」之后的科目会被按小计锚点切区的解析器整段漏掉）
+# - 输出：重排后的键列表
+# =========================================================================
+def _order_by_canonical(keys: list[str], canonical: list[str]) -> list[str]:
+    order_index = {k: i for i, k in enumerate(canonical)}
+    anchored: list[tuple[float, str]] = []
+    cursor = -1.0
+    for k in keys:
+        if k in order_index:
+            cursor = float(order_index[k])
+            anchored.append((cursor, k))
+        else:
+            # 0.001 步进足够容纳单表 <1000 个未知键；再多会跨到下一个法定键之后
+            cursor += 0.001
+            anchored.append((cursor, k))
+    return [k for _, k in sorted(anchored, key=lambda t: t[0])]
+
+
+# =========================================================================
 # 【第二道防翻车安全门：单一事实源 SSOT 架构治理公约 (AStockEngine)】
 # - 职责：一级数据净水厂。负责网络原水抽取、东财/新浪/通达信数据解包、
 #         万元与元量纲对齐 (如 LHB / 10000.0)、会计恒等式补齐推导 (如利润总额)、
@@ -299,86 +321,130 @@ class AStockEngine(BaseMarketEngine):
         clean_code = re.sub(r"[^\d]", "", clean_code).zfill(6)
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://data.eastmoney.com/"}
 
-        billboard_records = []
-        try:
-            url_board = (
-                f"https://datacenter-web.eastmoney.com/api/data/v1/get?"
-                f"reportName=RPT_DAILYBILLBOARD_DETAILS&columns=ALL&"
-                f"filter=(SECURITY_CODE%3D%22{clean_code}%22)&sortColumns=TRADE_DATE&sortTypes=-1&pageSize=10"
-            )
-            req = Request(url_board, headers=headers)
-            with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
-                d = json.loads(resp.read().decode("utf-8", errors="replace"))
-                if d.get("result") and d["result"].get("data"):
-                    for row in d["result"]["data"]:
-                        t_date = str(row.get("TRADE_DATE", ""))[:10]
-                        # 修复 D1: 上游 BILLBOARD_BUY_AMT 原生单位为【元】，必须除以 10000 转换为【万元】
-                        billboard_records.append({
-                            "交易日期": t_date,
-                            "收盘价": row.get("CLOSE_PRICE"),
-                            "涨跌幅_pct": row.get("CHANGE_RATE"),
-                            "龙虎榜买入总额_万元": round(float(row.get("BILLBOARD_BUY_AMT") or 0.0) / 10000.0, 2),
-                            "龙虎榜卖出总额_万元": round(float(row.get("BILLBOARD_SELL_AMT") or 0.0) / 10000.0, 2),
-                            "龙虎榜净买入额_万元": round(float(row.get("BILLBOARD_NET_AMT") or 0.0) / 10000.0, 2),
-                            "市场总成交额_万元": round(float(row.get("ACCUM_AMOUNT") or 0.0) / 10000.0, 2) if row.get("ACCUM_AMOUNT") else None,
-                            "市场总成交额_说明": "该成交额为交易所异动统计窗口期（如连续2个或3个交易日）内的多日累计成交总额，席位占总成交比例亦基于此多日总额计算，非单日K线成交额；单日成交额请参考 stock_kline",
-                            "上榜原因": row.get("EXPLANATION") or row.get("EXPLAIN"),
-                        })
-        except Exception:
-            pass
+        # 榜单总览：分页取全（50 条/页，最多 3 页），同日多榜次与更早记录不再被 pageSize=10 截断
+        billboard_records: list[dict[str, Any]] = []
+        board_truncated = False
+        for page in range(1, 4):
+            try:
+                url_board = (
+                    f"https://datacenter-web.eastmoney.com/api/data/v1/get?"
+                    f"reportName=RPT_DAILYBILLBOARD_DETAILS&columns=ALL&"
+                    f"filter=(SECURITY_CODE%3D%22{clean_code}%22)&sortColumns=TRADE_DATE&sortTypes=-1"
+                    f"&pageSize=50&pageNumber={page}"
+                )
+                req = Request(url_board, headers=headers)
+                with _SECURE_OPENER.open(req, timeout=self.timeout) as resp:
+                    d = json.loads(resp.read().decode("utf-8", errors="replace"))
+                rows = ((d.get("result") or {}).get("data") or [])
+                for row in rows:
+                    t_date = str(row.get("TRADE_DATE", ""))[:10]
+                    # 修复 D1: 上游 BILLBOARD_BUY_AMT 原生单位为【元】，必须除以 10000 转换为【万元】
+                    billboard_records.append({
+                        "交易日期": t_date,
+                        "收盘价": row.get("CLOSE_PRICE"),
+                        "涨跌幅_pct": row.get("CHANGE_RATE"),
+                        "龙虎榜买入总额_万元": round(float(row.get("BILLBOARD_BUY_AMT") or 0.0) / 10000.0, 2),
+                        "龙虎榜卖出总额_万元": round(float(row.get("BILLBOARD_SELL_AMT") or 0.0) / 10000.0, 2),
+                        "龙虎榜净买入额_万元": round(float(row.get("BILLBOARD_NET_AMT") or 0.0) / 10000.0, 2),
+                        "市场总成交额_万元": round(float(row.get("ACCUM_AMOUNT") or 0.0) / 10000.0, 2) if row.get("ACCUM_AMOUNT") else None,
+                        "市场总成交额_说明": "该成交额为交易所异动统计窗口期（如连续2个或3个交易日）内的多日累计成交总额，席位占总成交比例亦基于此多日总额计算，非单日K线成交额；单日成交额请参考 stock_kline",
+                        "上榜原因": row.get("EXPLANATION") or row.get("EXPLAIN"),
+                    })
+                if len(rows) < 50:
+                    break
+                if page == 3:
+                    board_truncated = True
+            except Exception:
+                break
 
-        seat_records = []
-        try:
-            url_buy = (
-                f"https://datacenter-web.eastmoney.com/api/data/v1/get?"
-                f"reportName=RPT_BILLBOARD_DAILYDETAILSBUY&columns=ALL&"
-                f"filter=(SECURITY_CODE%3D%22{clean_code}%22)&sortColumns=TRADE_DATE&sortTypes=-1&pageSize=20"
-            )
-            req_buy = Request(url_buy, headers=headers)
-            with _SECURE_OPENER.open(req_buy, timeout=self.timeout) as resp:
-                d_buy = json.loads(resp.read().decode("utf-8", errors="replace"))
-                if d_buy.get("result") and d_buy["result"].get("data"):
-                    for row in d_buy["result"]["data"]:
-                        t_date = str(row.get("TRADE_DATE", ""))[:10]
+        seat_records: list[dict[str, Any]] = []
+        seat_truncated = False
+        seat_sources = (
+            ("买入前五席位", "RPT_BILLBOARD_DAILYDETAILSBUY", "TOTAL_BUYRIO"),
+            ("卖出前五席位", "RPT_BILLBOARD_DAILYDETAILSSELL", "TOTAL_SELLRIO"),
+        )
+        for side_label, report_name, ratio_field in seat_sources:
+            for page in range(1, 4):
+                try:
+                    url_seat = (
+                        f"https://datacenter-web.eastmoney.com/api/data/v1/get?"
+                        f"reportName={report_name}&columns=ALL&"
+                        f"filter=(SECURITY_CODE%3D%22{clean_code}%22)&sortColumns=TRADE_DATE&sortTypes=-1"
+                        f"&pageSize=50&pageNumber={page}"
+                    )
+                    req_seat = Request(url_seat, headers=headers)
+                    with _SECURE_OPENER.open(req_seat, timeout=self.timeout) as resp:
+                        d_seat = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    rows = ((d_seat.get("result") or {}).get("data") or [])
+                    for row in rows:
                         seat_records.append({
-                            "交易日期": t_date,
-                            "席位类型": "买入前五席位",
+                            "交易日期": str(row.get("TRADE_DATE", ""))[:10],
+                            "席位类型": side_label,
                             "营业部席位名称": row.get("OPERATEDEPT_NAME"),
                             "买入金额_万元": round(float(row.get("BUY") or 0.0) / 10000.0, 2),
                             "卖出金额_万元": round(float(row.get("SELL") or 0.0) / 10000.0, 2),
                             "净买入额_万元": round(float(row.get("NET") or 0.0) / 10000.0, 2),
-                            "占总成交比例_pct": round(float(row.get("TOTAL_BUYRIO") or 0.0) * 100.0, 2) if row.get("TOTAL_BUYRIO") else None,
+                            "占总成交比例_pct": round(float(row.get(ratio_field) or 0.0) * 100.0, 2) if row.get(ratio_field) else None,
                             "占总成交比例_说明": "占总成交比例系相对异动统计窗口期累计总成交额计算，非单日K线成交额",
                             "上榜异动说明": row.get("EXPLANATION"),
                         })
+                    if len(rows) < 50:
+                        break
+                    if page == 3:
+                        seat_truncated = True
+                except Exception:
+                    break
 
-            url_sell = (
-                f"https://datacenter-web.eastmoney.com/api/data/v1/get?"
-                f"reportName=RPT_BILLBOARD_DAILYDETAILSSELL&columns=ALL&"
-                f"filter=(SECURITY_CODE%3D%22{clean_code}%22)&sortColumns=TRADE_DATE&sortTypes=-1&pageSize=20"
+        # 买卖两表按 (交易日, 上榜原因, 席位, 买入额, 卖出额) 合并：只有金额完全相同的同一笔记录才折叠，
+        # 避免把「机构专用」这类匿名席位的多个不同机构误合成一条（金额进 key 才能与榜单总额逐分对上）
+        merged_seats: dict[tuple[str, str, str, float, float], dict[str, Any]] = {}
+        for rec in seat_records:
+            key = (
+                str(rec.get("交易日期") or ""),
+                str(rec.get("上榜异动说明") or "").strip(),
+                str(rec.get("营业部席位名称") or ""),
+                round(float(rec.get("买入金额_万元") or 0.0), 2),
+                round(float(rec.get("卖出金额_万元") or 0.0), 2),
             )
-            req_sell = Request(url_sell, headers=headers)
-            with _SECURE_OPENER.open(req_sell, timeout=self.timeout) as resp:
-                d_sell = json.loads(resp.read().decode("utf-8", errors="replace"))
-                if d_sell.get("result") and d_sell["result"].get("data"):
-                    for row in d_sell["result"]["data"]:
-                        t_date = str(row.get("TRADE_DATE", ""))[:10]
-                        seat_records.append({
-                            "交易日期": t_date,
-                            "席位类型": "卖出前五席位",
-                            "营业部席位名称": row.get("OPERATEDEPT_NAME"),
-                            "买入金额_万元": round(float(row.get("BUY") or 0.0) / 10000.0, 2),
-                            "卖出金额_万元": round(float(row.get("SELL") or 0.0) / 10000.0, 2),
-                            "净买入额_万元": round(float(row.get("NET") or 0.0) / 10000.0, 2),
-                            "占总成交比例_pct": round(float(row.get("TOTAL_SELLRIO") or 0.0) * 100.0, 2) if row.get("TOTAL_SELLRIO") else None,
-                            "占总成交比例_说明": "占总成交比例系相对异动统计窗口期累计总成交额计算，非单日K线成交额",
-                            "上榜异动说明": row.get("EXPLANATION"),
-                        })
+            prev = merged_seats.get(key)
+            if prev is None:
+                merged_seats[key] = rec
+                continue
+            if prev.get("席位类型") != rec.get("席位类型"):
+                buy_ratio = prev.get("占总成交比例_pct") if prev.get("席位类型") == "买入前五席位" else rec.get("占总成交比例_pct")
+                sell_ratio = prev.get("占总成交比例_pct") if prev.get("席位类型") == "卖出前五席位" else rec.get("占总成交比例_pct")
+                prev["席位类型"] = "买卖前五双向席位"
+                prev["占总成交比例_pct_买"] = buy_ratio
+                prev["占总成交比例_pct_卖"] = sell_ratio
+                prev["双向席位说明"] = "该席位同日同时进入买入前五与卖出前五，买卖金额同源，按行累加会把同一笔成交计两次"
+        collapsed_rows = len(seat_records) - len(merged_seats)
+        seat_records = sorted(
+            merged_seats.values(), key=lambda x: (str(x.get("交易日期", "")), str(x.get("席位类型", ""))), reverse=True
+        )
 
-            if seat_records:
-                seat_records.sort(key=lambda x: str(x.get("交易日期", "")), reverse=True)
-        except Exception:
-            pass
+        # 同日多榜次：给每条榜单编【榜单批次】，下游按它 join，避免按日期 join 双计 2.0×
+        board_by_date: dict[str, list[dict[str, Any]]] = {}
+        for b in billboard_records:
+            board_by_date.setdefault(str(b.get("交易日期") or ""), []).append(b)
+        batch_by_reason: dict[tuple[str, str], str] = {}
+        for date, rows in board_by_date.items():
+            for idx, b in enumerate(rows, 1):
+                label = f"{date}-{idx}"
+                batch_by_reason[(date, str(b.get("上榜原因") or "").strip())] = label
+                b["榜单批次"] = label
+                if len(rows) > 1:
+                    b["同日多榜次说明"] = (
+                        f"该交易日共有 {len(rows)} 条不同上榜原因的榜单记录，金额为同一批成交按不同口径分别统计；"
+                        "按日期直接求和会重复计算，请以【榜单批次】为主键。"
+                    )
+        for s in seat_records:
+            key = (str(s.get("交易日期") or ""), str(s.get("上榜异动说明") or "").strip())
+            s["榜单批次"] = batch_by_reason.get(key, f"{key[0]}-?")
+
+        board_dates = {str(b.get("交易日期") or "") for b in billboard_records}
+        seat_dates = {str(s.get("交易日期") or "") for s in seat_records}
+        missing_seat_dates = sorted(board_dates - seat_dates, reverse=True)
+        multi_reason_dates = sorted([d for d, rows in board_by_date.items() if len(rows) > 1], reverse=True)
 
         res_lhb = {
             "symbol": clean_code,
@@ -386,11 +452,31 @@ class AStockEngine(BaseMarketEngine):
             "category_name": "龙虎榜异动与营业部席位追踪",
             "source": "eastmoney_billboard (东方财富龙虎榜官方数据专线)",
             "成交额口径说明": "龙虎榜中【市场总成交额_万元】及席位【占总成交比例_pct】均为交易所异动统计窗口期（例如连续2个或3个交易日异动累计）的多日累计口径，若按单日K线成交额复核会存在2~3倍窗口期倍数差异；单日真实成交额请以 stock_kline 为准。",
+            "席位去重口径说明": (
+                "【龙虎榜席位去重口径（已收敛 P3）】：买卖两侧明细已按 (交易日期, 上榜原因, 席位名称, 买入额, 卖出额) 折叠同一笔重复记录"
+                f"（本次折叠 {collapsed_rows} 条）；「机构专用」等匿名席位的不同机构因金额不同不会被误合并。"
+                "同一席位同时进入买卖前五时标记为【买卖前五双向席位】，并分别给出【占总成交比例_pct_买】【占总成交比例_pct_卖】。"
+                "按行求和即等于榜单买卖总额，无需再自行去重。"
+            ),
             "formatted_tables": {
                 "billboard_records": billboard_records,
                 "seat_details": seat_records,
             },
         }
+        if multi_reason_dates:
+            res_lhb["同日多榜次说明"] = (
+                f"共 {len(multi_reason_dates)} 个交易日在同一天有多条不同上榜原因的榜单记录"
+                f"（如 {', '.join(multi_reason_dates[:3])}），各条金额为同一批成交按不同口径分别统计，"
+                "按日期直接求和会双计；请以【榜单批次】为主键关联榜单与席位明细。"
+            )
+        if missing_seat_dates:
+            res_lhb["席位覆盖说明"] = (
+                f"榜单总览覆盖 {len(board_dates)} 个交易日，其中 {len(missing_seat_dates)} 个日期无席位明细"
+                f"（如 {', '.join(missing_seat_dates[:3])}）；上游席位接口仅保留最近一批明细，"
+                "历史日期的席位请以交易所披露或上市公司公告为准。"
+            )
+        if board_truncated or seat_truncated:
+            res_lhb["数据完整性说明"] = "本次最多取 3 页 × 50 条；已达分页上限，更早的记录可能未取全。"
         if not billboard_records:
             res_lhb["无记录说明"] = "该标的近期未触发交易所龙虎榜公开信息披露标准（近期无严重异动/偏离值未达标），暂无营业部席位数据。"
         return res_lhb
@@ -1643,10 +1729,12 @@ class AStockEngine(BaseMarketEngine):
                             "经营活动现金流入不可加总差额_原保险保费及拆入回购等金融科目缺项",
                             "购买商品接受劳务支付的现金", "支付给职工以及为职工支付的现金", "支付的各项税费",
                             "支付其他与经营活动有关的现金", "客户贷款及垫款净增加额", "存放中央银行和同业款项净增加额",
+                            "为交易目的而持有的金融资产及融出资金等净支出",
                             "支付原保险合同赔付款项的现金", "拆出资金净增加额", "返售业务资金净增加额",
                             "支付利息、手续费及佣金的现金", "支付保单红利的现金", "支付再保业务现金净额",
                             "支付原保险合同款项现金",
                             "经营活动现金流出小计", "经营活动现金流出不可加总差额_金融存贷款及细项等",
+                            "经营活动现金流出不可加总差额_金融交易及细项科目缺项",
                             "经营活动现金流出不可加总差额_保险赔付及拆出返售等金融科目缺项",
                             "经营活动现金流量净额", "经营活动产生的现金流量净额",
                             "收回投资收到的现金", "取得投资收益收到的现金",
@@ -1668,8 +1756,9 @@ class AStockEngine(BaseMarketEngine):
                             "期初现金及现金等价物余额", "期末现金及现金等价物余额",
                             "现金流量表加总纪律说明", "间接法补充资料披露规则说明", "补充资料_间接法", "补充资料_间接法说明",
                         ]
-                        ordered_keys = sorted(period_dict.keys(), key=lambda x: canonical_cf_order.index(x) if x in canonical_cf_order else 999)
-                        period_dict = {k: period_dict[k] for k in ordered_keys}
+                        # 未知键继承前一个已知键的位置：统一甩到 999 会落到「期末现金」之后，
+                        # 按小计锚点切区的解析器会整段漏项（如 600030 券商科目 443.08 亿）
+                        period_dict = {k: period_dict[k] for k in _order_by_canonical(list(period_dict.keys()), canonical_cf_order)}
 
                     # =========================================================================
                     # 【功能块 7.2：利润表会计勾稽核算与加总说明 (修复 P2-4, P2-5, P3-5)】
