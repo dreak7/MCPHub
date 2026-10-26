@@ -4436,6 +4436,76 @@ class TestHKQuoteWeiBiAndNewsOffline(unittest.TestCase):
         self.assertIn("标题命中", res["新闻相关度说明"])
 
 
+class TestHKCompanyInfoCacheOffline(unittest.TestCase):
+    """观察项：公司概况缓存 + 每手股数轻量取数（不再每次 summary 重打整条 quotes 链）"""
+
+    @staticmethod
+    def _quote_payload(lot: str) -> bytes:
+        parts = [""] * 61
+        parts[1] = "腾讯控股"
+        parts[2] = "00700"
+        parts[60] = lot
+        return ('v_r_hk00700="' + "~".join(parts) + '";').encode("gb18030")
+
+    def test_company_info_cached_and_lot_size_light(self) -> None:
+        from mcp_gateway.engines import hk_stock as hk_module
+
+        engine = hk_module.HKStockEngine(timeout=1)
+        html = (
+            "<html><body><table>"
+            "<tr><td>证券代码</td><td>00700</td></tr>"
+            "<tr><td>公司名称(中文)</td><td>腾讯控股有限公司</td></tr>"
+            "</table></body></html>"
+        ).encode("gbk")
+        calls = {"sina": 0, "gtimg": 0}
+
+        def fake_open(req, timeout=None):
+            url = getattr(req, "full_url", "")
+            if "qt.gtimg.cn" in url:
+                calls["gtimg"] += 1
+                return _FakeHKResponse(self._quote_payload("100"))
+            calls["sina"] += 1
+            return _FakeHKResponse(html)
+
+        with unittest.mock.patch.object(hk_module._SECURE_OPENER, "open", side_effect=fake_open):
+            with unittest.mock.patch.object(engine, "_get_eastmoney_hk_company_profile", return_value={}):
+                with unittest.mock.patch.object(engine, "get_quotes", side_effect=AssertionError("仍走了完整 quotes 链")):
+                    first = engine._get_sina_hk_company_info("00700")
+                    second = engine._get_sina_hk_company_info("00700")
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None and second is not None
+        self.assertEqual(first["每手股数"], "100")
+        self.assertEqual(second["每手股数"], "100")
+        self.assertIsNot(first, second, "缓存返回了同一对象，调用方改字段会污染缓存")
+        self.assertEqual(calls["sina"], 1, "公司概况未命中缓存，重复抓取新浪页")
+        self.assertEqual(calls["gtimg"], 1, "每手股数未命中缓存，重复请求腾讯行情")
+
+    def test_lot_size_falls_back_to_eastmoney_when_quote_fails(self) -> None:
+        from urllib.error import URLError
+
+        from mcp_gateway.engines import hk_stock as hk_module
+
+        engine = hk_module.HKStockEngine(timeout=1)
+        html = "<html><body><table><tr><td>公司名称(中文)</td><td>腾讯控股有限公司</td></tr></table></body></html>".encode("gbk")
+
+        def fake_open(req, timeout=None):
+            url = getattr(req, "full_url", "")
+            if "qt.gtimg.cn" in url:
+                raise URLError("simulated timeout")
+            return _FakeHKResponse(html)
+
+        with unittest.mock.patch.object(hk_module._SECURE_OPENER, "open", side_effect=fake_open):
+            with unittest.mock.patch.object(
+                engine, "_get_eastmoney_hk_company_profile", return_value={"zqzl": {"zxjydw": "500"}}
+            ):
+                info = engine._get_sina_hk_company_info("00700")
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(info["每手股数"], "500")
+
+
 if __name__ == "__main__":
     unittest.main()
 

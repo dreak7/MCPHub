@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime
 import gzip
 import json
@@ -78,6 +79,7 @@ class HKStockEngine(BaseMarketEngine):
         self.logger = logger or logging.getLogger("mcp_gateway.finance.hk_engine")
         self._entity_cache: dict[str, dict[str, Any] | None] = {}
         self._hk_exists_cache: dict[str, bool] = {}
+        self._company_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def resolve_entity(self, clean_code: str) -> dict[str, Any] | None:
         """解析5位港股纯数字代码正主实体 (腾讯开放专线)"""
@@ -1817,7 +1819,30 @@ class HKStockEngine(BaseMarketEngine):
         except Exception:
             return {}
 
+    def _get_hk_lot_size(self, clean_code: str) -> int | None:
+        """轻量取每手股数：只解析腾讯行情串 parts[60]，不触发完整行情/指标计算链。"""
+        url = f"https://qt.gtimg.cn/q=r_hk{clean_code}"
+        try:
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with _SECURE_OPENER.open(req, timeout=min(3.0, self.timeout)) as resp:
+                raw = resp.read().decode("gb18030", errors="replace")
+            parts = raw.split('"', 2)[1].split("~")
+        except Exception:
+            return None
+        if len(parts) > 60 and parts[60].strip():
+            try:
+                lot = int(float(parts[60]))
+                return lot if lot > 0 else None
+            except (TypeError, ValueError):
+                return None
+        return None
+
     def _get_sina_hk_company_info(self, clean_code: str) -> dict[str, Any] | None:
+        # 公司概况是准静态资料（新浪页 + 东财 + 每手股数），10 分钟内复用，避免每次 summary 都重打三个站点
+        cached = self._company_info_cache.get(clean_code)
+        if cached and (time.time() - cached[0]) < 600:
+            return copy.deepcopy(cached[1])
+
         url = f"https://stock.finance.sina.com.cn/hkstock/info/{clean_code}.html"
         req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         try:
@@ -1857,17 +1882,12 @@ class HKStockEngine(BaseMarketEngine):
             else:
                 info["上市日期"] = date_part.replace("/", "-")
 
-        # 2. 补齐每手股数 (优先腾讯 parts[60]，备选东财 zxjydw)
+        # 2. 补齐每手股数 (优先腾讯 parts[60]，备选东财 zxjydw)；只打一次轻量行情，不再触发完整 quotes 链路
         if not info.get("每手股数") or not str(info.get("每手股数", "")).strip():
             lot_size = None
-            try:
-                q_res = self.get_quotes(clean_code)
-                if q_res:
-                    lot_val = q_res.get("每手股数") or q_res.get("盘口核心行情", {}).get("每手股数")
-                    if lot_val and str(lot_val).isdigit() and int(lot_val) > 0:
-                        lot_size = str(int(lot_val))
-            except Exception:
-                pass
+            lot_int = self._get_hk_lot_size(clean_code)
+            if lot_int:
+                lot_size = str(lot_int)
             if not lot_size:
                 em_lot = (zqzl.get("zxjydw") or zqzl.get("msgsize") or zqzl.get("mssl") or "").strip()
                 if str(em_lot).isdigit() and int(em_lot) > 0:
@@ -1889,6 +1909,7 @@ class HKStockEngine(BaseMarketEngine):
             info["所属行业"] = raw_ind
             info["行业"] = raw_ind
             info["行业分类体系"] = "恒生行业分类系统 (HSICS) 12大行业标准"
+            self._company_info_cache[clean_code] = (time.time(), copy.deepcopy(info))
 
         return info if info else None
 
