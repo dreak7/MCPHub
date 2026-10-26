@@ -1,6 +1,6 @@
 <div align="center">
 
-# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.1)
+# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.2)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
@@ -56,7 +56,7 @@ MCPHub/
 ├── mcphub-finance/              # 【可选外挂】Hermes 专属证券金融分析规范 Skill
 ├── logs/                        # 运行日志目录 (gateway.log)
 ├── state/                       # 持久化状态目录 (provider-state.json 冷却状态与提取缓存)
-├── tests/                       # 236 项全量自动化单元测试套件 (100% 通过)
+├── tests/                       # 241 项全量自动化单元测试套件 (100% 通过)
 ├── MCPHub服务管理面板.bat          # Windows 双击即用一键管理控制台
 ├── README.md                    # 项目全景使用与配置说明文档
 └── LICENSE                      # MIT 开源许可证
@@ -260,6 +260,19 @@ MCPHub 探活与诊断体系为**完全可选的独立外挂包**：
 ---
 
 ## 📝 更新记录 (Changelog)
+
+### v2.0.2 — 港股残留文案/结构对齐与 A 股委比、PE 口径、screener 分页收敛 (241项全绿)
+
+- **A 股委比/委差真实计算**：修正 `买{i}`（买1…买5）与中文档位 `买一…买五` 不匹配、四字段恒 0 的缺陷，改为按五档实算，并回传【委差_手_可计算】【委比_pct_可计算】；
+- **A 股 F10 PE 口径自陈**：保留与 quotes 对拍的现价口径值，另发【滚动市盈率_PETTM_昨收口径】，说明差异来自价格基准，不再声称「已自算校准为真实TTM」；
+- **screener 分页**：页内按证券代码去重并回传【页内去重条数】；删除「逐页并集严格守恒」的过度承诺，改为跨页一致性自陈（上游排序不稳定）；
+- **A 股分红与现金流**：新浪分红页空页自动重试一次，仍空时回传【无记录说明】；工业分支补投资活动流入/流出不可加总差额自陈；
+- **BPS 与归母权益差额**：新增【BPS隐含净资产差额说明】（002594 实测 −7.99%），删除「送转→必然低估」的单向文案，方向以自算普通股 PB 为准；
+- **港股权益模板自陈按报表类型**：中报/年报不再套用「季报简表」句式（00883、02628 共 4 期），季报仍保留原句式；
+- **港股估值差区间**：quotes 与 f10 indicators 的 PE 差实测 1%~4%、PB 差可超 5%，自陈区间与 PB 口径差说明同步修正；
+- **港股日线补 datetime**：东财日/周/月 bar 补 `datetime`（与 A 股对齐），`time` 保留，下游统一取 datetime 不再静默 None；
+- **A/H 报表口径提示**：A+H 标的 income 响应新增 IFRS【股东应占溢利】与 CAS【归属于母公司股东的净利润】口径差提示（01088 实测 +2.6%~+11.4%），只披露不调平；
+- **测试与文档**：新增 2 项港股离线回归（模板措辞按报表类型、A+H 股本结构解析与缓存），测试总数 241 项；版本全链路升至 v2.0.2。
 
 ### v2.0.1 — 港股 P1~P3 与 A 股 P2~P3 遗留缺陷收敛、口径自陈与 236 项全绿 (236项全绿)
 

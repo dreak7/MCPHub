@@ -40,6 +40,16 @@ from .base import BaseMarketEngine
 #         逐期挂载缺失科目自陈，绝不补零或反推
 # - 输出：整体说明文案 (无需披露时返回 None)
 # =========================================================================
+def _gap_origin_phrase(report_type: Any) -> str:
+    """模板缺口的成因措辞：中报/年报期不得套用「季报简表」句式。"""
+    rt = str(report_type or "").strip()
+    if "季" in rt:
+        return "属季报简表与中报/年报全表的结构差异"
+    if rt:
+        return f"本期为{rt}，上游该期模板仍未列示上述科目"
+    return "属上游该期报表模板未列示上述科目"
+
+
 def _annotate_balance_template_gaps(statements: list[dict[str, Any]]) -> str | None:
     if len(statements) < 2:
         return None
@@ -59,7 +69,7 @@ def _annotate_balance_template_gaps(statements: list[dict[str, Any]]) -> str | N
             continue
         p["权益明细模板完整性自陈"] = (
             f"本期上游报表模板未列示 {len(missing)} 个权益明细科目（{'、'.join(missing)}），"
-            "属季报简表与中报/年报全表的结构差异，不代表数值为 0；权益明细严禁跨期对比，也不得按缺失补零参与加总，"
+            f"{_gap_origin_phrase(p.get('报表类型'))}，不代表数值为 0；权益明细严禁跨期对比，也不得按缺失补零参与加总，"
             "归属母公司股东权益总额请直接引用【归属于母公司股东权益】或【股东权益】。"
         )
         gap_periods.append(str(p.get("截止日期") or p.get("报告期") or "未知期"))
@@ -67,7 +77,7 @@ def _annotate_balance_template_gaps(statements: list[dict[str, Any]]) -> str | N
         return None
     return (
         f"【港股资产负债表模板完整性说明】：期次 {'、'.join(gap_periods)} 的权益明细键集与全表期次不一致，"
-        "已在对应期次挂载【权益明细模板完整性自陈】；缺口源于上游季报简表未列示科目，网关不做补数。"
+        "已在对应期次挂载【权益明细模板完整性自陈】；缺口源于上游对应期次模板未列示科目（非季报/年报通例），网关不做补数。"
     )
 
 
@@ -80,6 +90,7 @@ class HKStockEngine(BaseMarketEngine):
         self._entity_cache: dict[str, dict[str, Any] | None] = {}
         self._hk_exists_cache: dict[str, bool] = {}
         self._company_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._share_cache: dict[str, tuple[float, tuple[int, int]]] = {}
 
     def resolve_entity(self, clean_code: str) -> dict[str, Any] | None:
         """解析5位港股纯数字代码正主实体 (腾讯开放专线)"""
@@ -455,7 +466,7 @@ class HKStockEngine(BaseMarketEngine):
                     "1. 字段映射关系：【市盈率_TTM】与【滚动市盈率_PETTM】同源取自过去12个月净利润测算；【静态市盈率_PE_LYR】与【静态市盈率_PEStatic】同源取自上一财年经审计年报。\n"
                     "2. 跨币种汇率换算机制：对于财报以人民币(CNY)编报但股票以港元(HKD)交易的标的（如腾讯控股、中国国航、青岛啤酒等），行情源提供的 PE_TTM 底层已包含港元对人民币的汇率折算（隐含换算比率约为 0.868~0.875 CNY/HKD，涵盖典型 0.868~0.872 区间）；对于报表以美元(USD)编报的标的（如小马智行 02026），其隐含折算比率为两段折算（HKD→USD，约为 0.128），切勿误判为异常。\n"
                     "3. PB 估值两段折算防误导律：港股 BPS 多为人民币或美元、价格为港元，计算 PB 切勿直接拿【现价 ÷ BPS】，必须先统一换算币种；本表已由【市净率_PB_自算_普通股】自动校准。\n"
-                    "4.【quotes 与 f10 indicators 汇率快照源独立性自陈】：quotes 滚动市盈率采用盘中实时动态汇率快照（约 0.868~0.875），而 f10 indicators 采用财报披露日或静态清算汇率快照（约 0.857~0.882），两处独立测算存在约 1%~2% 的合理横比差异，各自自洽，动态研判请以 quotes 实时估值为准。\n"
+                    "4.【quotes 与 f10 indicators 估值差自陈】：quotes 滚动市盈率采用盘中实时动态汇率快照（约 0.868~0.875），f10 indicators 采用财报披露日或静态清算汇率快照（约 0.857~0.882）；实测横比 PE 差约 1%~4%（02628 −3.4%、01088 −2.3%），PB 差可超 5%（09988 quotes 1.50 vs f10 1.60，约 +6.7%，主因上游 PB 按含少数股东权益的总净资产或滞后一期核算，属口径差而非汇率差），故两值不得互为印证；跨工具横比一律以 quotes 实时口径与【市净率_PB_自算_普通股】为准（口径见【市净率_PB_口径说明】）。\n"
                     "5.【A+H两地上市标的市盈率全股本口径说明与自算指引（已修复 D12）】：上游公共行情源对 A+H 标的所提供的【市盈率_TTM】底层采用全部总股本（A+H）乘 H 股价折算综合市值，并按汇率折算归母净利润测算。严肃基本面估值分析时，建议结合最新财报真实归母净利润及分季度做差 TTM 汇率复核。"
                 ),
                 "52周价格区间说明": (
@@ -777,6 +788,7 @@ class HKStockEngine(BaseMarketEngine):
                             continue
                         parsed_bars.append({
                             "time": parts[0],
+                            "datetime": parts[0],
                             "open": round(float(parts[1]), 3),
                             "close": round(float(parts[2]), 3),
                             "high": round(float(parts[3]), 3),
@@ -1747,6 +1759,16 @@ class HKStockEngine(BaseMarketEngine):
         }
         if template_gap_note:
             return_dict["报表模板完整性说明"] = template_gap_note
+        if report_type == "income":
+            # A+H 标的：港股按 IFRS 编报，股东应占溢利与 A 股 CAS 归母净利润存在口径差（01088 实测 +2.6%~+11.4%）
+            struct = self._get_hk_share_structure(clean_code)
+            if struct and struct[1] < struct[0] * 0.98:
+                total_sh, h_sh = struct
+                return_dict["A/H报表口径提示"] = (
+                    f"本标的为 A+H 两地上市（H 股 {h_sh:,} 股 / 全部股本 {total_sh:,} 股）：港股报表按 IFRS 编制，"
+                    "【股东应占溢利】与 A 股按 CAS 编制的【归属于母公司股东的净利润】存在会计口径差（实测 01088 各期 +2.6%~+11.4%，"
+                    "差额同时体现在权益侧），跨市场对拍必须取同期间一手报表逐项核对；网关不做跨市场调平，也不修改任一侧数值。"
+                )
         return return_dict
 
     # =========================================================================
@@ -1836,6 +1858,29 @@ class HKStockEngine(BaseMarketEngine):
             except (TypeError, ValueError):
                 return None
         return None
+
+    def _get_hk_share_structure(self, clean_code: str) -> tuple[int, int] | None:
+        """轻量取总股本/H股股数：只解析腾讯行情串 parts[69]/[70]，10 分钟内复用，不进完整行情链。"""
+        cached = self._share_cache.get(clean_code)
+        if cached and (time.time() - cached[0]) < 600:
+            return cached[1]
+        result: tuple[int, int] | None = None
+        try:
+            url = f"https://qt.gtimg.cn/q=r_hk{clean_code}"
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with _SECURE_OPENER.open(req, timeout=min(3.0, self.timeout)) as resp:
+                raw = resp.read().decode("gb18030", errors="replace")
+            parts = raw.split('"', 2)[1].split("~")
+            if len(parts) > 70:
+                total = int(float(parts[69] or 0))
+                h_shares = int(float(parts[70] or 0))
+                if total > 0 and h_shares > 0:
+                    result = (total, h_shares)
+        except Exception:
+            result = None
+        if result:
+            self._share_cache[clean_code] = (time.time(), result)
+        return result
 
     def _get_sina_hk_company_info(self, clean_code: str) -> dict[str, Any] | None:
         # 公司概况是准静态资料（新浪页 + 东财 + 每手股数），10 分钟内复用，避免每次 summary 都重打三个站点

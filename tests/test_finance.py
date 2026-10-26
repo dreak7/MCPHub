@@ -3284,7 +3284,8 @@ class TestTwelveEliteStocksSuite(unittest.TestCase):
         q_00700 = self.gw.stock_quotes({"symbol": "00700"})
         self.assertIn("盘口深度说明", q_00700)
         val_desc = q_00700.get("估值与基本盘面", {}).get("估值口径说明", "")
-        self.assertIn("quotes 与 f10 indicators 汇率快照源独立性自陈", val_desc)
+        self.assertIn("quotes 与 f10 indicators 估值差自陈", val_desc)
+        self.assertIn("PB 差可超 5%", val_desc)
 
         # 5. 验证 P2-3: 港股 dividends 包含每股派息 float 数值与分红数据提取说明
         div_00700 = self.gw.stock_f10({"symbol": "00700", "category": "dividends"})
@@ -3810,29 +3811,32 @@ class TestAShareNewRoundP2P3Convergence(unittest.TestCase):
         self.assertEqual(hq_hk["委比_pct"], 0.0)
 
     def test_p3_5_version_consistency(self):
-        """验证版本全链路：README / SKILL.md / tool_api_reference.md 统一为 v2.0.1"""
+        """验证版本全链路：README / SKILL.md / tool_api_reference.md 统一为 v2.0.2"""
         import os
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         
         # README.md
         with open(os.path.join(base_dir, "README.md"), "r", encoding="utf-8") as f:
             readme_text = f.read()
-        self.assertIn("# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.1)", readme_text)
+        self.assertIn("# Local MCP Search, Coding & Finance Fallback Gateway (v2.0.2)", readme_text)
+        self.assertIn("### v2.0.2 — 港股残留文案/结构对齐与 A 股委比、PE 口径、screener 分页收敛", readme_text)
         self.assertIn("### v2.0.1 — 港股 P1~P3 与 A 股 P2~P3 遗留缺陷收敛", readme_text)
         self.assertIn("### v2.0.0 — 实测 A 股 P2-1、P3-1~P3-5 缺陷全面收敛", readme_text)
 
         # SKILL.md
         with open(os.path.join(base_dir, "mcphub-finance", "SKILL.md"), "r", encoding="utf-8") as f:
             skill_text = f.read()
-        self.assertIn("version: 2.0.1", skill_text)
+        self.assertIn("version: 2.0.2", skill_text)
         self.assertIn("陷阱 125", skill_text)
         self.assertIn("陷阱 127", skill_text)
+        self.assertIn("陷阱 128", skill_text)
 
         # tool_api_reference.md
         with open(os.path.join(base_dir, "mcphub-finance", "references", "tool_api_reference.md"), "r", encoding="utf-8") as f:
             ref_text = f.read()
-        self.assertIn("版本**：v2.0.1", ref_text)
+        self.assertIn("版本**：v2.0.2", ref_text)
         self.assertIn("2.4 v2.0.1 新增字段与口径变更清单", ref_text)
+        self.assertIn("2.5 v2.0.2 新增字段与口径变更清单", ref_text)
         self.assertIn("委买总委托量_手", ref_text)
 
 
@@ -4570,6 +4574,42 @@ class TestBatch6OfflineFixes(unittest.TestCase):
         self.assertEqual(calls["n"], 2, "空页未触发重试")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["派息_每10股_含税"], 3.5)
+
+
+class TestHKV202BatchOffline(unittest.TestCase):
+    """H 批：模板缺口措辞按报表类型、A/H 股本结构轻量取数与缓存（离线）"""
+
+    def test_gap_origin_phrase_by_report_type(self) -> None:
+        from mcp_gateway.engines.hk_stock import _gap_origin_phrase
+
+        self.assertIn("季报简表", _gap_origin_phrase("一季报"))
+        self.assertIn("季报简表", _gap_origin_phrase("三季报"))
+        self.assertNotIn("季报", _gap_origin_phrase("中报"))
+        self.assertIn("本期为中报", _gap_origin_phrase("中报"))
+        self.assertNotIn("季报", _gap_origin_phrase("年报"))
+        self.assertIn("本期为年报", _gap_origin_phrase("年报"))
+        self.assertTrue(_gap_origin_phrase(None))
+
+    def test_share_structure_parse_and_cache(self) -> None:
+        from mcp_gateway.engines import hk_stock as hk
+
+        parts = ["0"] * 71
+        parts[69] = "21689434304"
+        parts[70] = "3377482000"
+        raw = 'v_hk01088="' + "~".join(parts) + '";'
+        calls = {"n": 0}
+
+        def fake_open(req, timeout=None):
+            calls["n"] += 1
+            return _FakeHKResponse(raw.encode("gb18030"))
+
+        engine = hk.HKStockEngine(timeout=1)
+        with unittest.mock.patch.object(hk._SECURE_OPENER, "open", side_effect=fake_open):
+            first = engine._get_hk_share_structure("01088")
+            second = engine._get_hk_share_structure("01088")
+        self.assertEqual(first, (21689434304, 3377482000))
+        self.assertEqual(second, first)
+        self.assertEqual(calls["n"], 1, "二次调用未命中 10 分钟缓存")
 
 
 if __name__ == "__main__":
