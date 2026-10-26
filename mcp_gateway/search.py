@@ -259,11 +259,12 @@ class SearchGateway:
                 except SearchError as exc:
                     self.logger.warning("Provider %s failed: %s", provider_id, exc)
                     failures.append(ProviderFailure(provider_id, self._describe_failure(exc)))
-                    if not exc.retryable:
+                    auth_failure = exc.status in (401, 403)
+                    if not exc.retryable and not auth_failure:
                         break
                     is_quota = self._is_quota_exhausted(exc)
                     cd = quota_cooldown_seconds if is_quota else cooldown_seconds
-                    reason_type = "quota" if is_quota else "rate_limit"
+                    reason_type = "quota" if is_quota else ("auth" if auth_failure else "rate_limit")
                     self.cooldowns.set(key_cd_id, cd, reason_type=reason_type, api_key=api_key)
                     nxt_key, nxt_cd, nxt_reason = resolve_provider_key(
                         provider,
@@ -279,10 +280,10 @@ class SearchGateway:
                 continue
             if swapped:
                 # 同一次调用内已换 key 成功：把中间"额度耗尽"改写为可读提示，并从告警里摘掉
-                for item in failures:
-                    if item.provider == provider_id:
-                        item.reason = "额度耗尽（已自动切换备用 Key）"
-                        item.suppress_warning = True
+                for fail_item in failures:
+                    if fail_item.provider == provider_id:
+                        fail_item.reason = f"{fail_item.reason}（已自动切换备用 Key）"
+                        fail_item.suppress_warning = True
             response: dict[str, Any] = {
                 "provider": provider_id,
                 "query": query.strip(),
@@ -1258,11 +1259,12 @@ class ExtractGateway(SearchGateway):
                 except SearchError as exc:
                     self.logger.warning("Extract provider %s failed: %s", provider_id, exc)
                     failures.append(ProviderFailure(provider_id, self._describe_failure(exc)))
-                    if not exc.retryable:
+                    auth_failure = exc.status in (401, 403)
+                    if not exc.retryable and not auth_failure:
                         break
                     is_quota = self._is_quota_exhausted(exc)
                     cd = quota_cooldown_seconds if is_quota else cooldown_seconds
-                    reason_type = "quota" if is_quota else "rate_limit"
+                    reason_type = "quota" if is_quota else ("auth" if auth_failure else "rate_limit")
                     self.cooldowns.set(key_cd_id, cd, reason_type=reason_type, api_key=api_key)
                     nxt_key, nxt_cd, nxt_reason = resolve_provider_key(
                         provider,
@@ -1279,7 +1281,7 @@ class ExtractGateway(SearchGateway):
             if swapped:
                 for fail_item in failures:
                     if fail_item.provider == provider_id:
-                        fail_item.reason = "额度耗尽（已自动切换备用 Key）"
+                        fail_item.reason = f"{fail_item.reason}（已自动切换备用 Key）"
                         fail_item.suppress_warning = True
             returned_urls = set()
             for result in results:

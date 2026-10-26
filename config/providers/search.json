@@ -16,7 +16,7 @@
           "id": "anysearch",
           "enabled": true,
           "priority": 20,
-          "api_key_env": "ANYSEARCH_API_KEY",
+          "api_key_envs": ["ANYSEARCH_API_KEY", "ANYSEARCH_API_KEY_2"],
           "endpoint": "https://api.anysearch.com/v1/search"
         },
         {
@@ -59,7 +59,7 @@
           "id": "anysearch",
           "enabled": true,
           "priority": 20,
-          "api_key_env": "ANYSEARCH_API_KEY",
+          "api_key_envs": ["ANYSEARCH_API_KEY", "ANYSEARCH_API_KEY_2"],
           "endpoint": "https://api.anysearch.com/v1/extract"
         },
         {

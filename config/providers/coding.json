@@ -39,7 +39,7 @@
           "id": "context7",
           "enabled": true,
           "priority": 10,
-          "api_key_env": "CONTEXT7_API_KEY",
+          "api_key_envs": ["CONTEXT7_API_KEY", "CONTEXT7_API_KEY_2"],
           "endpoint": "https://context7.com/api/v3/search"
         }
       ]

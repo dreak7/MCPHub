@@ -1245,6 +1245,39 @@ class MultiKeyRotationTest(unittest.TestCase):
         self.assertIn("额度耗尽", message)
         self.assertNotIn("432", message, "不应把 HTTP 432 原始码抛给调用方")
 
+    @patch.dict(os.environ, {"JINA_API_KEY": "j1", "JINA_API_KEY_2": "j2"}, clear=False)
+    def test_anonymous_capable_provider_rotates_on_auth_failure(self):
+        """jina/anysearch 这类可匿名引擎：配了两把 key 时，401 也应换 key 而不是直接放弃。"""
+        gw = self._gateway([{
+            "id": "jina", "type": "jina", "enabled": True, "priority": 10,
+            "api_key_envs": ["JINA_API_KEY", "JINA_API_KEY_2"], "endpoint": "https://example.test/jina",
+        }])
+        seen = []
+
+        def fake_call(provider, query, limit, arguments, api_key, timeout):
+            seen.append(api_key)
+            if api_key == "j1":
+                raise SearchError("HTTP 401: invalid token", retryable=False, status=401)
+            return [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]
+
+        with patch.object(gw, "_call", side_effect=fake_call):
+            result = gw.search({"query": "x"})
+        self.assertEqual(seen, ["j1", "j2"])
+        self.assertEqual(result["provider"], "jina")
+        self.assertIn("已自动切换备用 Key", result["provider_failures"][0]["reason"])
+        self.assertNotIn("warning", result)
+
+    @patch.dict(os.environ, {"JINA_API_KEY": "", "JINA_API_KEY_2": ""}, clear=False)
+    def test_anonymous_provider_without_any_key_still_works(self):
+        gw = self._gateway([{
+            "id": "jina", "type": "jina", "enabled": True, "priority": 10,
+            "api_key_envs": ["JINA_API_KEY", "JINA_API_KEY_2"], "endpoint": "https://example.test/jina",
+        }])
+        with patch.object(gw, "_call", return_value=[{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]) as call:
+            result = gw.search({"query": "x"})
+        self.assertEqual(call.call_args[0][4], "", "匿名引擎没 key 时应以空 key 放行")
+        self.assertEqual(result["provider"], "jina")
+
     @patch.dict(os.environ, {"TAVILY_API_KEY": "k1", "TAVILY_API_KEY_2": "k2"}, clear=False)
     def test_extract_rotates_key_on_quota(self):
         gw = ExtractGateway(
