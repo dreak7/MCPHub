@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 CONTRACT = ROOT / "tests" / "field_contract.json"
 
 
-def check(root: Path | None = None) -> list[str]:
-    base = root or ROOT
+def check(root: Path | str | None = None) -> list[str]:
+    base = Path(root) if root else ROOT
     contract = json.loads((base / "tests" / "field_contract.json").read_text(encoding="utf-8"))
     missing: list[str] = []
     for market, files in contract.items():
