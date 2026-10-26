@@ -230,6 +230,7 @@
 - 配置：provider 用 `api_key_envs`（数组，顺序即优先级）声明多把 key，旧的 `api_key_env` 单值继续兼容；
 - 行为：同一 provider 同一时刻只用一把 key。当前 key 额度耗尽（HTTP 402/432）或限流冷却后，自动换下一把——`web_search` / `web_extract` 在同一次调用内完成接力，`multi_web_search` 每轮只打一把 key（避免两把同时扣额度），该轮失败后由后续查询换 key；
 - 冷却粒度：多 key provider 的冷却键为 `<capability>:<provider_id>#<keyhash8>`，每把 key 独立冷冻与跨月复活；单 key provider 沿用旧键，`provider-state.json` 无需迁移；
+- 报错措辞：额度耗尽统一显示为「额度耗尽」，不把 HTTP 432 原始码抛给调用方；同一次调用内已切换到备用 key 时，`provider_failures` 记为「额度耗尽（已自动切换备用 Key）」并从 `warning` 中摘除（服务实际成功，不再误报配额告警）；
 - 匿名引擎（jina / anysearch）不受影响：没配 key 时仍走匿名配额。
 
 ---

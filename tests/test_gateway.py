@@ -85,7 +85,7 @@ class SearchGatewayTest(unittest.TestCase):
             result = gateway.search({"query": "test"})
         self.assertIn("warning", result)
         self.assertEqual(
-            "⚠️ 警告：检测到后端服务配额耗尽或请求限流 [tavily-search (HTTP 402: quota exhausted)]。请耐心等待配额重置稍后重试或联系MCP提供商。",
+            "⚠️ 警告：检测到后端服务配额耗尽或请求限流 [tavily-search (额度耗尽)]。请耐心等待配额重置稍后重试或联系MCP提供商。",
             result["warning"],
         )
 
@@ -100,7 +100,7 @@ class SearchGatewayTest(unittest.TestCase):
         self.assertEqual("exa", result["provider"])
         self.assertIn("warning", result)
         self.assertEqual(
-            "⚠️ 警告：检测到后端服务配额耗尽或请求限流 [tavily-search (HTTP 432: quota exhausted)]。请耐心等待配额重置稍后重试或联系MCP提供商。",
+            "⚠️ 警告：检测到后端服务配额耗尽或请求限流 [tavily-search (额度耗尽)]。请耐心等待配额重置稍后重试或联系MCP提供商。",
             result["warning"],
         )
 
@@ -1210,6 +1210,40 @@ class MultiKeyRotationTest(unittest.TestCase):
         with patch.object(gw, "_call", side_effect=fake_call):
             gw.multi_search({"query": "x"})
         self.assertEqual(calls, ["k1"], "multi_search 每个 provider 只能打一次，不能两把 key 同时扣额度")
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "k1", "TAVILY_API_KEY_2": "k2"}, clear=False)
+    def test_search_rotates_inline_and_reports_readable_reason(self):
+        gw = self._gateway([{
+            "id": "tavily-search", "type": "tavily-search", "enabled": True, "priority": 10,
+            "api_key_envs": ["TAVILY_API_KEY", "TAVILY_API_KEY_2"], "endpoint": "https://example.test/tavily",
+        }])
+        seen = []
+
+        def fake_call(provider, query, limit, arguments, api_key, timeout):
+            seen.append(api_key)
+            if api_key == "k1":
+                raise SearchError("HTTP 432: quota exhausted", retryable=True, status=432)
+            return [{"title": "ok", "url": "u", "snippet": "s", "published_date": ""}]
+
+        with patch.object(gw, "_call", side_effect=fake_call):
+            result = gw.search({"query": "x"})
+        self.assertEqual(seen, ["k1", "k2"], "同一次调用内应换 key2 接力")
+        self.assertEqual(result["provider"], "tavily-search")
+        self.assertEqual(result["provider_failures"][0]["reason"], "额度耗尽（已自动切换备用 Key）")
+        self.assertNotIn("warning", result, "已切换备用 Key 时不应再出配额告警")
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "k1", "TAVILY_API_KEY_2": "k2"}, clear=False)
+    def test_multi_search_quota_reason_is_chinese(self):
+        gw = self._gateway([{
+            "id": "tavily-search", "type": "tavily-search", "enabled": True, "priority": 10,
+            "api_key_envs": ["TAVILY_API_KEY", "TAVILY_API_KEY_2"], "endpoint": "https://example.test/tavily",
+        }])
+        with patch.object(gw, "_call", side_effect=SearchError("HTTP 432: quota exhausted", retryable=True, status=432)):
+            with self.assertRaises(SearchError) as ctx:
+                gw.multi_search({"query": "x"})
+        message = str(ctx.exception)
+        self.assertIn("额度耗尽", message)
+        self.assertNotIn("432", message, "不应把 HTTP 432 原始码抛给调用方")
 
     @patch.dict(os.environ, {"TAVILY_API_KEY": "k1", "TAVILY_API_KEY_2": "k2"}, clear=False)
     def test_extract_rotates_key_on_quota(self):

@@ -9,7 +9,7 @@
           "id": "exa",
           "enabled": true,
           "priority": 10,
-          "api_key_env": "EXA_API_KEY",
+          "api_key_envs": ["EXA_API_KEY", "EXA_API_KEY_2"],
           "endpoint": "https://api.exa.ai/search"
         },
         {
@@ -30,14 +30,14 @@
           "id": "jina",
           "enabled": true,
           "priority": 40,
-          "api_key_env": "JINA_API_KEY",
+          "api_key_envs": ["JINA_API_KEY", "JINA_API_KEY_2"],
           "endpoint": "https://s.jina.ai"
         },
         {
           "id": "bocha-search",
           "enabled": true,
           "priority": 50,
-          "api_key_env": "BOCHA_API_KEY",
+          "api_key_envs": ["BOCHA_API_KEY", "BOCHA_API_KEY_2"],
           "endpoint": "https://api.bocha.cn/v1/web-search"
         }
       ]
@@ -52,7 +52,7 @@
           "id": "exa",
           "enabled": true,
           "priority": 10,
-          "api_key_env": "EXA_API_KEY",
+          "api_key_envs": ["EXA_API_KEY", "EXA_API_KEY_2"],
           "endpoint": "https://api.exa.ai/contents"
         },
         {
@@ -73,7 +73,7 @@
           "id": "jina",
           "enabled": true,
           "priority": 40,
-          "api_key_env": "JINA_API_KEY",
+          "api_key_envs": ["JINA_API_KEY", "JINA_API_KEY_2"],
           "endpoint": "https://r.jina.ai"
         }
       ]

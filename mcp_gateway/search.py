@@ -29,6 +29,7 @@ class SearchError(RuntimeError):
 class ProviderFailure:
     provider: str
     reason: str
+    suppress_warning: bool = False
 
 
 def resolve_provider_key(
@@ -250,13 +251,14 @@ class SearchGateway:
                 continue
             api_key = api_key or ""
             result: list[dict[str, Any]] | None = None
+            swapped = False
             while True:
                 try:
                     result = self._call(provider, query.strip(), max_results, arguments, api_key, timeout)
                     break
                 except SearchError as exc:
                     self.logger.warning("Provider %s failed: %s", provider_id, exc)
-                    failures.append(ProviderFailure(provider_id, str(exc)))
+                    failures.append(ProviderFailure(provider_id, self._describe_failure(exc)))
                     if not exc.retryable:
                         break
                     is_quota = self._is_quota_exhausted(exc)
@@ -272,8 +274,15 @@ class SearchGateway:
                     if nxt_reason is not None or not nxt_key:
                         break
                     api_key, key_cd_id = nxt_key, nxt_cd
+                    swapped = True
             if result is None:
                 continue
+            if swapped:
+                # 同一次调用内已换 key 成功：把中间"额度耗尽"改写为可读提示，并从告警里摘掉
+                for item in failures:
+                    if item.provider == provider_id:
+                        item.reason = "额度耗尽（已自动切换备用 Key）"
+                        item.suppress_warning = True
             response: dict[str, Any] = {
                 "provider": provider_id,
                 "query": query.strip(),
@@ -381,7 +390,7 @@ class SearchGateway:
                             provider_results.append((prov_id, res))
                     except SearchError as exc:
                         self.logger.warning("Multi-search provider %s failed: %s", prov_id, exc)
-                        failures.append(ProviderFailure(prov_id, str(exc)))
+                        failures.append(ProviderFailure(prov_id, self._describe_failure(exc)))
                         if exc.retryable:
                             is_quota = self._is_quota_exhausted(exc)
                             cd = quota_cooldown_seconds if is_quota else cooldown_seconds
@@ -538,6 +547,8 @@ class SearchGateway:
         auth_issues: list[str] = []
         quota_issues: list[str] = []
         for item in failures:
+            if item.suppress_warning:
+                continue
             r = item.reason.lower()
             if any(token in r for token in auth_tokens) or ("403" in r and not any(qt in r for qt in quota_tokens)):
                 auth_issues.append(f"{item.provider} ({item.reason})")
@@ -554,6 +565,11 @@ class SearchGateway:
                 joined = "、".join(quota_issues)
                 lines.append(f"⚠️ 警告：检测到后端服务配额耗尽或请求限流 [{joined}]。请耐心等待配额重置稍后重试或联系MCP提供商。")
         return "\n".join(lines) if lines else None
+
+    @classmethod
+    def _describe_failure(cls, exc: SearchError) -> str:
+        """失败原因的对外措辞：额度耗尽统一显示为中文，不把 HTTP 432 直接抛给调用方。"""
+        return "额度耗尽" if cls._is_quota_exhausted(exc) else str(exc)
 
     # =========================================================================
     # 【功能块：检查是否所有故障记录均属于配额/限流类错误】
@@ -1234,13 +1250,14 @@ class ExtractGateway(SearchGateway):
                 continue
             api_key = api_key or ""
             results = None
+            swapped = False
             while True:
                 try:
                     results = self._extract(provider, list(pending), depth, max_characters, api_key, timeout)
                     break
                 except SearchError as exc:
                     self.logger.warning("Extract provider %s failed: %s", provider_id, exc)
-                    failures.append(ProviderFailure(provider_id, str(exc)))
+                    failures.append(ProviderFailure(provider_id, self._describe_failure(exc)))
                     if not exc.retryable:
                         break
                     is_quota = self._is_quota_exhausted(exc)
@@ -1256,8 +1273,14 @@ class ExtractGateway(SearchGateway):
                     if nxt_reason is not None or not nxt_key:
                         break
                     api_key, key_cd_id = nxt_key, nxt_cd
+                    swapped = True
             if results is None:
                 continue
+            if swapped:
+                for fail_item in failures:
+                    if fail_item.provider == provider_id:
+                        fail_item.reason = "额度耗尽（已自动切换备用 Key）"
+                        fail_item.suppress_warning = True
             returned_urls = set()
             for result in results:
                 url = result["url"]
