@@ -137,8 +137,9 @@ class HKStockEngine(BaseMarketEngine):
                             "entity_setcode": 31,
                             "aliases": aliases,
                         }
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                self.logger.debug("忽略非致命异常: %s", exc)
         return None
 
     def _resolve_exact_security_entity(self, clean_code: str) -> dict[str, Any] | None:
@@ -380,8 +381,9 @@ class HKStockEngine(BaseMarketEngine):
                         f10_pb_calc = round(float(f10_pb_f10), 4)
                     except Exception:
                         f10_pb_calc = None
-        except Exception:
-            pass
+        except Exception as exc:
+            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+            self.logger.debug("忽略非致命异常: %s", exc)
 
         raw_pb = _safe_opt_float(parts[58] if len(parts) > 58 else None)
         pb_common = f10_pb_calc if f10_pb_calc is not None else raw_pb
@@ -830,8 +832,9 @@ class HKStockEngine(BaseMarketEngine):
                             "港股历史 K 线全面支持 qfq（前复权，默认）、hfq（后复权）及 none（不复权）；前复权以当前最新价为基准向前平移历史分红与拆股，后复权以基期上市价为基准向后平移，不复权呈现撮合未除权价格。"
                         ),
                     }
-        except Exception:
-            pass
+        except Exception as exc:
+            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+            self.logger.debug("忽略非致命异常: %s", exc)
 
         # 尝试通道 B：腾讯财经高可用 newfqkline 通道 (彻底解决 adjust=none 时 amount=0 的缺陷，修复 D3)
         p_param = {"day": "day", "week": "week", "month": "month"}.get(p_lower, "day")
@@ -1185,8 +1188,9 @@ class HKStockEngine(BaseMarketEngine):
                                         u_val = float(item["AMOUNT"])
                                         if u_val > 0 and r_d not in usd_income_by_date:
                                             usd_income_by_date[r_d] = u_val
-                                    except Exception:
-                                        pass
+                                    except Exception as exc:
+                                        # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                                        self.logger.debug("忽略非致命异常: %s", exc)
 
                             # 2. 获取指标表中折算后的人民币营收，逐期动态反解汇率
                             cny_income_by_date: dict[str, float] = {}
@@ -1199,8 +1203,9 @@ class HKStockEngine(BaseMarketEngine):
                                             c_f = float(cny_val)
                                             if c_f > 0:
                                                 cny_income_by_date[r_d] = c_f
-                                        except Exception:
-                                            pass
+                                        except Exception as exc:
+                                            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                                            self.logger.debug("忽略非致命异常: %s", exc)
                             else:
                                 # 若当前请求为 CASHFLOW_PC，向 MAININDICATOR 动态抓取指标表营收反解各期汇率
                                 try:
@@ -1226,10 +1231,12 @@ class HKStockEngine(BaseMarketEngine):
                                                     c_f = float(cny_val)
                                                     if c_f > 0:
                                                         cny_income_by_date[r_d] = c_f
-                                                except Exception:
-                                                    pass
-                                except Exception:
-                                    pass
+                                                except Exception as exc:
+                                                    # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                                                    self.logger.debug("忽略非致命异常: %s", exc)
+                                except Exception as exc:
+                                    # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                                    self.logger.debug("忽略非致命异常: %s", exc)
 
                             # 3. 逐期动态相除计算官方折算汇率
                             for r_d, u_val in usd_income_by_date.items():
@@ -2379,21 +2386,24 @@ class HKStockEngine(BaseMarketEngine):
                     if m_hkd:
                         try:
                             hkd_amt = round(float(m_hkd.group(1)), 4)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                            self.logger.debug("忽略非致命异常: %s", exc)
                     m_cny = re.search(r'([0-9.]+)\s*(?:元人民币|人民币|元RMB|RMB)', plan, re.I)
                     if m_cny:
                         try:
                             cny_amt = round(float(m_cny.group(1)), 4)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                            self.logger.debug("忽略非致命异常: %s", exc)
                     # 美元派息（如 09988 以 USD 宣派）：只补数值列，不改原有港元/人民币口径
                     m_usd = re.search(r'相当于\s*([0-9.]+)\s*(?:美元|USD)', plan, re.I) or re.search(r'([0-9.]+)\s*(?:美元|USD)', plan, re.I)
                     if m_usd:
                         try:
                             usd_amt = round(float(m_usd.group(1)), 6)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                            self.logger.debug("忽略非致命异常: %s", exc)
                     # 多笔派息（末期息 + 特别息）逐笔留档；存托股折算价剔除，避免把 ADS 价当每股派息
                     # shortcut: 仅按 ; / ； 切分，若公告用「及」连接两笔则只留首笔明细（汇总列仍取第一笔），遇此类公告再扩分隔符
                     for seg in re.split(r"[;；]", plan):

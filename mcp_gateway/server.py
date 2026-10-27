@@ -124,8 +124,9 @@ def _configure_stdio() -> None:
         if hasattr(stream, "reconfigure"):
             try:
                 stream.reconfigure(encoding="utf-8", errors="replace")
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                logging.getLogger("mcp_gateway").debug("忽略非致命异常: %s", exc)
 
 
 # =========================================================================
@@ -239,8 +240,9 @@ class McpServer:
         if hasattr(sys.stdout, "reconfigure") and getattr(sys.stdout, "encoding", "").lower() != "utf-8":
             try:
                 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                logging.getLogger("mcp_gateway").debug("忽略非致命异常: %s", exc)
         try:
             sys.stdout.write(json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n")
             sys.stdout.flush()

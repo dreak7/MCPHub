@@ -6,6 +6,7 @@ F10 深度题材与筹码、以及自然语言智能选股。
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime
 import gzip
 import json
@@ -183,8 +184,9 @@ class AStockEngine(BaseMarketEngine):
                 res_tuple = (ptg_qy, gm, bgq, now_ts)
                 self._equity_cache[clean_code] = res_tuple
                 return (ptg_qy, gm, bgq)
-        except Exception:
-            pass
+        except Exception as exc:
+            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+            self.logger.debug("忽略非致命异常: %s", exc)
         return None
 
     def resolve_entity(self, clean_code: str) -> dict[str, Any] | None:
@@ -225,8 +227,9 @@ class AStockEngine(BaseMarketEngine):
                             "entity_setcode": setcode,
                             "aliases": [name],
                         }
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                self.logger.debug("忽略非致命异常: %s", exc)
 
             # 第二轨：新浪财经公开快速行情提取证券名称
             try:
@@ -251,8 +254,9 @@ class AStockEngine(BaseMarketEngine):
                             "entity_setcode": setcode,
                             "aliases": [name],
                         }
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                self.logger.debug("忽略非致命异常: %s", exc)
 
             # 第三轨：通达信官方专线 F10 摘要表 table8.name 权威兜底
             try:
@@ -274,8 +278,9 @@ class AStockEngine(BaseMarketEngine):
                                     "entity_setcode": setcode,
                                     "aliases": [name],
                                 }
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                self.logger.debug("忽略非致命异常: %s", exc)
 
         return None
 
@@ -316,8 +321,9 @@ class AStockEngine(BaseMarketEngine):
                     m = re.match(r"\s*(E\|-\d+\|[^,:]{0,40})", detail)
                     if m:
                         err_msg += f": {m.group(1)}"
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                    self.logger.debug("忽略非致命异常: %s", exc)
                 raise RuntimeError(f"TDX API request failed ({err_msg})") from exc
             except (URLError, TimeoutError, socket.timeout) as exc:
                 if attempt < max_retries:
@@ -446,6 +452,8 @@ class AStockEngine(BaseMarketEngine):
                 if page == 3:
                     board_truncated = True
             except Exception:
+                # 上游异常导致提前中断，置位截断标记，避免下游把残缺数据误当全量
+                board_truncated = True
                 break
 
         seat_records: list[dict[str, Any]] = []
@@ -454,7 +462,11 @@ class AStockEngine(BaseMarketEngine):
             ("买入前五席位", "RPT_BILLBOARD_DAILYDETAILSBUY", "TOTAL_BUYRIO"),
             ("卖出前五席位", "RPT_BILLBOARD_DAILYDETAILSSELL", "TOTAL_SELLRIO"),
         )
-        for side_label, report_name, ratio_field in seat_sources:
+        def _fetch_seat_side(side: tuple[str, str, str]) -> tuple[list[dict[str, Any]], bool]:
+            """抓取单侧（买/卖）席位全部分页，返回 (记录, 是否被截断)。独立无共享状态的局部函数，便于并发。"""
+            side_label, report_name, ratio_field = side
+            recs: list[dict[str, Any]] = []
+            truncated = False
             for page in range(1, 4):
                 try:
                     url_seat = (
@@ -468,7 +480,7 @@ class AStockEngine(BaseMarketEngine):
                         d_seat = json.loads(resp.read().decode("utf-8", errors="replace"))
                     rows = ((d_seat.get("result") or {}).get("data") or [])
                     for row in rows:
-                        seat_records.append({
+                        recs.append({
                             "交易日期": str(row.get("TRADE_DATE", ""))[:10],
                             "席位类型": side_label,
                             "营业部席位名称": row.get("OPERATEDEPT_NAME"),
@@ -482,9 +494,21 @@ class AStockEngine(BaseMarketEngine):
                     if len(rows) < 50:
                         break
                     if page == 3:
-                        seat_truncated = True
+                        truncated = True
                 except Exception:
+                    # 上游异常导致提前中断，置位截断标记，避免下游把残缺数据误当全量
+                    truncated = True
                     break
+            return recs, truncated
+
+        # 买卖两侧互不依赖，并发抓取（原串行最坏 6 次 → 2 路并发）；ex.map 保序，买入侧记录仍在前
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(seat_sources)) as ex:
+                for recs, trunc in ex.map(_fetch_seat_side, seat_sources):
+                    seat_records.extend(recs)
+                    seat_truncated = seat_truncated or trunc
+        except Exception:
+            seat_truncated = True
 
         # 买卖两表按 (交易日, 上榜原因, 席位, 买入额, 卖出额) 合并：只有金额完全相同的同一笔记录才折叠，
         # 避免把「机构专用」这类匿名席位的多个不同机构误合成一条（金额进 key 才能与榜单总额逐分对上）
@@ -618,8 +642,9 @@ class AStockEngine(BaseMarketEngine):
                             "回购实施截止日": e_date,
                             "方案完成日期": f_date,
                         })
-        except Exception:
-            pass
+        except Exception as exc:
+            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+            self.logger.debug("忽略非致命异常: %s", exc)
 
         res_rep = {
             "symbol": clean_code,
@@ -957,8 +982,9 @@ class AStockEngine(BaseMarketEngine):
                                 )
                             else:
                                 mapped_ext["派生指标换期说明"] = f"上游行情盘口指标与最新披露的 {f10_bgq} 财报完全同步对齐，无需换期重算。{diff_factor_str}"
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                    self.logger.debug("忽略非致命异常: %s", exc)
 
             if mgjzc > 0:
                 if now_p > 0 and "市净率_PB" not in mapped_ext:
@@ -1460,6 +1486,15 @@ class AStockEngine(BaseMarketEngine):
 
         # 核心：自动嗅探通达信返回的 isjr 金融属性标志位 (1=金融类：银行/保险/证券；0=工商业实体) (修复 P0)
         is_financial = False
+        def _sum_first_present(d: dict[str, Any], groups: list[tuple[str, ...]]) -> float:
+            total = 0.0
+            for names in groups:
+                for n in names:
+                    v = d.get(n)
+                    if isinstance(v, (int, float)):
+                        total += float(v)
+                        break
+            return round(total, 2)
         if isinstance(result_sets, list):
             for rs in result_sets:
                 if rs.get("ColName") == ["isjr"] and rs.get("Content"):
@@ -1770,19 +1805,9 @@ class AStockEngine(BaseMarketEngine):
 
                             # 投资活动现金流入/流出不可加总差额自陈
                             # （mango 实测 002594 2026-06-30 投资流入残差 0.42 亿、2025-12-31 0.67 亿，原先无自陈）
-                            def _sum_first_present(groups: list[tuple[str, ...]]) -> float:
-                                total = 0.0
-                                for names in groups:
-                                    for n in names:
-                                        v = period_dict.get(n)
-                                        if isinstance(v, (int, float)):
-                                            total += float(v)
-                                            break
-                                return round(total, 2)
-
                             tz_in = period_dict.get("投资活动现金流入小计")
                             if isinstance(tz_in, (int, float)):
-                                diff_tz_in = round(float(tz_in) - _sum_first_present([
+                                diff_tz_in = round(float(tz_in) - _sum_first_present(period_dict, [
                                     ("收回投资收到的现金",),
                                     ("取得投资收益收到的现金",),
                                     ("处置固定资产无形资产收回的现金净额", "处置固定资产、无形资产和其他长期资产收回的现金净额"),
@@ -1794,7 +1819,7 @@ class AStockEngine(BaseMarketEngine):
 
                             tz_out = period_dict.get("投资活动现金流出小计")
                             if isinstance(tz_out, (int, float)):
-                                diff_tz_out = round(float(tz_out) - _sum_first_present([
+                                diff_tz_out = round(float(tz_out) - _sum_first_present(period_dict, [
                                     ("购建固定资产无形资产支付的现金", "购建固定资产、无形资产和其他长期资产支付的现金"),
                                     ("投资支付的现金",),
                                     ("取得子公司及其他营业单位支付的现金净额",),

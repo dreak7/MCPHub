@@ -175,47 +175,6 @@ class TdxClient:
     def _post(self, url: str, body: dict[str, Any] | list[Any]) -> Any:
         return self.a_engine._default_post(url, body)
 
-    def _unused_old_post(self, url: str, body: dict[str, Any] | list[Any]) -> Any:
-        headers = {
-            "Content-Type": "application/json; charset=utf-8",
-            "User-Agent": "MCPHub-Finance-Gateway/1.0",
-        }
-        if self.token:
-            headers["token"] = self.token
-
-        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        req = Request(url, data=payload, headers=headers, method="POST")
-
-        max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                cur_timeout = 8.0 if attempt < max_retries else self.timeout
-                with _SECURE_OPENER.open(req, timeout=cur_timeout) as resp:
-                    resp_bytes = resp.read()
-                    return json.loads(resp_bytes.decode("utf-8", errors="replace"))
-            except HTTPError as exc:
-                err_msg = f"HTTP {exc.code} {exc.reason}"
-                try:
-                    detail = exc.read().decode("utf-8", errors="replace")
-                    # 上游错误体可能回显请求头且体积大，只保留 TDX 错误码段（形如 E|-7405|S14040(-7405)），其余丢弃
-                    m = re.match(r"\s*(E\|-\d+\|[^,:]{0,40})", detail)
-                    if m:
-                        err_msg += f": {m.group(1)}"
-                except Exception:
-                    pass
-                raise RuntimeError(f"TDX API request failed ({err_msg})") from exc
-            except (URLError, TimeoutError, socket.timeout) as exc:
-                if attempt < max_retries:
-                    time.sleep(0.2 * (attempt + 1))
-                    continue
-                reason = getattr(exc, "reason", str(exc))
-                raise RuntimeError(f"TDX API network connection error ({reason})") from exc
-            except Exception as exc:
-                if attempt < max_retries and ("timeout" in str(exc).lower() or "handshake" in str(exc).lower()):
-                    time.sleep(0.2 * (attempt + 1))
-                    continue
-                raise
-
     # =========================================================================
     # 【功能块 3.5：纯数字证券代码正主实体精准反查与保全解析器】
     # - 输入参数：clean_code (str): 6位A股纯数字代码或5位港股纯数字代码
@@ -267,8 +226,9 @@ class TdxClient:
                             "entity_setcode": setcode,
                             "aliases": [name],
                         }
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                self.logger.debug("忽略非致命异常: %s", exc)
 
             # 第二轨：新浪财经公开快速行情提取证券名称
             try:
@@ -293,8 +253,9 @@ class TdxClient:
                             "entity_setcode": setcode,
                             "aliases": [name],
                         }
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                self.logger.debug("忽略非致命异常: %s", exc)
 
             # 第三轨：通达信官方专线 F10 摘要表 table8.name 权威兜底
             try:
@@ -316,8 +277,9 @@ class TdxClient:
                                     "entity_setcode": setcode,
                                     "aliases": [name],
                                 }
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                self.logger.debug("忽略非致命异常: %s", exc)
 
         elif clean_code.isdigit() and len(clean_code) == 5:
             # 港股 5 位数字代码
@@ -343,8 +305,9 @@ class TdxClient:
                             "entity_setcode": 31,
                             "aliases": aliases,
                         }
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                self.logger.debug("忽略非致命异常: %s", exc)
 
         return None
 
@@ -379,8 +342,9 @@ class TdxClient:
                     hk_entities = hk_resp["retrieved_entities"]
                     if isinstance(hk_entities, list) and hk_entities:
                         entities = hk_entities
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                self.logger.debug("忽略非致命异常: %s", exc)
 
         # 纯数字代码正主保全与首位置顶逻辑（解决基金/债券等同名代码挤占或遗漏股票正主的问题）
         # 严格遵守市场范围约束：AG 范围仅置顶 6 位 A 股；HK/HK-GP 范围仅置顶 5 位港股 (修复 Issue 2)
@@ -793,8 +757,9 @@ class PublicFallbackClient:
                     if news_list:
                         # 去重后严格按发布时间倒序排列，确保首条即为最新资讯 (修复 P3-1)
                         return _finalize_news(news_list)[:req_limit]
-        except Exception:
-            pass
+        except Exception as exc:
+            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+            self.logger.debug("忽略非致命异常: %s", exc)
 
         # 2. 备用通道一：东方财富全文检索 JSONP 接口
         try:
@@ -850,8 +815,9 @@ class PublicFallbackClient:
                     if news_list:
                         # 去重后严格按发布时间倒序排列 (修复 P3-1)
                         return _finalize_news(news_list)[:req_limit]
-        except Exception:
-            pass
+        except Exception as exc:
+            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+            self.logger.debug("忽略非致命异常: %s", exc)
 
         # 3. 备用通道二：东方财富官方权威上市公司重大公告专线（重大公告兜底，100% 有数据）
         if clean_code:
@@ -886,8 +852,9 @@ class PublicFallbackClient:
                             # 严格按公告时间倒序排列 (修复 P3-1)
                             ann_list.sort(key=lambda x: str(x.get("time") or x.get("datetime") or ""), reverse=True)
                             return ann_list[:req_limit]
-            except Exception:
-                pass
+            except Exception as exc:
+                # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                self.logger.debug("忽略非致命异常: %s", exc)
 
         return []
 
@@ -967,8 +934,9 @@ class PublicFallbackClient:
                     raw = resp.read()
                     try:
                         raw = gzip.decompress(raw)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                        self.logger.debug("忽略非致命异常: %s", exc)
                     data = json.loads(raw.decode("utf-8", errors="replace"))
                     boards = [x.get("BOARD_NAME") for x in data.get("ssbk", []) if x.get("BOARD_NAME")]
                     topics = [
@@ -986,8 +954,9 @@ class PublicFallbackClient:
                     raw = resp.read()
                     try:
                         raw = gzip.decompress(raw)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                        self.logger.debug("忽略非致命异常: %s", exc)
                     data = json.loads(raw.decode("utf-8", errors="replace"))
                     jbzl = data.get("jbzl", [{}])[0]
                     return {
@@ -1236,6 +1205,163 @@ class FinanceGateway:
         )
 
     @_enforce_gate_invariants
+    def _f10_industry_section(self, clean_code: str) -> dict[str, Any]:
+        """A股官方行业分类专线：证监会行业 + 申万一/二级行业 (功能块 8.2)"""
+        sum_res = self.tdx_client.get_f10(clean_code, category="summary")
+        csrc_ind, sw_ind_1, sw_ind_2, main_biz = "", "", "", ""
+        for t in sum_res.get("data", {}).get("ResultSets", []):
+            if t.get("ResultSetKey") == "table8" and t.get("Content"):
+                r = t["Content"][0]
+                cols = t.get("ColName", [])
+                if "zzhy" in cols:
+                    csrc_ind = str(r[cols.index("zzhy")] or "")
+            elif t.get("ResultSetKey") == "table1" and t.get("Content"):
+                r = t["Content"][0]
+                cols = t.get("ColName", [])
+                if "hy1" in cols:
+                    sw_ind_1 = str(r[cols.index("hy1")] or "")
+                if "hy2" in cols:
+                    sw_ind_2 = str(r[cols.index("hy2")] or "")
+                if "T017" in cols:
+                    main_biz = str(r[cols.index("T017")] or "")
+        if not csrc_ind or not sw_ind_1:
+            b_res = self.tdx_client.get_f10(clean_code, category="basic_info")
+            for t in b_res.get("data", {}).get("ResultSets", []):
+                if t.get("ResultSetKey") == "table0" and t.get("Content"):
+                    r = t["Content"][0]
+                    cols = t.get("ColName", [])
+                    if "T040" in cols and not csrc_ind:
+                        csrc_ind = str(r[cols.index("T040")] or "")
+                    if "yjhy" in cols and not sw_ind_1:
+                        sw_ind_1 = str(r[cols.index("yjhy")] or "")
+                    if "T017" in cols and not main_biz:
+                        main_biz = str(r[cols.index("T017")] or "")
+        ind_record = {
+            "证监会行业": csrc_ind or "未知",
+            "申万一级行业": sw_ind_1 or "未知",
+            "申万二级行业": sw_ind_2 or "未知",
+            "主营业务简述": main_biz or "暂无主营简述",
+        }
+        return {
+            "symbol": clean_code,
+            "category": "industry",
+            "category_name": "官方行业分类 (证监会行业与申万行业)",
+            "source": "tdx_official_vip (通达信官方授权专线)",
+            "formatted_tables": {
+                "industry": [ind_record],
+            },
+            "data": ind_record,
+            "行业说明": "A股上市公司所属中国证监会官方门类大类行业与申万一、二级细分行业分类。",
+        }
+
+    def _f10_lhb_section(self, clean_code: str, symbol: str) -> dict[str, Any]:
+        """A股权威龙虎榜异动与席位明细专线 (功能块 8.3)"""
+        lhb_data = self.tdx_client._get_ashare_lhb(clean_code)
+        inner_tables = lhb_data.get("formatted_tables", {})
+        billboard_records = inner_tables.get("billboard_records", [])
+        seat_details = inner_tables.get("seat_details", [])
+        has_records = len(billboard_records) > 0 or len(seat_details) > 0
+        res_obj = {
+            "symbol": clean_code,
+            "category": "lhb",
+            "category_name": "龙虎榜每日席位明细与游资机构博弈",
+            "source": "eastmoney_billboard (东方财富龙虎榜官方数据专线)",
+            "formatted_tables": {
+                "billboard_records": billboard_records,
+                "seat_details": seat_details,
+            },
+            "data": billboard_records[:15] if billboard_records else {"status": "近期无龙虎榜登榜记录"},
+            "龙虎榜说明": "收录股票近期异动登榜的营业部席位买卖金额、机构专用席位博弈与成交占比。",
+            "成交额口径说明": lhb_data.get("成交额口径说明", "【龙虎榜成交额口径说明】上榜总览表【市场总成交额_万元】为交易所异动统计窗口期（如连续2个或3个交易日）内的多日累计成交总额，席位明细表【占总成交比例_pct】的分母即为此多日合计总额，非单日成交额。按单日成交额读会显著低估席位实际权重。"),
+            "盘后入库说明": (
+                "【龙虎榜披露时效与规则】交易所官方龙虎榜异动及席位明细由上交所/深交所于交易日 16:30–17:30 盘后清算后统一公布入库。"
+                "盘中交易时段或清算完成前查询无当日记录；若收盘清算后仍无记录，表明该标的当日价格振幅、换手率或涨跌幅未触发交易所法定披露标准"
+                "（如非ST主板单日偏离值达7%、换手率达20%等；可结合 limit_up 工具交叉核验涨跌停及异动池）。"
+            ),
+        }
+        # 引擎层的去重/多榜次/覆盖说明必须透传，否则下游只能看到已合并的行却不知道口径
+        for k in ("席位去重口径说明", "同日多榜次说明", "席位覆盖说明", "数据完整性说明"):
+            if lhb_data.get(k):
+                res_obj[k] = lhb_data[k]
+        if not has_records:
+            res_obj["无记录说明"] = f"标的 {symbol} 近期无公开披露的龙虎榜异动登榜记录（低波动或未触发交易所异动披露机制）。"
+        return res_obj
+
+    def _f10_repurchase_section(self, clean_code: str, symbol: str, norm_cat: str) -> dict[str, Any]:
+        """A股股份回购方案与实施明细专线，区分 repurchases / buyback (功能块 8.4)"""
+        rep_data = self.tdx_client._get_ashare_repurchases(clean_code)
+        rep_list = rep_data.get("formatted_tables", {}).get("repurchases", [])
+        has_records = len(rep_list) > 0
+        # 修复 P3-2：遍历历次方案，结合完成日期与截止日纠偏上游滞留的“实施中”状态
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        for r in rep_list:
+            comp_date = r.get("方案完成日期")
+            end_date = r.get("回购实施截止日")
+            spent = float(r.get("已实施回购金额_万元") or 0.0)
+            cur_status = str(r.get("回购进展状态", ""))
+            is_done = False
+            if comp_date:
+                is_done = True
+            elif end_date and str(end_date) < today_str and spent > 0:
+                is_done = True
+            elif "完成" in cur_status or "终止" in cur_status:
+                is_done = True
+            
+            if is_done:
+                fin_date = comp_date or end_date or ""
+                r["回购进展状态"] = f"已完成 (完成日: {fin_date})" if fin_date else "已完成"
+
+        if norm_cat == "buyback":
+            cat_name = "股份回购实施进展与累计聚合概览 (Buyback Overview)"
+            total_spent = round(sum(float(r.get("已实施回购金额_万元") or 0.0) for r in rep_list), 2)
+            completed_count = sum(1 for r in rep_list if "完成" in str(r.get("回购进展状态", "")) or "终止" in str(r.get("回购进展状态", "")))
+            ongoing_count = len(rep_list) - completed_count
+            latest_plan_date = rep_list[0].get("公告日期") if rep_list else None
+            latest_status = rep_list[0].get("回购进展状态") if rep_list else "无"
+            buyback_summary = {
+                "累计已实施回购总额_万元": total_spent,
+                "回购计划总数": len(rep_list),
+                "当前实施中方案数": ongoing_count,
+                "已实施完成方案数": completed_count,
+                "最新方案公告日": latest_plan_date,
+                "最新方案实施进度": latest_status,
+            }
+            tbls = {
+                "buyback_summary": [buyback_summary],
+                "buyback_details": rep_list,
+            }
+            out_data = {
+                "summary": buyback_summary,
+                "details": rep_list,
+            }
+        else:
+            cat_name = "股份回购方案与实施明细"
+            tbls = {
+                "repurchases": rep_list,
+            }
+            out_data = rep_list
+
+        res_obj = {
+            "symbol": clean_code,
+            "category": norm_cat,
+            "category_name": cat_name,
+            "source": "eastmoney_repurchases (东方财富A股回购权威专线)",
+            "formatted_tables": tbls,
+            "data": out_data,
+            "回购说明": "A股上市公司实施股份回购的最新进展、回购金额上限/下限、已回购股数与方案进度。",
+            "表关系说明": (
+                "【参数分工与表关系声明】buyback 聚焦于回购累计实施规模与状态的宏观聚合概览 (提供 buyback_summary 统计与 buyback_details 明细)；"
+                "repurchases 聚焦于历次方案明细流水列表 (repurchases)。"
+                "buyback.buyback_details 与 repurchases.repurchases 数据完全同源；"
+                "下游取数指引：若需宏观统计全貌请传 category=buyback，若只需遍历流水明细请传 category=repurchases。"
+            ),
+        }
+        if norm_cat == "buyback":
+            res_obj["参数说明"] = "buyback 聚焦于回购累计实施规模与状态的高维聚合概览 (buyback_summary)；repurchases 聚焦于历次方案明细流水。"
+        if not has_records:
+            res_obj["无记录说明"] = f"标的 {symbol} 近期无公开披露的股份回购方案或实施记录。"
+        return res_obj
+
     def stock_f10(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """工具 5：F10 深度基本面（热点题材板块族谱、业绩预告、股东变动、龙虎榜、限售解禁）"""
         symbol = arguments.get("symbol", "").strip()
@@ -1342,52 +1468,7 @@ class FinanceGateway:
         # - 输出：结构化返回官方行业分类字典
         # =========================================================================
         if norm_cat == "industry":
-            sum_res = self.tdx_client.get_f10(clean_code, category="summary")
-            csrc_ind, sw_ind_1, sw_ind_2, main_biz = "", "", "", ""
-            for t in sum_res.get("data", {}).get("ResultSets", []):
-                if t.get("ResultSetKey") == "table8" and t.get("Content"):
-                    r = t["Content"][0]
-                    cols = t.get("ColName", [])
-                    if "zzhy" in cols:
-                        csrc_ind = str(r[cols.index("zzhy")] or "")
-                elif t.get("ResultSetKey") == "table1" and t.get("Content"):
-                    r = t["Content"][0]
-                    cols = t.get("ColName", [])
-                    if "hy1" in cols:
-                        sw_ind_1 = str(r[cols.index("hy1")] or "")
-                    if "hy2" in cols:
-                        sw_ind_2 = str(r[cols.index("hy2")] or "")
-                    if "T017" in cols:
-                        main_biz = str(r[cols.index("T017")] or "")
-            if not csrc_ind or not sw_ind_1:
-                b_res = self.tdx_client.get_f10(clean_code, category="basic_info")
-                for t in b_res.get("data", {}).get("ResultSets", []):
-                    if t.get("ResultSetKey") == "table0" and t.get("Content"):
-                        r = t["Content"][0]
-                        cols = t.get("ColName", [])
-                        if "T040" in cols and not csrc_ind:
-                            csrc_ind = str(r[cols.index("T040")] or "")
-                        if "yjhy" in cols and not sw_ind_1:
-                            sw_ind_1 = str(r[cols.index("yjhy")] or "")
-                        if "T017" in cols and not main_biz:
-                            main_biz = str(r[cols.index("T017")] or "")
-            ind_record = {
-                "证监会行业": csrc_ind or "未知",
-                "申万一级行业": sw_ind_1 or "未知",
-                "申万二级行业": sw_ind_2 or "未知",
-                "主营业务简述": main_biz or "暂无主营简述",
-            }
-            return _apply_limit_post({
-                "symbol": clean_code,
-                "category": "industry",
-                "category_name": "官方行业分类 (证监会行业与申万行业)",
-                "source": "tdx_official_vip (通达信官方授权专线)",
-                "formatted_tables": {
-                    "industry": [ind_record],
-                },
-                "data": ind_record,
-                "行业说明": "A股上市公司所属中国证监会官方门类大类行业与申万一、二级细分行业分类。",
-            })
+            return _apply_limit_post(self._f10_industry_section(clean_code))
 
         # =========================================================================
         # 【功能块 8.3：A股权威龙虎榜异动与席位明细专线 (修复 A (P1) 双层嵌套与假否定句)】
@@ -1397,36 +1478,7 @@ class FinanceGateway:
         # - 输出：结构化龙虎榜明细字典
         # =========================================================================
         if norm_cat == "lhb":
-            lhb_data = self.tdx_client._get_ashare_lhb(clean_code)
-            inner_tables = lhb_data.get("formatted_tables", {})
-            billboard_records = inner_tables.get("billboard_records", [])
-            seat_details = inner_tables.get("seat_details", [])
-            has_records = len(billboard_records) > 0 or len(seat_details) > 0
-            res_obj = {
-                "symbol": clean_code,
-                "category": "lhb",
-                "category_name": "龙虎榜每日席位明细与游资机构博弈",
-                "source": "eastmoney_billboard (东方财富龙虎榜官方数据专线)",
-                "formatted_tables": {
-                    "billboard_records": billboard_records,
-                    "seat_details": seat_details,
-                },
-                "data": billboard_records[:15] if billboard_records else {"status": "近期无龙虎榜登榜记录"},
-                "龙虎榜说明": "收录股票近期异动登榜的营业部席位买卖金额、机构专用席位博弈与成交占比。",
-                "成交额口径说明": lhb_data.get("成交额口径说明", "【龙虎榜成交额口径说明】上榜总览表【市场总成交额_万元】为交易所异动统计窗口期（如连续2个或3个交易日）内的多日累计成交总额，席位明细表【占总成交比例_pct】的分母即为此多日合计总额，非单日成交额。按单日成交额读会显著低估席位实际权重。"),
-                "盘后入库说明": (
-                    "【龙虎榜披露时效与规则】交易所官方龙虎榜异动及席位明细由上交所/深交所于交易日 16:30–17:30 盘后清算后统一公布入库。"
-                    "盘中交易时段或清算完成前查询无当日记录；若收盘清算后仍无记录，表明该标的当日价格振幅、换手率或涨跌幅未触发交易所法定披露标准"
-                    "（如非ST主板单日偏离值达7%、换手率达20%等；可结合 limit_up 工具交叉核验涨跌停及异动池）。"
-                ),
-            }
-            # 引擎层的去重/多榜次/覆盖说明必须透传，否则下游只能看到已合并的行却不知道口径
-            for k in ("席位去重口径说明", "同日多榜次说明", "席位覆盖说明", "数据完整性说明"):
-                if lhb_data.get(k):
-                    res_obj[k] = lhb_data[k]
-            if not has_records:
-                res_obj["无记录说明"] = f"标的 {symbol} 近期无公开披露的龙虎榜异动登榜记录（低波动或未触发交易所异动披露机制）。"
-            return _apply_limit_post(res_obj)
+            return _apply_limit_post(self._f10_lhb_section(clean_code, symbol))
 
         # =========================================================================
         # 【功能块 8.4：A股股份回购方案与实施明细专线 (修复 P2-7 与 P2-3)】
@@ -1435,78 +1487,7 @@ class FinanceGateway:
         # - 输出：结构化回购明细字典
         # =========================================================================
         if norm_cat in ("repurchases", "buyback"):
-            rep_data = self.tdx_client._get_ashare_repurchases(clean_code)
-            rep_list = rep_data.get("formatted_tables", {}).get("repurchases", [])
-            has_records = len(rep_list) > 0
-            # 修复 P3-2：遍历历次方案，结合完成日期与截止日纠偏上游滞留的“实施中”状态
-            today_str = datetime.date.today().strftime("%Y-%m-%d")
-            for r in rep_list:
-                comp_date = r.get("方案完成日期")
-                end_date = r.get("回购实施截止日")
-                spent = float(r.get("已实施回购金额_万元") or 0.0)
-                cur_status = str(r.get("回购进展状态", ""))
-                is_done = False
-                if comp_date:
-                    is_done = True
-                elif end_date and str(end_date) < today_str and spent > 0:
-                    is_done = True
-                elif "完成" in cur_status or "终止" in cur_status:
-                    is_done = True
-                
-                if is_done:
-                    fin_date = comp_date or end_date or ""
-                    r["回购进展状态"] = f"已完成 (完成日: {fin_date})" if fin_date else "已完成"
-
-            if norm_cat == "buyback":
-                cat_name = "股份回购实施进展与累计聚合概览 (Buyback Overview)"
-                total_spent = round(sum(float(r.get("已实施回购金额_万元") or 0.0) for r in rep_list), 2)
-                completed_count = sum(1 for r in rep_list if "完成" in str(r.get("回购进展状态", "")) or "终止" in str(r.get("回购进展状态", "")))
-                ongoing_count = len(rep_list) - completed_count
-                latest_plan_date = rep_list[0].get("公告日期") if rep_list else None
-                latest_status = rep_list[0].get("回购进展状态") if rep_list else "无"
-                buyback_summary = {
-                    "累计已实施回购总额_万元": total_spent,
-                    "回购计划总数": len(rep_list),
-                    "当前实施中方案数": ongoing_count,
-                    "已实施完成方案数": completed_count,
-                    "最新方案公告日": latest_plan_date,
-                    "最新方案实施进度": latest_status,
-                }
-                tbls = {
-                    "buyback_summary": [buyback_summary],
-                    "buyback_details": rep_list,
-                }
-                out_data = {
-                    "summary": buyback_summary,
-                    "details": rep_list,
-                }
-            else:
-                cat_name = "股份回购方案与实施明细"
-                tbls = {
-                    "repurchases": rep_list,
-                }
-                out_data = rep_list
-
-            res_obj = {
-                "symbol": clean_code,
-                "category": norm_cat,
-                "category_name": cat_name,
-                "source": "eastmoney_repurchases (东方财富A股回购权威专线)",
-                "formatted_tables": tbls,
-                "data": out_data,
-                "回购说明": "A股上市公司实施股份回购的最新进展、回购金额上限/下限、已回购股数与方案进度。",
-                "表关系说明": (
-                    "【参数分工与表关系声明】buyback 聚焦于回购累计实施规模与状态的宏观聚合概览 (提供 buyback_summary 统计与 buyback_details 明细)；"
-                    "repurchases 聚焦于历次方案明细流水列表 (repurchases)。"
-                    "buyback.buyback_details 与 repurchases.repurchases 数据完全同源；"
-                    "下游取数指引：若需宏观统计全貌请传 category=buyback，若只需遍历流水明细请传 category=repurchases。"
-                ),
-            }
-            if norm_cat == "buyback":
-                res_obj["参数说明"] = "buyback 聚焦于回购累计实施规模与状态的高维聚合概览 (buyback_summary)；repurchases 聚焦于历次方案明细流水。"
-            if not has_records:
-                res_obj["无记录说明"] = f"标的 {symbol} 近期无公开披露的股份回购方案或实施记录。"
-            return _apply_limit_post(res_obj)
+            return _apply_limit_post(self._f10_repurchase_section(clean_code, symbol, norm_cat))
 
         # A 股标的：若请求 dividends/bonus，路由至真实分红派息专线 (修复 Issue 4)
         if norm_cat == "dividends":
@@ -1575,8 +1556,9 @@ class FinanceGateway:
                                     zgb_idx = c_names.index("zgb")
                                     zgb_total_shares = float(t["Content"][0][zgb_idx] or 0.0)
                                     break
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                        self.logger.debug("忽略非致命异常: %s", exc)
                     if zgb_total_shares <= 0.0 and holder_total_shares > 0.0:
                         zgb_total_shares = holder_total_shares
 
@@ -1854,8 +1836,9 @@ class FinanceGateway:
                                 b_amt = b.get("amount")
                                 if b_time and b_amt and float(b_amt) > 0:
                                     kline_map[b_time] = round(float(b_amt) / 10000.0, 2)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                            self.logger.debug("忽略非致命异常: %s", exc)
 
                         for row in t0_data:
                             # 预设统一列名，确保所有标的与行的列结构完全一致，杜绝 8 列与 10 列漂移 (修复 P3)
@@ -1879,8 +1862,9 @@ class FinanceGateway:
                                         if amt and float(amt) > 0:
                                             row["当日成交金额_万元"] = round(float(amt) / 10000.0, 2)
                                             row["成交额补充说明"] = "盘口实时成交额补充(盘中清算前)"
-                                    except Exception:
-                                        pass
+                                    except Exception as exc:
+                                        # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                                        self.logger.debug("忽略非致命异常: %s", exc)
                                 # 修复 P3-7：若无日K线与盘口补齐，主动注入历史行缺失提示，杜绝缺失无提示
                                 if row.get("成交额补充说明") is None:
                                     row["成交额补充说明"] = "历史异动上游专线未单独披露成交金额，日K线回溯超出覆盖范围"
@@ -1942,8 +1926,9 @@ class FinanceGateway:
                                     if item_unl > 0:
                                         item["占总股本比例_pct"] = round((item_unl / zgb_wan) * 100.0, 3)
                             tdx_res["多阶段解禁明细"] = fb_unlocks
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                        self.logger.debug("忽略非致命异常: %s", exc)
                 elif norm_cat in ("summary", "indicators"):
                     t5_rows = formatted_tables.get("table5", [])
                     # 检查整张 F10 摘要/指标表是否具备任何实质非空非 None 业务数据
@@ -2100,8 +2085,9 @@ class FinanceGateway:
                 return _apply_limit_post(tdx_res)
         except ValueError:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+            self.logger.debug("忽略非致命异常: %s", exc)
 
         # 2. 通达信未开放或异常时，自动平滑降级至公开数据中心高可用 F10
         fallback_data = self.fallback_client.get_f10(symbol=symbol, category=norm_cat)
@@ -2435,8 +2421,9 @@ class FinanceGateway:
                                         row["市盈率可用状态"] = "亏损不可用"
                                         row["市盈率亏损标记"] = True
                                         row["亏损警示"] = f"校准后滚动市盈率({real_ttm_val}倍)为负，代表标的过去4季处于亏损状态，不可用于横比、排序或PEG推演。"
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                        self.logger.debug("忽略非致命异常: %s", exc)
 
                 # 检验 PB 是否由于快照批处理入库滞后而落后于最新报告期 (修复 D4 与 P1-1)
                 curr_pb = row.get("市净率_PB_昨收") or row.get("市净率_PB")
@@ -2461,8 +2448,9 @@ class FinanceGateway:
                                         # 昨收换期重算仅作为显式独立键挂载供特殊需要参考
                                         row["市净率_PB_昨收_换期重算"] = pb_yishou
                                     row["PB校准说明"] = calib_note
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 容错分支：失败不影响主流程，仅调试留痕便于溯源
+                        self.logger.debug("忽略非致命异常: %s", exc)
 
                 loss_clause = f" 【高危警示·亏损股市盈率不可用】当前滚动市盈率为负值({pe_ttm_val}倍)，代表公司处于亏损状态，负市盈率属于亏损代号而非低估值，严禁用于横比、排序或PEG公式计算！" if (pe_ttm_val is not None and str(pe_ttm_val).startswith("-")) else ""
                 row["口径辨析提示"] = (

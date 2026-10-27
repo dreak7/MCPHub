@@ -13,6 +13,7 @@ import re
 import sys
 from pathlib import Path
 import tkinter as tk
+from typing import Any
 from tkinter import ttk, messagebox
 
 # 启用 Windows 高分屏 (High DPI) 清晰度渲染，避免界面模糊
@@ -92,17 +93,19 @@ def save_api_key_to_dotenv(key_name: str, key_value: str) -> None:
     lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
     found = False
     new_lines: list[str] = []
+    # 值内的换行会截断本行并向 .env 注入额外键值对，破坏配置结构，先行剔除
+    safe_value = "".join(key_value.split())
 
     pattern = re.compile(rf"^\s*{re.escape(key_name)}\s*=")
     for line in lines:
         if pattern.match(line):
-            new_lines.append(f"{key_name}={key_value.strip()}")
+            new_lines.append(f"{key_name}={safe_value}")
             found = True
         else:
             new_lines.append(line)
 
     if not found:
-        new_lines.append(f"{key_name}={key_value.strip()}")
+        new_lines.append(f"{key_name}={safe_value}")
 
     ENV_PATH.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
@@ -323,6 +326,10 @@ class ConfigGuiApp:
         prov_id = self.prov_id_var.get().strip()
         prov_type = self.prov_type_var.get().strip()
         endpoint = self.endpoint_var.get().strip()
+        # 缺失读取修复：这两个控件值此前从未取出，导致下方 NameError
+        env_key_name = self.env_name_var.get().strip()
+        enabled = bool(self.enabled_var.get())
+
         # 1. 字段基础校验与异常防御
         if not prov_id or not re.match(r"^[a-zA-Z0-9_\-]+$", prov_id):
             messagebox.showerror("输入错误", "引擎标识 ID 不能为空，且只能包含字母、数字、下划线与短横线！")
