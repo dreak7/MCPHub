@@ -312,7 +312,10 @@ class AStockEngine(BaseMarketEngine):
                 err_msg = f"HTTP {exc.code} {exc.reason}"
                 try:
                     detail = exc.read().decode("utf-8", errors="replace")
-                    err_msg += f": {detail}"
+                    # 上游错误体可能回显请求头且体积大，只保留 TDX 错误码段（形如 E|-7405|S14040(-7405)），其余丢弃
+                    m = re.match(r"\s*(E\|-\d+\|[^,:]{0,40})", detail)
+                    if m:
+                        err_msg += f": {m.group(1)}"
                 except Exception:
                     pass
                 raise RuntimeError(f"TDX API request failed ({err_msg})") from exc
