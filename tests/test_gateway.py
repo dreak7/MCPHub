@@ -1007,7 +1007,7 @@ class AuditV141RemediationTest(unittest.TestCase):
 
         extract_gw = ExtractGateway(web_extract_cfg, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
         with patch.dict(os.environ, mock_env, clear=False):
-            with patch.object(extract_gw, "_extract", side_effect=fake_failing_extract_call):
+            with patch.object(extract_gw, "_validate_public_url"), patch.object(extract_gw, "_extract", side_effect=fake_failing_extract_call):
                 res = extract_gw.extract({"urls": ["https://example.com/article"]})
         self.assertEqual(expected_extract_order, called_extract)
 

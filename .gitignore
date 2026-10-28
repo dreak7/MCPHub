@@ -3,11 +3,4 @@ logs/
 state/
 __pycache__/
 *.py[cod]
-README_DETAILED.md
-.agents/rules/framework_upgrade_roadmap.md
 
-# 框架重构基准快照与脚手架 (Refactoring Scaffolding & Snapshots)
-tests/snapshots/
-scripts/record_baseline_snapshots.py
-tests/snapshot_utils.py
-tests/test_snapshots.py

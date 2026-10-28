@@ -2,5 +2,6 @@
   "server_name": "local-search-fallback-gateway",
   "provider_config_files": ["providers/*.json"],
   "log_file": "../logs/gateway.log",
-  "state_file": "../state/provider-state.json"
+  "state_file": "../state/provider-state.json",
+  "max_tool_calls_per_minute": 60
 }

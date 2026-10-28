@@ -47,6 +47,8 @@
       "cooldown_seconds": 3600,
       "quota_cooldown_seconds": 259200,
       "cache_ttl_seconds": 1800,
+      "max_cache_item_characters": 200000,
+      "max_cache_total_bytes": 20971520,
       "providers": [
         {
           "id": "exa",
