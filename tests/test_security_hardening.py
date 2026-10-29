@@ -17,6 +17,24 @@ class SecurityHardeningTest(unittest.TestCase):
         with self.assertRaises(SearchError):
             gateway._validate_endpoint("test", "http://example.invalid/search")
 
+    def test_endpoint_allowed_hosts_rejects_unlisted_host(self) -> None:
+        gateway = SearchGateway({"providers": []}, Path(tempfile.mkdtemp()) / "state.json", logging.getLogger("security-test"))
+        with self.assertRaises(SearchError) as ctx:
+            gateway._validate_endpoint("test", "https://attacker.example/search", ["api.example.com"])
+        self.assertNotIn("attacker.example", str(ctx.exception))
+
+    def test_provider_response_body_has_size_limit(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        gateway = SearchGateway({"providers": []}, Path(tempfile.mkdtemp()) / "state.json", logging.getLogger("security-test"))
+        response = MagicMock()
+        response.read.return_value = b"x" * (5 * 1024 * 1024 + 1)
+        response.__enter__.return_value = response
+        with patch("mcp_gateway.search._SECURE_OPENER.open", return_value=response):
+            with self.assertRaises(SearchError) as ctx:
+                gateway._post("https://api.example.com/search", {}, {}, 1)
+        self.assertIn("too large", str(ctx.exception))
+
     def test_unexpected_upstream_exception_is_not_disclosed_to_model(self) -> None:
         secret = "SECRET_SHOULD_NOT_LEAK"
 

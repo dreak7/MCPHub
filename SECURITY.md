@@ -8,6 +8,7 @@
 - Tool exceptions do not return arbitrary upstream response bodies to the
   model. Search, page, news, and documentation results are explicitly marked
   as untrusted external data.
+- Provider response bodies are capped at 5 MiB before decoding.
 - Extracted-page caches have a 200,000-character per-entry limit, a 20 MiB
   aggregate limit, TTL cleanup, and owner-only mode where the platform honors
   POSIX file modes.

@@ -341,6 +341,16 @@ class ExtractGatewayTest(unittest.TestCase):
         with self.assertRaises(SearchError):
             gateway.extract({"urls": ["http://127.0.0.1:8080/admin"]})
 
+    def test_invalid_public_url_does_not_disclose_secrets(self):
+        gateway = ExtractGateway({"providers": []}, Path(tempfile.mkdtemp()) / "state.json", FakeLogger())
+        for url in (
+            "https://user:TOPSECRET@example.com/",
+            "https://example.com:8443/path?token=TOPSECRET",
+        ):
+            with self.subTest(url=url), self.assertRaises(SearchError) as ctx:
+                gateway._validate_public_url(url)
+            self.assertNotIn("TOPSECRET", str(ctx.exception))
+
     @patch.dict(os.environ, {"TAVILY_API_KEY": "a"}, clear=False)
     def test_extract_falls_back_after_rate_limit(self):
         gateway = ExtractGateway({"cooldown_seconds": 60, "providers": [
@@ -514,6 +524,26 @@ class ExtractGatewayTest(unittest.TestCase):
         self.assertTrue(cache_file.is_file())
         self.assertEqual(".md", cache_file.suffix)
         self.assertEqual(full_text, cache_file.read_text(encoding="utf-8"))
+
+    def test_extract_cache_limit_reports_saved_length(self):
+        tmp_dir = Path(tempfile.mkdtemp())
+        gateway = ExtractGateway(
+            {"cache_ttl_seconds": 1800, "max_cache_item_characters": 100, "providers": [
+                {"id": "exa", "enabled": True, "priority": 10, "api_key_env": "EXA_API_KEY", "endpoint": "https://example.test/exa"},
+            ]}, tmp_dir / "state.json", FakeLogger(),
+        )
+        full_text = "x" * 250
+        fake_res = [{"url": "https://example.com/long", "title": "Long", "content": full_text, "raw_content": full_text}]
+        with patch.dict(os.environ, {"EXA_API_KEY": "test-key"}), \
+             patch.object(gateway, "_validate_public_url"), \
+             patch.object(gateway, "_extract", return_value=fake_res):
+            first = gateway.extract({"urls": ["https://example.com/long"]})["results"][0]
+            cached = gateway.extract({"urls": ["https://example.com/long"]})["results"][0]
+
+        self.assertEqual(100, first["total_characters"])
+        self.assertEqual(first["total_characters"], cached["total_characters"])
+        self.assertEqual(100, len(Path(first["cache_path"]).read_text(encoding="utf-8")))
+        self.assertNotIn("全文共", first["paging_hint"])
 
 
 class SearchCooldownTest(unittest.TestCase):
@@ -708,6 +738,53 @@ class CustomCapabilityAndGuiTest(unittest.TestCase):
             save_api_key_to_dotenv("OLD_KEY", "new_val")
             # 2. 追加新变量
             save_api_key_to_dotenv("NEW_KEY", "secret_123")
+            # 3. 粘贴多行内容不得注入额外环境变量
+            save_api_key_to_dotenv("MULTILINE_KEY", "first_line\nINJECTED_KEY=bad SECOND_INJECTED=bad")
+
+        content = tmp_env.read_text(encoding="utf-8")
+        self.assertIn("OLD_KEY=new_val", content)
+        self.assertIn("NEW_KEY=secret_123", content)
+        self.assertIn("MULTILINE_KEY=first_lineINJECTED_KEY=bad SECOND_INJECTED=bad", content)
+        self.assertNotIn("\nINJECTED_KEY=", content)
+        self.assertNotIn("\nSECOND_INJECTED=", content)
+
+    def test_gui_save_configuration_uses_form_values(self):
+        """保存流程必须读取环境变量名和启用状态控件，而非未定义变量。"""
+        from unittest.mock import Mock
+
+        import mcp_gateway.gui_add_provider as gui_mod
+
+        class Var:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        target = tmp_dir / "search.json"
+        cap_def = {"providers": []}
+        target.write_text(json.dumps({"capabilities": {"web_search": cap_def}}), encoding="utf-8")
+        app = gui_mod.ConfigGuiApp.__new__(gui_mod.ConfigGuiApp)
+        app.mode_var = Var("existing")
+        app.prov_id_var = Var("tavily-search")
+        app.prov_type_var = Var("tavily-search")
+        app.endpoint_var = Var("https://api.tavily.com/search")
+        app.priority_var = Var(20)
+        app.enabled_var = Var(False)
+        app.env_name_var = Var("TAVILY_API_KEY")
+        app.api_key_var = Var("")
+        app.existing_cat_var = Var("web_search")
+        app.capabilities_map = {"web_search": (target, cap_def)}
+        app.existing_cat_cb = Mock()
+
+        with patch.object(gui_mod, "PROVIDERS_DIR", tmp_dir), patch.object(gui_mod.messagebox, "showinfo"):
+            app._save_configuration()
+
+        saved = json.loads(target.read_text(encoding="utf-8"))["capabilities"]["web_search"]["providers"][0]
+        self.assertFalse(saved["enabled"])
+        self.assertEqual("TAVILY_API_KEY", saved["api_key_env"])
+        self.assertEqual(["api.tavily.com"], saved["allowed_hosts"])
 
     def test_hermes_helper_snippets(self):
         """测试 Hermes Desktop 配置片段生成器能够正确获取解释器与项目文件绝对路径"""
@@ -836,9 +913,11 @@ class AuditV141RemediationTest(unittest.TestCase):
             time.sleep(0.5)
             return [{"title": "Slow Result", "url": "https://slow.com/b", "snippet": "late", "published_date": ""}]
 
+        started = time.monotonic()
         with patch.dict(os.environ, {"FAST_KEY": "k1", "SLOW_KEY": "k2"}):
             with patch.object(gw, "_call", side_effect=mock_call):
                 res = gw.multi_search({"query": "test"})
+                self.assertLess(time.monotonic() - started, 0.4)
                 self.assertEqual(1, len(res["results"]))
                 self.assertEqual("Fast Result", res["results"][0]["title"])
                 self.assertTrue(any(f["provider"] == "slow" for f in res["provider_failures"]))
@@ -1092,6 +1171,14 @@ class Context7IntegrationTest(unittest.TestCase):
             self.assertEqual("context7", res["provider"])
             self.assertEqual(1, mock_call.call_count)
 
+    def test_context7_anonymous_allowed_in_multi_search(self):
+        with patch.dict(os.environ, {}, clear=True):
+            mock_results = [{"title": "Snippet", "url": "https://example.com", "snippet": "code", "published_date": ""}]
+            with patch.object(self.gateway, "_call", return_value=mock_results) as mock_call:
+                res = self.gateway.multi_search({"query": "fastapi middleware"})
+            self.assertEqual(["context7"], res["active_providers"])
+            self.assertEqual(1, mock_call.call_count)
+
     # =========================================================================
     # 【测试用例：验证 Context7 404 (no_documentation_found) 容错为正常空列表】
     # =========================================================================
@@ -1112,6 +1199,19 @@ class Context7IntegrationTest(unittest.TestCase):
         with patch("mcp_gateway.search._SECURE_OPENER.open", side_effect=http_404):
             data = self.gateway._get("https://context7.com/api/v3/search", {}, {"query": "non_existent_lib"}, 25)
             self.assertEqual({"codeSnippets": []}, data)
+
+    def test_context7_other_404_is_not_silently_accepted(self):
+        import io
+        from urllib.error import HTTPError
+
+        http_404 = HTTPError(
+            "https://context7.com/api/v3/search", 404, "Not Found", {},
+            io.BytesIO(b'{"error": "invalid_endpoint"}'),
+        )
+        with patch("mcp_gateway.search._SECURE_OPENER.open", side_effect=http_404):
+            with self.assertRaises(SearchError) as ctx:
+                self.gateway._get("https://context7.com/api/v3/search", {}, {"query": "react"}, 25)
+        self.assertEqual(404, ctx.exception.status)
 
     # =========================================================================
     # 【测试用例：验证 Context7 402 配额超限触发长冷却】

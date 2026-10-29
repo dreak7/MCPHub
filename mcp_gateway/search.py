@@ -43,6 +43,7 @@ class NoRedirectHandler(HTTPRedirectHandler):
         raise HTTPError(req.full_url, code, f"HTTP redirect ({code}) is disallowed for security", headers, fp)
 
 _SECURE_OPENER = build_opener(NoRedirectHandler)
+_MAX_PROVIDER_RESPONSE_BYTES = 5 * 1024 * 1024
 
 
 # =========================================================================
@@ -278,7 +279,7 @@ class SearchGateway:
             key_name = provider.get("api_key_env")
             api_key = os.getenv(key_name, "") if isinstance(key_name, str) else ""
             engine_type = provider.get("type") or provider_id
-            if not api_key and engine_type not in ("anysearch", "jina"):
+            if not api_key and engine_type not in ("anysearch", "jina", "context7"):
                 failures.append(ProviderFailure(provider_id, "API key is not configured"))
                 continue
             if not self.cooldowns.is_available(self._cooldown_id(provider_id), current_key=api_key):
@@ -294,7 +295,10 @@ class SearchGateway:
             raise SearchError(f"No search provider was available ({detail}).{extra}", retryable=False)
 
         provider_results: list[tuple[str, list[dict[str, Any]]]] = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(ready_providers)) as executor:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(ready_providers))
+        timed_out = False
+        future_to_provider = {}
+        try:
             future_to_provider = {
                 executor.submit(
                     self._call,
@@ -307,30 +311,32 @@ class SearchGateway:
                 ): (provider.get("id", "unknown"), api_key)
                 for provider, api_key in ready_providers
             }
-            try:
-                for future in concurrent.futures.as_completed(future_to_provider, timeout=float(timeout)):
-                    prov_id, prov_key = future_to_provider[future]
-                    try:
-                        res = future.result()
-                        if isinstance(res, list):
-                            provider_results.append((prov_id, res))
-                    except SearchError as exc:
-                        self.logger.warning("Multi-search provider %s failed: %s", prov_id, exc)
-                        failures.append(ProviderFailure(prov_id, str(exc)))
-                        if exc.retryable:
-                            is_quota = self._is_quota_exhausted(exc)
-                            cd = quota_cooldown_seconds if is_quota else cooldown_seconds
-                            reason_type = "quota" if is_quota else "rate_limit"
-                            self.cooldowns.set(self._cooldown_id(prov_id), cd, reason_type=reason_type, api_key=prov_key)
-                    except Exception as exc:
-                        self.logger.exception("Multi-search provider %s unexpected error: %s", prov_id, exc)
-                        failures.append(ProviderFailure(prov_id, f"Unexpected error: {exc}"))
-            except (concurrent.futures.TimeoutError, TimeoutError):
-                self.logger.warning("Multi-search exceeded global timeout of %ss; proceeding with partial results", timeout)
-                for future, (p_id, p_key) in future_to_provider.items():
-                    if not future.done():
-                        future.cancel()
-                        failures.append(ProviderFailure(p_id, f"Global timeout of {timeout}s exceeded"))
+            for future in concurrent.futures.as_completed(future_to_provider, timeout=float(timeout)):
+                prov_id, prov_key = future_to_provider[future]
+                try:
+                    res = future.result()
+                    if isinstance(res, list):
+                        provider_results.append((prov_id, res))
+                except SearchError as exc:
+                    self.logger.warning("Multi-search provider %s failed: %s", prov_id, exc)
+                    failures.append(ProviderFailure(prov_id, str(exc)))
+                    if exc.retryable:
+                        is_quota = self._is_quota_exhausted(exc)
+                        cd = quota_cooldown_seconds if is_quota else cooldown_seconds
+                        reason_type = "quota" if is_quota else "rate_limit"
+                        self.cooldowns.set(self._cooldown_id(prov_id), cd, reason_type=reason_type, api_key=prov_key)
+                except Exception as exc:
+                    self.logger.warning("Multi-search provider %s unexpected error: %s", prov_id, type(exc).__name__)
+                    failures.append(ProviderFailure(prov_id, "Unexpected provider error"))
+        except (concurrent.futures.TimeoutError, TimeoutError):
+            timed_out = True
+            self.logger.warning("Multi-search exceeded global timeout of %ss; proceeding with partial results", timeout)
+            for future, (p_id, p_key) in future_to_provider.items():
+                if not future.done():
+                    future.cancel()
+                    failures.append(ProviderFailure(p_id, f"Global timeout of {timeout}s exceeded"))
+        finally:
+            executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
 
         if not provider_results:
             detail = "; ".join(f"{item.provider}: {item.reason}" for item in failures) or "All providers failed"
@@ -565,7 +571,7 @@ class SearchGateway:
     # - 输出：无（若校验失败抛出不可重试的 SearchError）
     # =========================================================================
     @classmethod
-    def _validate_endpoint(cls, provider_id: str, endpoint: Any) -> None:
+    def _validate_endpoint(cls, provider_id: str, endpoint: Any, allowed_hosts: Any = None) -> None:
         if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
             raise SearchError(f"{provider_id}: endpoint must be an HTTPS URL", retryable=False)
         parsed = urlsplit(endpoint)
@@ -574,6 +580,11 @@ class SearchGateway:
         if parsed.port not in (None, 443):
             raise SearchError(f"{provider_id}: endpoint uses a non-standard port: {parsed.port}", retryable=False)
         hostname = parsed.hostname.lower()
+        if allowed_hosts is not None:
+            if not isinstance(allowed_hosts, list) or not allowed_hosts or not all(isinstance(host, str) for host in allowed_hosts):
+                raise SearchError(f"{provider_id}: allowed_hosts must be a non-empty string array", retryable=False)
+            if hostname not in {host.lower() for host in allowed_hosts}:
+                raise SearchError(f"{provider_id}: endpoint host is not allowed", retryable=False)
         if hostname in ("localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"):
             raise SearchError(f"{provider_id}: endpoint resolves to a non-public address: {hostname}", retryable=False)
         try:
@@ -593,7 +604,7 @@ class SearchGateway:
     def _call(self, provider: dict[str, Any], query: str, max_results: int, arguments: dict[str, Any], api_key: str, timeout: Any) -> list[dict[str, Any]]:
         provider_id = provider["id"]
         endpoint = provider.get("endpoint")
-        self._validate_endpoint(provider_id, endpoint)
+        self._validate_endpoint(provider_id, endpoint, provider.get("allowed_hosts"))
         engine_type = provider.get("type") or provider_id
         if engine_type in ("tavily-search", "tavily"):
             return self._tavily(endpoint, api_key, query, max_results, arguments, timeout)
@@ -791,13 +802,20 @@ class SearchGateway:
             return "\n".join(str(item) for item in value)
         return str(value or "")
 
+    @staticmethod
+    def _read_response_body(response: Any) -> str:
+        body = response.read(_MAX_PROVIDER_RESPONSE_BYTES + 1)
+        if len(body) > _MAX_PROVIDER_RESPONSE_BYTES:
+            raise SearchError("Provider response body is too large", retryable=False)
+        return body.decode("utf-8", errors="replace")
+
     def _post(self, endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeout: Any) -> dict[str, Any]:
         request = Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", **headers}, method="POST")
         try:
             with _SECURE_OPENER.open(request, timeout=float(timeout)) as response:
-                body = response.read().decode("utf-8", errors="replace")
+                body = self._read_response_body(response)
         except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
+            body = self._read_response_body(exc)
             # AnySearch may return newly generated credentials in a 402 body. Never
             # put provider response bodies into logs or MCP output.
             retryable = exc.code in (402, 408, 429, 432) or 500 <= exc.code <= 599 or ((exc.code in (403, 432)) and self._is_quota_message(body)) or self._is_quota_message(body)
@@ -829,9 +847,9 @@ class SearchGateway:
         request = Request(url, headers={"Accept": "application/json", **headers}, method="GET")
         try:
             with _SECURE_OPENER.open(request, timeout=float(timeout)) as response:
-                body = response.read().decode("utf-8", errors="replace")
+                body = self._read_response_body(response)
         except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
+            body = self._read_response_body(exc)
             # Context7 专属容错：404 no_documentation_found 代表该问题在文档库中未命中结果，作为空结果正常返回
             if exc.code == 404:
                 try:
@@ -840,7 +858,6 @@ class SearchGateway:
                         return {"codeSnippets": []}
                 except (json.JSONDecodeError, ValueError):
                     pass
-                return {"codeSnippets": []}
             retryable = exc.code in (402, 408, 429, 432) or 500 <= exc.code <= 599 or ((exc.code in (403, 432)) and self._is_quota_message(body)) or self._is_quota_message(body)
             message = f"HTTP {exc.code}: quota exhausted" if (exc.code in (402, 432) or (exc.code == 403 and retryable) or self._is_quota_message(body)) else f"HTTP {exc.code}"
             raise SearchError(message, retryable=retryable, status=exc.code) from exc
@@ -964,8 +981,8 @@ class ExtractGateway(SearchGateway):
             }
             if truncated:
                 item["paging_hint"] = (
-                    f"提示：页面正文过长已截断（当前显示前 {max_characters} 字符，全文共 {total_chars} 字符）。"
-                    f"完整全文已落盘保存，你可以直接使用 read_file 工具分页翻阅该文件：{cache_abs_path}"
+                    f"提示：页面正文已截断（当前显示前 {max_characters} 字符，缓存共 {total_chars} 字符）。"
+                    f"缓存正文已落盘保存，你可以直接使用 read_file 工具分页翻阅该文件：{cache_abs_path}"
                 )
             return item
         except Exception:
@@ -1160,8 +1177,8 @@ class ExtractGateway(SearchGateway):
                         provider=provider_id,
                     )
                     cache_abs_path = str(written_md.resolve()).replace("\\", "/") if written_md else ""
-                    total_chars = len(str(raw_content))
-                    truncated = bool(result.get("truncated", False)) or total_chars > max_characters
+                    total_chars = min(len(str(raw_content)), self.max_cache_item_characters) if written_md else len(str(raw_content))
+                    truncated = bool(result.get("truncated", False)) or len(str(raw_content)) > total_chars or total_chars > max_characters
                     item: dict[str, Any] = {
                         "url": url,
                         "title": result.get("title", ""),
@@ -1174,8 +1191,8 @@ class ExtractGateway(SearchGateway):
                     }
                     if truncated and cache_abs_path:
                         item["paging_hint"] = (
-                            f"提示：页面正文过长已截断（当前显示前 {max_characters} 字符，全文共 {total_chars} 字符）。"
-                            f"完整全文已落盘保存，你可以直接使用 read_file 工具分页翻阅该文件：{cache_abs_path}"
+                            f"提示：页面正文已截断（当前显示前 {max_characters} 字符，缓存共 {total_chars} 字符）。"
+                            f"缓存正文已落盘保存，你可以直接使用 read_file 工具分页翻阅该文件：{cache_abs_path}"
                         )
                     extracted.append(item)
             pending -= returned_urls
@@ -1204,7 +1221,7 @@ class ExtractGateway(SearchGateway):
     def _extract(self, provider: dict[str, Any], urls: list[str], depth: str, max_characters: int, api_key: str, timeout: Any) -> list[dict[str, Any]]:
         provider_id = provider["id"]
         endpoint = provider.get("endpoint")
-        self._validate_endpoint(provider_id, endpoint)
+        self._validate_endpoint(provider_id, endpoint, provider.get("allowed_hosts"))
         engine_type = provider.get("type") or provider_id
         if engine_type in ("tavily-search", "tavily"):
             data = self._post(endpoint, {"Authorization": f"Bearer {api_key}"}, {"urls": urls, "extract_depth": depth, "format": "markdown"}, timeout)
@@ -1281,9 +1298,9 @@ class ExtractGateway(SearchGateway):
     def _validate_public_url(url: str) -> None:
         parsed = urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
-            raise SearchError(f"URL is not a permitted public HTTP(S) URL: {url}", retryable=False)
+            raise SearchError("URL is not a permitted public HTTP(S) URL", retryable=False)
         if parsed.port not in (None, 80, 443):
-            raise SearchError(f"URL uses a non-standard port: {url}", retryable=False)
+            raise SearchError("URL uses a non-standard port", retryable=False)
         try:
             addresses = {record[4][0] for record in socket.getaddrinfo(parsed.hostname, None, type=socket.SOCK_STREAM)}
         except socket.gaierror as exc:

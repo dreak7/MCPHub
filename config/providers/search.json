@@ -10,35 +10,40 @@
           "enabled": true,
           "priority": 10,
           "api_key_env": "EXA_API_KEY",
-          "endpoint": "https://api.exa.ai/search"
+          "endpoint": "https://api.exa.ai/search",
+          "allowed_hosts": ["api.exa.ai"]
         },
         {
           "id": "anysearch",
           "enabled": true,
           "priority": 20,
           "api_key_env": "ANYSEARCH_API_KEY",
-          "endpoint": "https://api.anysearch.com/v1/search"
+          "endpoint": "https://api.anysearch.com/v1/search",
+          "allowed_hosts": ["api.anysearch.com"]
         },
         {
           "id": "tavily-search",
           "enabled": true,
           "priority": 30,
           "api_key_env": "TAVILY_API_KEY",
-          "endpoint": "https://api.tavily.com/search"
+          "endpoint": "https://api.tavily.com/search",
+          "allowed_hosts": ["api.tavily.com"]
         },
         {
           "id": "jina",
           "enabled": true,
           "priority": 40,
           "api_key_env": "JINA_API_KEY",
-          "endpoint": "https://s.jina.ai"
+          "endpoint": "https://s.jina.ai",
+          "allowed_hosts": ["s.jina.ai"]
         },
         {
           "id": "bocha-search",
           "enabled": true,
           "priority": 50,
           "api_key_env": "BOCHA_API_KEY",
-          "endpoint": "https://api.bocha.cn/v1/web-search"
+          "endpoint": "https://api.bocha.cn/v1/web-search",
+          "allowed_hosts": ["api.bocha.cn"]
         }
       ]
     },
@@ -55,28 +60,32 @@
           "enabled": true,
           "priority": 10,
           "api_key_env": "EXA_API_KEY",
-          "endpoint": "https://api.exa.ai/contents"
+          "endpoint": "https://api.exa.ai/contents",
+          "allowed_hosts": ["api.exa.ai"]
         },
         {
           "id": "anysearch",
           "enabled": true,
           "priority": 20,
           "api_key_env": "ANYSEARCH_API_KEY",
-          "endpoint": "https://api.anysearch.com/v1/extract"
+          "endpoint": "https://api.anysearch.com/v1/extract",
+          "allowed_hosts": ["api.anysearch.com"]
         },
         {
           "id": "tavily-search",
           "enabled": true,
           "priority": 30,
           "api_key_env": "TAVILY_API_KEY",
-          "endpoint": "https://api.tavily.com/extract"
+          "endpoint": "https://api.tavily.com/extract",
+          "allowed_hosts": ["api.tavily.com"]
         },
         {
           "id": "jina",
           "enabled": true,
           "priority": 40,
           "api_key_env": "JINA_API_KEY",
-          "endpoint": "https://r.jina.ai"
+          "endpoint": "https://r.jina.ai",
+          "allowed_hosts": ["r.jina.ai"]
         }
       ]
     }

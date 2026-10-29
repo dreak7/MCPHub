@@ -11,9 +11,10 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox
+from pathlib import Path
+from tkinter import messagebox, ttk
+from typing import Any
 
 # 启用 Windows 高分屏 (High DPI) 清晰度渲染，避免界面模糊
 try:
@@ -82,6 +83,8 @@ def scan_existing_capabilities() -> dict[str, tuple[Path, dict]]:
 def save_api_key_to_dotenv(key_name: str, key_value: str) -> None:
     if not key_name or not key_value:
         return
+
+    key_value = "".join(key_value.splitlines())
 
     if not ENV_PATH.exists():
         if ENV_EXAMPLE_PATH.exists():
@@ -365,6 +368,8 @@ class ConfigGuiApp:
             messagebox.showerror("格式错误", f"解析通信接口地址失败：{exc}")
             return
 
+        env_key_name = self.env_name_var.get().strip()
+        enabled = self.enabled_var.get()
         if not env_key_name or not re.match(r"^[A-Z_][A-Z0-9_]*$", env_key_name):
             messagebox.showerror("输入错误", "环境变量名只能由大写英文字母、数字和下划线组成，且不能以数字开头（例如 TAVILY_API_KEY）！")
             return
@@ -402,7 +407,8 @@ class ConfigGuiApp:
             "enabled": enabled,
             "priority": priority,
             "api_key_env": env_key_name,
-            "endpoint": endpoint
+            "endpoint": endpoint,
+            "allowed_hosts": [hostname]
         }
 
         # 读取并更新目标 JSON 文件
