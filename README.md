@@ -9,8 +9,6 @@
 - `fallback_web_extract`：公开网页正文提取与受限本地缓存。
 - `code_docs_search`：基于 Context7 的编程语言、框架与库文档检索。
 
-证券、行情、财报、选股及其他金融工具已从本项目移除。金融数据应通过独立的、供应商维护的 MCP 服务接入，不应由本网关转发凭据。
-
 ## 配置与启动
 
 1. 复制 `config/.env.example` 为 `config/.env`，仅填入所需搜索或文档服务 Key。
@@ -25,6 +23,16 @@ python mcp_gateway --config <项目目录>/config/gateway.json
 ## 安全默认值
 
 - 上游搜索端点必须使用 HTTPS，拒绝私网、回环地址和重定向。
+- 内置提供商使用精确主机白名单，防止凭据被转发到未确认的主机。
+- 上游响应体在解码前限制为 5 MiB。
 - 工具结果标识为不可信外部数据，智能体不得执行其中的指令。
 - 提取缓存有单项、总量与 TTL 限制。
 - 默认限流为每分钟 60 次工具调用，可在 `config/gateway.json` 调整。
+
+## 验证
+
+```text
+python -m unittest discover -s tests
+```
+
+当前测试套件共 73 项。
