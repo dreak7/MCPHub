@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -200,22 +201,46 @@ def view_service_logs(paths: dict[str, Path]) -> None:
 
 
 # =========================================================================
-# 【功能块：运行 Hermes MCP 连通性测试】
-# - 输入：无
-# - 功能：调用 hermes mcp test MCPHub 测试与客户端通信握手
-# - 输出：命令输出与故障排查建议
+# 【功能块：运行当前项目 MCP 连通性测试】
+# - 输入：paths (dict[str, Path]): 项目关键路径
+# - 功能：直接启动当前项目的 MCP 网关并执行 initialize/tools/list 握手
+# - 输出：当前项目连接状态与实际工具清单
 # =========================================================================
-def run_hermes_test() -> None:
+def run_hermes_test(paths: dict[str, Path]) -> None:
     clear_screen()
-    print("正在执行 Hermes MCP 连通性测试...")
+    print("正在执行当前 MCPHub 服务连通性测试...")
     print("=" * 70)
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ]
+    payload = "\n".join(json.dumps(request) for request in requests) + "\n"
     try:
-        res = subprocess.run(["hermes", "mcp", "test", "MCPHub"], check=False)
+        res = subprocess.run(
+            [
+                sys.executable,
+                str(paths["root"] / "mcp_gateway"),
+                "--config",
+                str(paths["config_dir"] / "gateway.json"),
+            ],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            cwd=str(paths["root"]),
+        )
         if res.returncode != 0:
-            print("\n提示：若提示命令未找到，请确认已在终端安装并配置好 Hermes CLI。")
-    except FileNotFoundError:
-        print("未检测到 'hermes' 命令。请确认已在终端全局安装 Hermes CLI。")
-    except Exception as exc:
+            print(f"当前 MCPHub 服务启动失败：{res.stderr.strip()}")
+        else:
+            responses = [json.loads(line) for line in res.stdout.splitlines() if line.strip()]
+            tools_response = next(response for response in responses if response.get("id") == 2)
+            tools = tools_response["result"]["tools"]
+            print(f"✓ 当前项目连接成功：{paths['root']}")
+            print(f"✓ Tools discovered: {len(tools)}")
+            for tool in tools:
+                print(f"  {tool.get('name', '<unnamed>')}")
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, StopIteration) as exc:
         print(f"测试执行异常: {exc}")
     print("=" * 70)
     press_enter_to_continue()
@@ -266,7 +291,7 @@ def main() -> None:
         print()
         print(f"{pad}  [5] 查看服务运行日志 (logs/gateway.log)")
         print()
-        print(f"{pad}  [6] 运行 Hermes MCP 连通性测试 (hermes mcp test MCPHub)")
+        print(f"{pad}  [6] 运行当前 MCPHub 服务连通性测试 (initialize + tools/list)")
         print()
         print(f"{pad}  [0] 退出控制台")
         print()
@@ -290,7 +315,7 @@ def main() -> None:
         elif choice == "5":
             view_service_logs(paths)
         elif choice == "6":
-            run_hermes_test()
+            run_hermes_test(paths)
         elif choice == "0":
             clear_screen()
             print()

@@ -35,4 +35,4 @@ python mcp_gateway --config <项目目录>/config/gateway.json
 python -m unittest discover -s tests
 ```
 
-当前测试套件共 73 项。
+当前测试套件共 74 项。

@@ -1017,6 +1017,29 @@ class AuditV141RemediationTest(unittest.TestCase):
         with patch("builtins.input", return_value="0"), patch("os.system"):
             main()
 
+    def test_console_connectivity_checks_current_project(self):
+        """连通性检查必须直连当前项目，而非 Hermes 全局 MCPHub 配置。"""
+        import io
+        from mcp_gateway.console import _get_project_paths, run_hermes_test
+
+        paths = _get_project_paths()
+        responses = "\n".join([
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "fallback_web_search"}]}}),
+        ])
+        completed = unittest.mock.Mock(returncode=0, stdout=responses, stderr="")
+        with patch("mcp_gateway.console.subprocess.run", return_value=completed) as run, \
+             patch("sys.stdout", new=io.StringIO()) as output, \
+             patch("builtins.input", return_value=""), patch("os.system"):
+            run_hermes_test(paths)
+
+        command = run.call_args.args[0]
+        self.assertTrue(Path(command[0]).name.lower().startswith("python"))
+        self.assertEqual(str(paths["root"] / "mcp_gateway"), command[1])
+        self.assertIn("--config", command)
+        self.assertIn("Tools discovered: 1", output.getvalue())
+        self.assertIn("fallback_web_search", output.getvalue())
+
     # =========================================================================
     # 【功能块：验证服务提供商在配置文件与网关中的执行优先级排序】
     # - 输入：config/providers/search.json 配置文件内容，模拟全引擎就绪的环境变量
